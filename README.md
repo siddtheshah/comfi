@@ -14,6 +14,25 @@ a pool, which has rules on its funding cycle and what is needed to remain a "fun
 
 The authorized spenders may take from the pool up to their spend limit on a given cycle. They are required to give justification by default, which can be scanned by all the members of the community. The community can then vote to raise or lower their spend limit by proposal, after seeing the spenders history of transactions with the justifications.
 
+## Prototype workspace
+
+The first implementation slice is organized as a small workspace:
+
+- `apps/web` — responsive member workspace for viewing pools, activity, proposals, and payment requests.
+- `services/sponsor-api` — bounded, short-lived sponsorship and enrollment quote service.
+- `programs/comfi` — Anchor program scaffold that guards the pool USDC vault and governance flows.
+
+Run the web prototype with Node 22+:
+
+```powershell
+npm install
+npm run dev
+```
+
+Run validation with `npm run typecheck`, `npm run test`, and `npm run build`.
+The Solana program additionally needs the Rust, Solana, and Anchor toolchains;
+see `programs/comfi/README.md` before attempting a deployment.
+
 ## Community Vigilance
 
 As all transactions are persisted to blockchain, all transactions are visible. However, it is still the duty of the community to act on this information, and communicate properly to each other to ensure that

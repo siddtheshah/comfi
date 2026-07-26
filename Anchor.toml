@@ -1,0 +1,18 @@
+[toolchain]
+anchor_version = "1.1.2"
+solana_version = "3.1.10"
+package_manager = "npm"
+
+[features]
+resolution = true
+
+[programs.localnet]
+comfi = "bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["programs/comfi"]
+types = "target/types"

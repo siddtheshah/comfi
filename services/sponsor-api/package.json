@@ -1,0 +1,19 @@
+{
+  "name": "@comfi/sponsor-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Quote issuance boundary for ComFi's Solana sponsorship flows.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

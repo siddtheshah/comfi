@@ -1,0 +1,4 @@
+interface:
+  display_name: "ComFi Solana Validation"
+  short_description: "Build and verify ComFi on localnet"
+  default_prompt: "Use $comfi-solana-validation to build and verify the ComFi Solana program in WSL."

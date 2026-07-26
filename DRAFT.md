@@ -336,47 +336,6 @@ The frontend never makes a direct SPL-token transfer from a pool vault. Every
 withdrawal must pass through the Pool program and produce a visible history
 entry.
 
-## Minimal ComFi service
-
-The app can be mostly client + Privy + Solana. A minimal server-side service is
-still needed for a normie-friendly fee experience and is funded by enrollment
-fees plus bounded, onchain action charges from pools.
-
-The service is a **SOL fee sponsor**, not a custodian:
-
-1. The client builds a transaction for a permitted ComFi program instruction.
-2. The user signs it with their Privy wallet.
-3. The client sends it to a sponsor endpoint.
-4. The endpoint authenticates the request, verifies the exact program,
-   instruction, accounts, and cost policy, then co-signs as the SOL fee payer.
-5. The transaction is sent to Solana.
-
-The sponsor's key pays SOL fees only. It must not be able to move user or pool
-USDC outside the onchain program rules. Never expose its key to the client.
-
-Use the sponsor service to enforce per-user and per-action limits, simulate
-transactions before sponsoring them, and reject arbitrary instructions. It must
-validate that an enrollment request is backed by the pool's onchain member cap
-and unused sponsored-enrollment allocation. For ordinary actions, it must issue
-only short-lived quotes that the Pool program can validate against the member's
-remaining action allowance. The service should track its SOL float, reconcile
-completed enrollment and action charges with chain events, and halt sponsorship
-when a pool or member has exhausted the applicable allowance.
-
-## Optional offchain services
-
-Add these only when useful; they must not become the source of truth for money
-or permissions. The encrypted profile/key-package store is required when a
-pool uses private aliases:
-
-- Event indexer for fast activity feeds and reporting.
-- Encrypted profile, alias-envelope, and group-key-package storage.
-- Encrypted document / receipt storage.
-- Notification delivery.
-- Sponsor request rate limits and fraud monitoring.
-
-Solana remains authoritative for pool balances, membership, voting outcomes,
-and spend limits.
 
 ## Security and rollout
 

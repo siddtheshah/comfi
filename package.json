@@ -1,0 +1,19 @@
+{
+  "name": "comfi",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Community finance workspace",
+  "workspaces": [
+    "apps/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@comfi/web",
+    "build": "npm run build --workspace=@comfi/web",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspace=@comfi/web && npm run check --workspace=@comfi/sponsor-api"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
