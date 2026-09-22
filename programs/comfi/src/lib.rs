@@ -146,6 +146,8 @@ pub enum ComfiError {
     NotSpender,
     #[msg("Proposal is not open.")]
     ProposalNotOpen,
+    #[msg("Voting has not started yet.")]
+    VotingNotStarted,
     #[msg("Voting has closed.")]
     VotingClosed,
     #[msg("Voting deadline has not passed.")]

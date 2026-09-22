@@ -906,6 +906,7 @@ export function App() {
                       <span style={{ color: '#3fb950' }}>{p.yesVotes} Y</span> / <span style={{ color: '#f85149' }}>{p.noVotes} N</span>
                     </td>
                     <td>
+                      {p.state === 'Queued' && <span className="badge purple" title={`Enqueued to be votable in cycle ${p.votingCycle}`}>Enqueued (Cycle {p.votingCycle})</span>}
                       {p.state === 'Open' && <span className="badge blue">Open</span>}
                       {p.state === 'Executable' && <span className="badge green">Executable</span>}
                       {p.state === 'Executed' && <span className="badge orange">Executed</span>}
@@ -913,6 +914,11 @@ export function App() {
                     </td>
                     <td>
                       <div className="form-row">
+                        {p.state === 'Queued' && (
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic', marginRight: '8px' }}>
+                            Opens for vote in Cycle {p.votingCycle}
+                          </span>
+                        )}
                         {p.state === 'Open' && (
                           <>
                             <button

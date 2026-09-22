@@ -251,7 +251,9 @@ export async function getPoolDetails(poolAddress: string): Promise<{
     }
 
     let state: ProposalInfo['state'] = 'Open'
-    if (p.state.executable) state = 'Executable'
+    if (p.state.queued) state = 'Queued'
+    else if (p.state.open) state = 'Open'
+    else if (p.state.executable) state = 'Executable'
     else if (p.state.executed) state = 'Executed'
     else if (p.state.rejected) state = 'Rejected'
 
@@ -264,6 +266,7 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       actionDetails,
       yesVotes: Number(p.yesVotes),
       noVotes: Number(p.noVotes),
+      votingCycle: Number(p.votingCycle ?? 0),
       deadline: Number(p.deadline),
       executableAfter: Number(p.executableAfter),
       state,
@@ -559,12 +562,36 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const { poolAddress } = payload
       if (!poolAddress) throw new Error('Missing poolAddress for roll_cycle')
       const poolPubkey = new PublicKey(poolAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const currentCycle = new BN(poolAccount.currentCycle.toString())
+      const nextCycle = currentCycle.addn(1)
+
+      const poolProposals = await program.account.proposal.all([
+        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+      ])
+      const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
+      for (const item of poolProposals) {
+        const p = item.account
+        if (p.votingCycle && p.votingCycle.eq(currentCycle)) {
+          remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
+          if (p.action.setSpenderLimit) {
+            const targetMember = p.action.setSpenderLimit.member
+            remainingAccounts.push({ pubkey: targetMember, isWritable: true, isSigner: false })
+            const [spenderCyclePda] = PublicKey.findProgramAddressSync(
+              [Buffer.from('cycle'), poolPubkey.toBuffer(), targetMember.toBuffer(), nextCycle.toArrayLike(Buffer, 'le', 8)],
+              programId
+            )
+            remainingAccounts.push({ pubkey: spenderCyclePda, isWritable: true, isSigner: false })
+          }
+        }
+      }
 
       const tx = await program.methods
         .rollCycle()
         .accounts({
           pool: poolPubkey,
         })
+        .remainingAccounts(remainingAccounts)
         .rpc()
 
       return { tx, pool: poolAddress }
@@ -574,12 +601,36 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const { poolAddress } = payload
       if (!poolAddress) throw new Error('Missing poolAddress for test_roll_cycle')
       const poolPubkey = new PublicKey(poolAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const currentCycle = new BN(poolAccount.currentCycle.toString())
+      const nextCycle = currentCycle.addn(1)
+
+      const poolProposals = await program.account.proposal.all([
+        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+      ])
+      const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
+      for (const item of poolProposals) {
+        const p = item.account
+        if (p.votingCycle && p.votingCycle.eq(currentCycle)) {
+          remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
+          if (p.action.setSpenderLimit) {
+            const targetMember = p.action.setSpenderLimit.member
+            remainingAccounts.push({ pubkey: targetMember, isWritable: true, isSigner: false })
+            const [spenderCyclePda] = PublicKey.findProgramAddressSync(
+              [Buffer.from('cycle'), poolPubkey.toBuffer(), targetMember.toBuffer(), nextCycle.toArrayLike(Buffer, 'le', 8)],
+              programId
+            )
+            remainingAccounts.push({ pubkey: spenderCyclePda, isWritable: true, isSigner: false })
+          }
+        }
+      }
 
       const tx = await program.methods
         .testRollCycle()
         .accounts({
           pool: poolPubkey,
         })
+        .remainingAccounts(remainingAccounts)
         .rpc()
 
       return { tx, pool: poolAddress }
@@ -590,12 +641,36 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!poolAddress) throw new Error('Missing poolAddress for test_advance_cycles')
       if (typeof count !== 'number' || count <= 0) throw new Error(`Invalid count for test_advance_cycles: ${count}`)
       const poolPubkey = new PublicKey(poolAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const currentCycle = new BN(poolAccount.currentCycle.toString())
+      const nextCycle = currentCycle.addn(count)
+
+      const poolProposals = await program.account.proposal.all([
+        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+      ])
+      const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
+      for (const item of poolProposals) {
+        const p = item.account
+        if (p.votingCycle && p.votingCycle.eq(currentCycle)) {
+          remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
+          if (p.action.setSpenderLimit) {
+            const targetMember = p.action.setSpenderLimit.member
+            remainingAccounts.push({ pubkey: targetMember, isWritable: true, isSigner: false })
+            const [spenderCyclePda] = PublicKey.findProgramAddressSync(
+              [Buffer.from('cycle'), poolPubkey.toBuffer(), targetMember.toBuffer(), nextCycle.toArrayLike(Buffer, 'le', 8)],
+              programId
+            )
+            remainingAccounts.push({ pubkey: spenderCyclePda, isWritable: true, isSigner: false })
+          }
+        }
+      }
 
       const tx = await program.methods
         .testAdvanceCycles(new BN(count))
         .accounts({
           pool: poolPubkey,
         })
+        .remainingAccounts(remainingAccounts)
         .rpc()
 
       return { tx, pool: poolAddress, count }

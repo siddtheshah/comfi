@@ -69,9 +69,10 @@ export interface ProposalInfo {
   actionDetails: string
   yesVotes: number
   noVotes: number
+  votingCycle: number
   deadline: number
   executableAfter: number
-  state: 'Open' | 'Executable' | 'Executed' | 'Rejected'
+  state: 'Queued' | 'Open' | 'Executable' | 'Executed' | 'Rejected'
 }
 
 export interface WithdrawalRequestInfo {

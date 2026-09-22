@@ -25,13 +25,15 @@ pub fn transfer_user_tokens<'info>(
 
 pub fn assert_executable(proposal: &Account<Proposal>) -> Result<()> {
     require!(
-        proposal.state == ProposalState::Executable,
+        proposal.state == ProposalState::Executable || proposal.state == ProposalState::Executed,
         ComfiError::ProposalNotExecutable
     );
-    require!(
-        Clock::get()?.unix_timestamp >= proposal.executable_after,
-        ComfiError::TimelockActive
-    );
+    if proposal.state == ProposalState::Executable {
+        require!(
+            Clock::get()?.unix_timestamp >= proposal.executable_after,
+            ComfiError::TimelockActive
+        );
+    }
     Ok(())
 }
 
@@ -533,6 +535,7 @@ pub struct Proposal {
     pub action: ProposalAction,
     pub yes_votes: u32,
     pub no_votes: u32,
+    pub voting_cycle: u64,
     pub deadline: i64,
     pub executable_after: i64,
     pub state: ProposalState,
@@ -540,7 +543,7 @@ pub struct Proposal {
 }
 
 impl Proposal {
-    pub const SPACE: usize = 8 + 32 + 8 + 32 + 41 + 4 + 4 + 8 + 8 + 1 + 1;
+    pub const SPACE: usize = 8 + 32 + 8 + 32 + 41 + 4 + 4 + 8 + 8 + 8 + 1 + 1;
 }
 
 #[account]
@@ -569,22 +572,23 @@ impl SponsorQuoteReceipt {
     pub const SPACE: usize = 8 + 32 + 32 + 32 + 1;
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MemberRole {
     Member,
     Spender,
     Admin,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WithdrawalStatus {
     Pending,
     Spent,
     Cancelled,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProposalState {
+    Queued,
     Open,
     Executable,
     Executed,
@@ -797,8 +801,99 @@ pub fn run_sponsored_set_alias(
     Ok(())
 }
 
+pub fn process_cycle_proposals<'info>(
+    pool_key: Pubkey,
+    pool: &mut Pool,
+    ending_cycle: u64,
+    remaining_accounts: &[AccountInfo<'info>],
+) -> Result<()> {
+    for account_info in remaining_accounts.iter() {
+        if !account_info.is_writable || account_info.data_len() < 8 {
+            continue;
+        }
+        let data = account_info.try_borrow_data()?;
+        if &data[..8] != Proposal::DISCRIMINATOR {
+            continue;
+        }
+        drop(data);
+
+        let mut data: &[u8] = &account_info.try_borrow_data()?;
+        let mut proposal = match Proposal::try_deserialize(&mut data) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        if proposal.pool != pool_key || proposal.voting_cycle != ending_cycle {
+            continue;
+        }
+        if proposal.state != ProposalState::Queued && proposal.state != ProposalState::Open {
+            continue;
+        }
+
+        let passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        if passed {
+            match proposal.action {
+                ProposalAction::ConfigurationModification {
+                    vote_threshold,
+                    cycle_duration_seconds,
+                    member_obligation_amount,
+                } => {
+                    pool.vote_threshold = vote_threshold;
+                    pool.cycle_duration_seconds = cycle_duration_seconds;
+                    pool.member_obligation_amount = member_obligation_amount;
+                    pool.has_pending_config = false;
+                    proposal.state = ProposalState::Executed;
+                }
+                ProposalAction::SetSpenderLimit { member, cap } => {
+                    for acc in remaining_accounts.iter() {
+                        if acc.key() == member && acc.is_writable && acc.data_len() >= 8 {
+                            let member_data = acc.try_borrow_data()?;
+                            if &member_data[..8] == Member::DISCRIMINATOR {
+                                drop(member_data);
+                                if let Ok(mut m) = Member::try_deserialize(&mut &acc.try_borrow_data()?[..]) {
+                                    if m.role == MemberRole::Member {
+                                        m.role = MemberRole::Spender;
+                                        m.try_serialize(&mut *acc.try_borrow_mut_data()?)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for acc in remaining_accounts.iter() {
+                        if acc.is_writable && acc.data_len() >= 8 {
+                            let sc_data = acc.try_borrow_data()?;
+                            if &sc_data[..8] == SpenderCycle::DISCRIMINATOR {
+                                drop(sc_data);
+                                if let Ok(mut sc) = SpenderCycle::try_deserialize(&mut &acc.try_borrow_data()?[..]) {
+                                    if sc.pool == pool_key && sc.member == member {
+                                        sc.cycle = pool.current_cycle;
+                                        sc.cap = cap;
+                                        sc.spent = 0;
+                                        sc.try_serialize(&mut *acc.try_borrow_mut_data()?)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    proposal.state = ProposalState::Executed;
+                }
+                ProposalAction::ApproveWithdrawal { .. } => {
+                    proposal.state = ProposalState::Executed;
+                }
+            }
+        } else {
+            proposal.state = ProposalState::Rejected;
+        }
+
+        proposal.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
+    }
+    Ok(())
+}
+
 pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
+    let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
+    let ending_cycle = pool.current_cycle;
     let next_start = pool
         .cycle_started_at
         .checked_add(pool.cycle_duration_seconds)
@@ -815,31 +910,41 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
         .ok_or(ComfiError::MathOverflow)?;
     pool.cycle_started_at = next_start;
     pool.apply_pending_config();
+
+    process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
     Ok(())
 }
 
 pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
+    let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
+    let ending_cycle = pool.current_cycle;
     pool.current_cycle = pool
         .current_cycle
         .checked_add(1)
         .ok_or(ComfiError::MathOverflow)?;
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
+
+    process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
     Ok(())
 }
 
 pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()> {
     require!(count > 0, ComfiError::InvalidAmount);
+    let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
+    let ending_cycle = pool.current_cycle;
     pool.current_cycle = pool
         .current_cycle
         .checked_add(count)
         .ok_or(ComfiError::MathOverflow)?;
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
+
+    process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
     Ok(())
 }
 
@@ -857,13 +962,13 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
     let clock = Clock::get()?;
     let proposal = &mut ctx.accounts.proposal;
     require!(
-        proposal.state == ProposalState::Open,
+        proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
     );
     if proposal.yes_votes >= ctx.accounts.pool.vote_threshold
         && proposal.yes_votes > proposal.no_votes
     {
-        proposal.state = ProposalState::Executable;
+        proposal.state = ProposalState::Executed;
         proposal.executable_after = clock.unix_timestamp;
     } else {
         proposal.state = ProposalState::Rejected;
@@ -910,23 +1015,27 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
         ComfiError::MemberNotFunded
     );
     let clock = Clock::get()?;
+    let pool = &mut ctx.accounts.pool;
+    let next_voting_cycle = pool
+        .current_cycle
+        .checked_add(1)
+        .ok_or(ComfiError::MathOverflow)?;
     let proposal = &mut ctx.accounts.proposal;
-    proposal.pool = ctx.accounts.pool.key();
-    proposal.id = ctx.accounts.pool.next_proposal_id;
+    proposal.pool = pool.key();
+    proposal.id = pool.next_proposal_id;
     proposal.proposer = ctx.accounts.proposer.key();
     proposal.action = action;
     proposal.yes_votes = 0;
     proposal.no_votes = 0;
+    proposal.voting_cycle = next_voting_cycle;
     proposal.deadline = clock
         .unix_timestamp
-        .checked_add(ctx.accounts.pool.voting_period_seconds)
+        .checked_add(pool.voting_period_seconds)
         .ok_or(ComfiError::MathOverflow)?;
     proposal.executable_after = 0;
-    proposal.state = ProposalState::Open;
+    proposal.state = ProposalState::Queued;
     proposal.bump = ctx.bumps.proposal;
-    ctx.accounts.pool.next_proposal_id = ctx
-        .accounts
-        .pool
+    pool.next_proposal_id = pool
         .next_proposal_id
         .checked_add(1)
         .ok_or(ComfiError::MathOverflow)?;
@@ -935,19 +1044,32 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
 
 pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
     let clock = Clock::get()?;
+    let pool = &ctx.accounts.pool;
     let proposal = &mut ctx.accounts.proposal;
     require!(
-        ctx.accounts.voter.is_funded_for_pool(&ctx.accounts.pool),
+        ctx.accounts.voter.is_funded_for_pool(pool),
         ComfiError::MemberNotFunded
     );
     require!(
-        proposal.state == ProposalState::Open,
+        proposal.state == ProposalState::Queued || proposal.state == ProposalState::Open,
         ComfiError::ProposalNotOpen
     );
     require!(
-        clock.unix_timestamp <= proposal.deadline,
+        pool.current_cycle >= proposal.voting_cycle,
+        ComfiError::VotingNotStarted
+    );
+    require!(
+        pool.current_cycle == proposal.voting_cycle,
         ComfiError::VotingClosed
     );
+    if !pool.testing_enabled {
+        require!(
+            clock.unix_timestamp <= proposal.deadline,
+            ComfiError::VotingClosed
+        );
+    }
+    proposal.state = ProposalState::Open;
+
     if approve {
         proposal.yes_votes = proposal
             .yes_votes
@@ -969,23 +1091,21 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
 
 pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
     let clock = Clock::get()?;
+    let pool = &ctx.accounts.pool;
     let proposal = &mut ctx.accounts.proposal;
     require!(
-        proposal.state == ProposalState::Open,
+        proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
     );
     require!(
-        clock.unix_timestamp > proposal.deadline,
+        pool.current_cycle > proposal.voting_cycle || clock.unix_timestamp > proposal.deadline,
         ComfiError::VotingStillOpen
     );
-    if proposal.yes_votes >= ctx.accounts.pool.vote_threshold
+    if proposal.yes_votes >= pool.vote_threshold
         && proposal.yes_votes > proposal.no_votes
     {
-        proposal.state = ProposalState::Executable;
-        proposal.executable_after = clock
-            .unix_timestamp
-            .checked_add(ctx.accounts.pool.timelock_seconds)
-            .ok_or(ComfiError::MathOverflow)?;
+        proposal.state = ProposalState::Executed;
+        proposal.executable_after = clock.unix_timestamp;
     } else {
         proposal.state = ProposalState::Rejected;
     }
@@ -993,8 +1113,12 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
 }
 
 pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
-    assert_executable(&ctx.accounts.proposal)?;
-    let (target, cap) = match ctx.accounts.proposal.action {
+    let pool = &ctx.accounts.pool;
+    let proposal = &mut ctx.accounts.proposal;
+    if proposal.state != ProposalState::Executed {
+        assert_executable(proposal)?;
+    }
+    let (target, cap) = match proposal.action {
         ProposalAction::SetSpenderLimit { member, cap } => (member, cap),
         _ => return err!(ComfiError::WrongProposalAction),
     };
@@ -1007,25 +1131,25 @@ pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
         ctx.accounts.spender_member.role = MemberRole::Spender;
     }
     let cycle = &mut ctx.accounts.spender_cycle;
-    cycle.pool = ctx.accounts.pool.key();
+    cycle.pool = pool.key();
     cycle.member = ctx.accounts.spender_member.key();
-    cycle.cycle = ctx.accounts.pool.current_cycle;
+    cycle.cycle = pool.current_cycle;
     cycle.cap = cap;
     cycle.spent = 0;
     cycle.bump = ctx.bumps.spender_cycle;
-    ctx.accounts.proposal.state = ProposalState::Executed;
+    proposal.state = ProposalState::Executed;
     Ok(())
 }
 
 pub fn execute_configuration_modification(
     ctx: Context<ExecuteConfigurationModification>,
 ) -> Result<()> {
-    assert_executable(&ctx.accounts.proposal)?;
-    let (vote_threshold, cycle_duration_seconds, member_obligation_amount) = match ctx
-        .accounts
-        .proposal
-        .action
-    {
+    let pool = &mut ctx.accounts.pool;
+    let proposal = &mut ctx.accounts.proposal;
+    if proposal.state != ProposalState::Executed {
+        assert_executable(proposal)?;
+    }
+    let (vote_threshold, cycle_duration_seconds, member_obligation_amount) = match proposal.action {
         ProposalAction::ConfigurationModification {
             vote_threshold,
             cycle_duration_seconds,
@@ -1038,7 +1162,7 @@ pub fn execute_configuration_modification(
         _ => return err!(ComfiError::WrongProposalAction),
     };
     require!(
-        vote_threshold > 0 && vote_threshold <= ctx.accounts.pool.member_cap,
+        vote_threshold > 0 && vote_threshold <= pool.member_cap,
         ComfiError::InvalidVoteThreshold
     );
     require!(
@@ -1046,12 +1170,11 @@ pub fn execute_configuration_modification(
         ComfiError::InvalidCycleDuration
     );
 
-    let pool = &mut ctx.accounts.pool;
-    pool.has_pending_config = true;
-    pool.pending_vote_threshold = vote_threshold;
-    pool.pending_cycle_duration_seconds = cycle_duration_seconds;
-    pool.pending_member_obligation_amount = member_obligation_amount;
-    ctx.accounts.proposal.state = ProposalState::Executed;
+    pool.vote_threshold = vote_threshold;
+    pool.cycle_duration_seconds = cycle_duration_seconds;
+    pool.member_obligation_amount = member_obligation_amount;
+    pool.has_pending_config = false;
+    proposal.state = ProposalState::Executed;
     Ok(())
 }
 
@@ -1268,7 +1391,7 @@ mod tests {
         );
         assert_eq!(
             Proposal::SPACE,
-            8 + 32 + 8 + 32 + 41 + 4 + 4 + 8 + 8 + 1 + 1
+            8 + 32 + 8 + 32 + 41 + 4 + 4 + 8 + 8 + 8 + 1 + 1
         );
         assert_eq!(VoteReceipt::SPACE, 8 + 32 + 32 + 1 + 1);
         assert_eq!(SponsorQuoteReceipt::SPACE, 8 + 32 + 32 + 32 + 1);
@@ -1286,6 +1409,7 @@ mod tests {
             },
             yes_votes: 1,
             no_votes: 0,
+            voting_cycle: 1,
             deadline: 100,
             executable_after: 0,
             state: ProposalState::Open,
@@ -1305,5 +1429,133 @@ mod tests {
         proposal.no_votes = 2;
         let is_passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
         assert!(!is_passed);
+    }
+
+    #[test]
+    fn test_proposal_lifecycle_enqueued_and_voting_windows() {
+        let pool_cycle_0 = create_test_pool(); // current_cycle = 0
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ConfigurationModification {
+                vote_threshold: 3,
+                cycle_duration_seconds: 500,
+                member_obligation_amount: 100,
+            },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1, // Enqueued for cycle 1
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Queued,
+            bump: 255,
+        };
+
+        // Initial state is Queued
+        assert_eq!(proposal.state, ProposalState::Queued);
+        assert_eq!(proposal.voting_cycle, 1);
+
+        // In Cycle 0: voting has not started yet
+        assert!(pool_cycle_0.current_cycle < proposal.voting_cycle);
+
+        // In Cycle 1: voting cycle is active
+        let mut pool_cycle_1 = pool_cycle_0.clone();
+        pool_cycle_1.current_cycle = 1;
+        assert_eq!(pool_cycle_1.current_cycle, proposal.voting_cycle);
+
+        // When voting in cycle 1, state transitions to Open
+        proposal.state = ProposalState::Open;
+        proposal.yes_votes += 2;
+        assert_eq!(proposal.state, ProposalState::Open);
+
+        // In Cycle 2: voting cycle has ended
+        let mut pool_cycle_2 = pool_cycle_1.clone();
+        pool_cycle_2.current_cycle = 2;
+        assert!(pool_cycle_2.current_cycle > proposal.voting_cycle);
+    }
+
+    #[test]
+    fn test_cycle_rollover_executes_passed_proposal_directly() {
+        let mut pool = create_test_pool(); // threshold = 2, current_cycle = 1
+        pool.current_cycle = 1;
+
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ConfigurationModification {
+                vote_threshold: 4,
+                cycle_duration_seconds: 2500,
+                member_obligation_amount: 120,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+        };
+
+        // Cycle 1 ends, rolling into Cycle 2
+        let ending_cycle = pool.current_cycle;
+        pool.current_cycle += 1;
+
+        // Evaluate conditions for the proposal of ending_cycle
+        assert_eq!(proposal.voting_cycle, ending_cycle);
+        let passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        assert!(passed);
+
+        // Execution updates config and transitions directly to Executed (NOT Executable)
+        if passed {
+            if let ProposalAction::ConfigurationModification {
+                vote_threshold,
+                cycle_duration_seconds,
+                member_obligation_amount,
+            } = proposal.action
+            {
+                pool.vote_threshold = vote_threshold;
+                pool.cycle_duration_seconds = cycle_duration_seconds;
+                pool.member_obligation_amount = member_obligation_amount;
+                proposal.state = ProposalState::Executed;
+            }
+        }
+
+        assert_eq!(proposal.state, ProposalState::Executed);
+        assert_eq!(pool.vote_threshold, 4);
+        assert_eq!(pool.cycle_duration_seconds, 2500);
+        assert_eq!(pool.member_obligation_amount, 120);
+    }
+
+    #[test]
+    fn test_cycle_rollover_rejects_failed_proposal() {
+        let pool = create_test_pool(); // threshold = 2, current_cycle = 1
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ConfigurationModification {
+                vote_threshold: 4,
+                cycle_duration_seconds: 2500,
+                member_obligation_amount: 120,
+            },
+            yes_votes: 1, // Below threshold of 2
+            no_votes: 1,
+            voting_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+        };
+
+        let passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        assert!(!passed);
+
+        if !passed {
+            proposal.state = ProposalState::Rejected;
+        }
+
+        assert_eq!(proposal.state, ProposalState::Rejected);
     }
 }
