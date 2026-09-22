@@ -109,6 +109,13 @@ test('executeAction escalates on missing required poolAddress parameter for pool
     },
     { message: /Missing poolAddress/ }
   )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_configuration_modification', {})
+    },
+    { message: /Missing proposalAddress/ }
+  )
 })
 
 test('executeAction escalates on invalid wallet names', async () => {

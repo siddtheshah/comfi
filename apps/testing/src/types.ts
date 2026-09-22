@@ -26,6 +26,7 @@ export interface PoolInfo {
   memberCap: number
   memberCount: number
   minimumDeposit: string
+  memberObligationAmount: string
   voteThreshold: number
   votingPeriodSeconds: number
   timelockSeconds: number
@@ -37,6 +38,10 @@ export interface PoolInfo {
   nextRequestId: number
   nextProposalId: number
   testingEnabled: boolean
+  hasPendingConfig: boolean
+  pendingVoteThreshold: number
+  pendingCycleDurationSeconds: number
+  pendingMemberObligationAmount: string
 }
 
 export interface MemberInfo {
@@ -60,7 +65,7 @@ export interface ProposalInfo {
   pool: string
   id: number
   proposer: string
-  actionType: 'SetSpenderLimit' | 'ApproveWithdrawal' | 'Other'
+  actionType: 'SetSpenderLimit' | 'ApproveWithdrawal' | 'ConfigurationModification' | 'Other'
   actionDetails: string
   yesVotes: number
   noVotes: number

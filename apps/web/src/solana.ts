@@ -38,6 +38,7 @@ export type OnChainPool = {
   memberCap: number
   memberCount: number
   minimumDepositAtomic: bigint
+  memberObligationAmountAtomic: bigint
   voteThreshold: number
   votingPeriodSeconds: bigint
   timelockSeconds: bigint
@@ -49,6 +50,10 @@ export type OnChainPool = {
   nextRequestId: bigint
   nextProposalId: bigint
   testingEnabled: boolean
+  hasPendingConfig: boolean
+  pendingVoteThreshold: number
+  pendingCycleDurationSeconds: bigint
+  pendingMemberObligationAmountAtomic: bigint
   balanceUsdc: string
 }
 
@@ -72,17 +77,25 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
   const memberCap = view.getUint32(112, true)
   const memberCount = view.getUint32(116, true)
   const minimumDepositAtomic = view.getBigUint64(120, true)
-  const voteThreshold = view.getUint32(128, true)
-  const votingPeriodSeconds = view.getBigInt64(132, true)
-  const timelockSeconds = view.getBigInt64(140, true)
-  const currentCycle = view.getBigUint64(148, true)
-  const cycleDurationSeconds = view.getBigInt64(156, true)
-  const cycleStartedAt = view.getBigInt64(164, true)
-  const actionAllowancePerCycle = view.getBigUint64(172, true)
-  const maxSponsoredActionCharge = view.getBigUint64(180, true)
-  const nextRequestId = view.getBigUint64(188, true)
-  const nextProposalId = view.getBigUint64(196, true)
-  const testingEnabled = dataBytes.length >= 206 ? view.getUint8(205) === 1 : false
+
+  // Backward-compatible decode if an older 206-byte pool exists
+  const isNewLayout = dataBytes.length >= 235
+  const memberObligationAmountAtomic = isNewLayout ? view.getBigUint64(128, true) : minimumDepositAtomic
+  const voteThreshold = isNewLayout ? view.getUint32(136, true) : view.getUint32(128, true)
+  const votingPeriodSeconds = isNewLayout ? view.getBigInt64(140, true) : view.getBigInt64(132, true)
+  const timelockSeconds = isNewLayout ? view.getBigInt64(148, true) : view.getBigInt64(140, true)
+  const currentCycle = isNewLayout ? view.getBigUint64(156, true) : view.getBigUint64(148, true)
+  const cycleDurationSeconds = isNewLayout ? view.getBigInt64(164, true) : view.getBigInt64(156, true)
+  const cycleStartedAt = isNewLayout ? view.getBigInt64(172, true) : view.getBigInt64(164, true)
+  const actionAllowancePerCycle = isNewLayout ? view.getBigUint64(180, true) : view.getBigUint64(172, true)
+  const maxSponsoredActionCharge = isNewLayout ? view.getBigUint64(188, true) : view.getBigUint64(180, true)
+  const nextRequestId = isNewLayout ? view.getBigUint64(196, true) : view.getBigUint64(188, true)
+  const nextProposalId = isNewLayout ? view.getBigUint64(204, true) : view.getBigUint64(196, true)
+  const testingEnabled = isNewLayout ? view.getUint8(213) === 1 : (dataBytes.length >= 206 ? view.getUint8(205) === 1 : false)
+  const hasPendingConfig = isNewLayout ? view.getUint8(214) === 1 : false
+  const pendingVoteThreshold = isNewLayout ? view.getUint32(215, true) : voteThreshold
+  const pendingCycleDurationSeconds = isNewLayout ? view.getBigInt64(219, true) : cycleDurationSeconds
+  const pendingMemberObligationAmountAtomic = isNewLayout ? view.getBigUint64(227, true) : memberObligationAmountAtomic
 
   return {
     address,
@@ -92,6 +105,7 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
     memberCap,
     memberCount,
     minimumDepositAtomic,
+    memberObligationAmountAtomic,
     voteThreshold,
     votingPeriodSeconds,
     timelockSeconds,
@@ -103,6 +117,10 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
     nextRequestId,
     nextProposalId,
     testingEnabled,
+    hasPendingConfig,
+    pendingVoteThreshold,
+    pendingCycleDurationSeconds,
+    pendingMemberObligationAmountAtomic,
   }
 }
 

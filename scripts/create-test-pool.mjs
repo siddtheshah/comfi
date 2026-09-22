@@ -95,7 +95,7 @@ if (!poolAccount) {
   const [vault] = PublicKey.findProgramAddressSync([pool.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()], associatedTokenProgram);
   const [creatorMember] = PublicKey.findProgramAddressSync([Buffer.from('member'), pool.toBuffer(), creator.publicKey.toBuffer()], programId);
   await program.methods.createPool({
-    memberCap: 24, minimumDeposit: new BN(10n * oneUsdc), initialDeposit: new BN(100n * oneUsdc), enrollmentFee: new BN(1n * oneUsdc),
+    memberCap: 24, minimumDeposit: new BN(10n * oneUsdc), memberObligationAmount: new BN(10n * oneUsdc), initialDeposit: new BN(100n * oneUsdc), enrollmentFee: new BN(1n * oneUsdc),
     voteThreshold: 2, votingPeriodSeconds: new BN(604800), timelockSeconds: new BN(86400), cycleDurationSeconds: new BN(2592000),
     actionAllowancePerCycle: new BN(5n * oneUsdc), maxSponsoredActionCharge: new BN(1n * oneUsdc), creatorAliasHash: Array(32).fill(0), creatorEncryptionPublicKey: Array(32).fill(0),
     testingEnabled: true,

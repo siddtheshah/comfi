@@ -153,6 +153,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
         memberCap: Number(p.memberCap),
         memberCount: Number(p.memberCount),
         minimumDeposit: formatUsdc(p.minimumDeposit.toString()),
+        memberObligationAmount: formatUsdc((p.memberObligationAmount ?? p.minimumDeposit).toString()),
         voteThreshold: Number(p.voteThreshold),
         votingPeriodSeconds: Number(p.votingPeriodSeconds),
         timelockSeconds: Number(p.timelockSeconds),
@@ -164,6 +165,10 @@ export async function getSystemStatus(): Promise<SystemStatus> {
         nextRequestId: Number(p.nextRequestId),
         nextProposalId: Number(p.nextProposalId),
         testingEnabled: Boolean(p.testingEnabled),
+        hasPendingConfig: Boolean(p.hasPendingConfig),
+        pendingVoteThreshold: Number(p.pendingVoteThreshold ?? p.voteThreshold),
+        pendingCycleDurationSeconds: Number(p.pendingCycleDurationSeconds ?? p.cycleDurationSeconds),
+        pendingMemberObligationAmount: formatUsdc((p.pendingMemberObligationAmount ?? p.memberObligationAmount ?? p.minimumDeposit).toString()),
       }
     })
   )
@@ -240,6 +245,9 @@ export async function getPoolDetails(poolAddress: string): Promise<{
     } else if (p.action.approveWithdrawal) {
       actionType = 'ApproveWithdrawal'
       actionDetails = `Request: ${p.action.approveWithdrawal.request.toBase58().slice(0, 8)}…`
+    } else if (p.action.configurationModification) {
+      actionType = 'ConfigurationModification'
+      actionDetails = `Threshold: ${p.action.configurationModification.voteThreshold}, Cycle: ${p.action.configurationModification.cycleDurationSeconds.toString()}s, Obligation: ${formatUsdc(p.action.configurationModification.memberObligationAmount.toString())}`
     }
 
     let state: ProposalInfo['state'] = 'Open'
@@ -374,6 +382,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const {
         memberCap = 24,
         minimumDeposit = 10,
+        memberObligationAmount = payload.memberObligationAmount ?? minimumDeposit ?? 10,
         initialDeposit = 100,
         enrollmentFee = 1,
         voteThreshold = 2,
@@ -412,6 +421,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         .createPool({
           memberCap,
           minimumDeposit: new BN(BigInt(Math.floor(minimumDeposit * 1e6)).toString()),
+          memberObligationAmount: new BN(BigInt(Math.floor(memberObligationAmount * 1e6)).toString()),
           initialDeposit: new BN(BigInt(Math.floor(initialDeposit * 1e6)).toString()),
           enrollmentFee: new BN(BigInt(Math.floor(enrollmentFee * 1e6)).toString()),
           voteThreshold,
@@ -679,6 +689,19 @@ export async function executeAction(action: string, payload: any): Promise<any> 
             request: new PublicKey(requestAddress),
           },
         }
+      } else if (actionKind === 'ConfigurationModification' || actionKind === 'configuration_modification') {
+        const {
+          voteThreshold = 2,
+          cycleDurationSeconds = 2592000,
+          memberObligationAmount = 10,
+        } = payload
+        actionPayload = {
+          configurationModification: {
+            voteThreshold: Number(voteThreshold),
+            cycleDurationSeconds: new BN(cycleDurationSeconds),
+            memberObligationAmount: new BN(BigInt(Math.floor(memberObligationAmount * 1e6)).toString()),
+          },
+        }
       } else {
         throw new Error(`Unsupported proposal action kind: ${actionKind}`)
       }
@@ -773,6 +796,32 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         .rpc()
 
       return { tx, proposal: proposalAddress, spenderCycle: spenderCyclePda.toBase58() }
+    }
+
+    case 'execute_configuration_modification': {
+      const { proposalAddress, executorWalletName = 'creator' } = payload
+      if (!proposalAddress) throw new Error('Missing proposalAddress for execute_configuration_modification')
+      const executor = wallets[executorWalletName as keyof typeof wallets]
+      if (!executor) throw new Error(`Invalid executorWalletName: ${executorWalletName}`)
+
+      const proposalPubkey = new PublicKey(proposalAddress)
+      const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
+
+      if (!proposalAccount.action.configurationModification) {
+        throw new Error('Proposal action is not ConfigurationModification.')
+      }
+
+      const tx = await program.methods
+        .executeConfigurationModification()
+        .accounts({
+          executor: executor.publicKey,
+          pool: proposalAccount.pool,
+          proposal: proposalPubkey,
+        })
+        .signers([executor])
+        .rpc()
+
+      return { tx, proposal: proposalAddress, pool: proposalAccount.pool.toBase58() }
     }
 
     case 'request_withdrawal': {

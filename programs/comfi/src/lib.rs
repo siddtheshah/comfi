@@ -72,6 +72,7 @@ pub mod comfi {
         pool.member_cap = args.member_cap;
         pool.member_count = 1;
         pool.minimum_deposit = args.minimum_deposit;
+        pool.member_obligation_amount = args.member_obligation_amount;
         pool.vote_threshold = args.vote_threshold;
         pool.voting_period_seconds = args.voting_period_seconds;
         pool.timelock_seconds = args.timelock_seconds;
@@ -84,13 +85,17 @@ pub mod comfi {
         pool.next_proposal_id = 0;
         pool.bump = ctx.bumps.pool;
         pool.testing_enabled = args.testing_enabled;
+        pool.has_pending_config = false;
+        pool.pending_vote_threshold = args.vote_threshold;
+        pool.pending_cycle_duration_seconds = args.cycle_duration_seconds;
+        pool.pending_member_obligation_amount = args.member_obligation_amount;
         ctx.accounts.global.next_pool_id = ctx.accounts.global.next_pool_id.checked_add(1).ok_or(ComfiError::MathOverflow)?;
 
         let member = &mut ctx.accounts.creator_member;
         member.pool = pool.key();
         member.wallet = ctx.accounts.creator.key();
         member.role = MemberRole::Admin;
-        member.is_funded = true;
+        member.is_funded = args.initial_deposit >= args.member_obligation_amount;
         member.deposited_total = args.initial_deposit;
         member.alias_hash = args.creator_alias_hash;
         member.encryption_public_key = args.creator_encryption_public_key;
@@ -112,7 +117,7 @@ pub mod comfi {
         member.pool = pool.key();
         member.wallet = ctx.accounts.user.key();
         member.role = MemberRole::Spender;
-        member.is_funded = true;
+        member.is_funded = args.initial_deposit >= pool.member_obligation_amount;
         member.deposited_total = args.initial_deposit;
         member.alias_hash = args.alias_hash;
         member.encryption_public_key = args.encryption_public_key;
@@ -128,7 +133,7 @@ pub mod comfi {
         transfer_user_tokens(&ctx.accounts.token_program, &ctx.accounts.source_usdc, &ctx.accounts.vault, &ctx.accounts.member_wallet, amount)?;
         let member = &mut ctx.accounts.member;
         member.deposited_total = member.deposited_total.checked_add(amount).ok_or(ComfiError::MathOverflow)?;
-        member.is_funded = true;
+        member.is_funded = member.deposited_total >= ctx.accounts.pool.member_obligation_amount;
         Ok(())
     }
 
@@ -190,6 +195,7 @@ pub mod comfi {
         }
         pool.current_cycle = pool.current_cycle.checked_add(1).ok_or(ComfiError::MathOverflow)?;
         pool.cycle_started_at = next_start;
+        pool.apply_pending_config();
         Ok(())
     }
 
@@ -198,6 +204,7 @@ pub mod comfi {
         pool.ensure_testing_enabled()?;
         pool.current_cycle = pool.current_cycle.checked_add(1).ok_or(ComfiError::MathOverflow)?;
         pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        pool.apply_pending_config();
         Ok(())
     }
 
@@ -207,6 +214,7 @@ pub mod comfi {
         pool.ensure_testing_enabled()?;
         pool.current_cycle = pool.current_cycle.checked_add(count).ok_or(ComfiError::MathOverflow)?;
         pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        pool.apply_pending_config();
         Ok(())
     }
 
@@ -215,6 +223,7 @@ pub mod comfi {
         pool.ensure_testing_enabled()?;
         pool.current_cycle = cycle;
         pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        pool.apply_pending_config();
         Ok(())
     }
 
@@ -258,7 +267,7 @@ pub mod comfi {
     }
 
     pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> Result<()> {
-        require!(ctx.accounts.proposer.is_funded, ComfiError::MemberNotFunded);
+        require!(ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded);
         let clock = Clock::get()?;
         let proposal = &mut ctx.accounts.proposal;
         proposal.pool = ctx.accounts.pool.key();
@@ -278,7 +287,7 @@ pub mod comfi {
     pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
         let clock = Clock::get()?;
         let proposal = &mut ctx.accounts.proposal;
-        require!(ctx.accounts.voter.is_funded, ComfiError::MemberNotFunded);
+        require!(ctx.accounts.voter.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded);
         require!(proposal.state == ProposalState::Open, ComfiError::ProposalNotOpen);
         require!(clock.unix_timestamp <= proposal.deadline, ComfiError::VotingClosed);
         if approve { proposal.yes_votes = proposal.yes_votes.checked_add(1).ok_or(ComfiError::MathOverflow)?; }
@@ -324,10 +333,32 @@ pub mod comfi {
         Ok(())
     }
 
+    pub fn execute_configuration_modification(ctx: Context<ExecuteConfigurationModification>) -> Result<()> {
+        assert_executable(&ctx.accounts.proposal)?;
+        let (vote_threshold, cycle_duration_seconds, member_obligation_amount) = match ctx.accounts.proposal.action {
+            ProposalAction::ConfigurationModification {
+                vote_threshold,
+                cycle_duration_seconds,
+                member_obligation_amount,
+            } => (vote_threshold, cycle_duration_seconds, member_obligation_amount),
+            _ => return err!(ComfiError::WrongProposalAction),
+        };
+        require!(vote_threshold > 0 && vote_threshold <= ctx.accounts.pool.member_cap, ComfiError::InvalidVoteThreshold);
+        require!(cycle_duration_seconds > 0, ComfiError::InvalidCycleDuration);
+
+        let pool = &mut ctx.accounts.pool;
+        pool.has_pending_config = true;
+        pool.pending_vote_threshold = vote_threshold;
+        pool.pending_cycle_duration_seconds = cycle_duration_seconds;
+        pool.pending_member_obligation_amount = member_obligation_amount;
+        ctx.accounts.proposal.state = ProposalState::Executed;
+        Ok(())
+    }
+
     pub fn spend(ctx: Context<Spend>) -> Result<()> {
         let request = &mut ctx.accounts.request;
         require!(request.status == WithdrawalStatus::Pending, ComfiError::RequestNotPending);
-        require!(ctx.accounts.executor_member.is_funded, ComfiError::MemberNotFunded);
+        require!(ctx.accounts.executor_member.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded);
         require!(ctx.accounts.requester_member.can_request_spend(), ComfiError::NotSpender);
         require!(ctx.accounts.spender_cycle.cycle == ctx.accounts.pool.current_cycle, ComfiError::WrongCycle);
         require!(ctx.accounts.spender_cycle.member == ctx.accounts.requester_member.key(), ComfiError::InvalidSpendCycle);
@@ -505,6 +536,13 @@ pub struct ExecuteSpenderLimit<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ExecuteConfigurationModification<'info> {
+    #[account(mut)] pub executor: Signer<'info>,
+    #[account(mut)] pub pool: Account<'info, Pool>,
+    #[account(mut, has_one = pool)] pub proposal: Account<'info, Proposal>,
+}
+
+#[derive(Accounts)]
 pub struct Spend<'info> {
     pub executor: Signer<'info>,
     #[account(seeds = [b"global"], bump = global.bump)] pub global: Box<Account<'info, GlobalConfig>>,
@@ -524,19 +562,58 @@ impl GlobalConfig { pub const SPACE: usize = 8 + 32 * 4 + 1 + 8 + 1; }
 
 /// PDA seeds: ["pool", pool_id.to_le_bytes()]. It is also the vault authority.
 #[account]
-pub struct Pool { pub global: Pubkey, pub id: u64, pub creator: Pubkey, pub vault: Pubkey, pub member_cap: u32, pub member_count: u32, pub minimum_deposit: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub current_cycle: u64, pub cycle_duration_seconds: i64, pub cycle_started_at: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub next_request_id: u64, pub next_proposal_id: u64, pub bump: u8, pub testing_enabled: bool }
+pub struct Pool {
+    pub global: Pubkey,
+    pub id: u64,
+    pub creator: Pubkey,
+    pub vault: Pubkey,
+    pub member_cap: u32,
+    pub member_count: u32,
+    pub minimum_deposit: u64,
+    pub member_obligation_amount: u64,
+    pub vote_threshold: u32,
+    pub voting_period_seconds: i64,
+    pub timelock_seconds: i64,
+    pub current_cycle: u64,
+    pub cycle_duration_seconds: i64,
+    pub cycle_started_at: i64,
+    pub action_allowance_per_cycle: u64,
+    pub max_sponsored_action_charge: u64,
+    pub next_request_id: u64,
+    pub next_proposal_id: u64,
+    pub bump: u8,
+    pub testing_enabled: bool,
+    pub has_pending_config: bool,
+    pub pending_vote_threshold: u32,
+    pub pending_cycle_duration_seconds: i64,
+    pub pending_member_obligation_amount: u64,
+}
 impl Pool {
-    pub const SPACE: usize = 8 + 198;
+    pub const SPACE: usize = 8 + 227;
     pub fn ensure_testing_enabled(&self) -> Result<()> {
         require!(self.testing_enabled, ComfiError::TestingNotEnabled);
         Ok(())
+    }
+    pub fn apply_pending_config(&mut self) {
+        if self.has_pending_config {
+            self.vote_threshold = self.pending_vote_threshold;
+            self.cycle_duration_seconds = self.pending_cycle_duration_seconds;
+            self.member_obligation_amount = self.pending_member_obligation_amount;
+            self.has_pending_config = false;
+        }
     }
 }
 
 /// PDA seeds: ["member", pool, wallet]. Alias bytes are never stored on chain.
 #[account]
 pub struct Member { pub pool: Pubkey, pub wallet: Pubkey, pub role: MemberRole, pub is_funded: bool, pub deposited_total: u64, pub alias_hash: [u8; 32], pub encryption_public_key: [u8; 32], pub alias_version: u32, pub allowance_cycle: u64, pub action_allowance_used: u64, pub bump: u8 }
-impl Member { pub const SPACE: usize = 8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1; fn can_request_spend(&self) -> bool { matches!(self.role, MemberRole::Member | MemberRole::Spender | MemberRole::Admin) } }
+impl Member {
+    pub const SPACE: usize = 8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1;
+    fn can_request_spend(&self) -> bool { matches!(self.role, MemberRole::Member | MemberRole::Spender | MemberRole::Admin) }
+    pub fn is_funded_for_pool(&self, pool: &Pool) -> bool {
+        self.is_funded && self.deposited_total >= pool.member_obligation_amount
+    }
+}
 
 /// PDA seeds: ["cycle", pool, member, cycle.to_le_bytes()].
 #[account]
@@ -564,13 +641,38 @@ impl SponsorQuoteReceipt { pub const SPACE: usize = 8 + 32 + 32 + 32 + 1; }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)] pub enum MemberRole { Member, Spender, Admin }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)] pub enum WithdrawalStatus { Pending, Spent, Cancelled }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)] pub enum ProposalState { Open, Executable, Executed, Rejected }
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)] pub enum ProposalAction { SetSpenderLimit { member: Pubkey, cap: u64 }, ApproveWithdrawal { request: Pubkey } }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalAction {
+    SetSpenderLimit { member: Pubkey, cap: u64 },
+    ApproveWithdrawal { request: Pubkey },
+    ConfigurationModification {
+        vote_threshold: u32,
+        cycle_duration_seconds: i64,
+        member_obligation_amount: u64,
+    },
+}
 /// Exact message signed by the sponsor API. `quote_id` permits off-chain audit
 /// and replay monitoring; on-chain expiry and allowance checks are decisive.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)] pub struct SponsorQuote { pub quote_id: [u8; 32], pub pool: Pubkey, pub member: Pubkey, pub action: SponsoredAction, pub charge_usdc: u64, pub expires_at: i64, pub treasury_usdc: Pubkey }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)] pub enum SponsoredAction { SetAlias }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct CreatePoolArgs { pub member_cap: u32, pub minimum_deposit: u64, pub initial_deposit: u64, pub enrollment_fee: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub cycle_duration_seconds: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub creator_alias_hash: [u8; 32], pub creator_encryption_public_key: [u8; 32], pub testing_enabled: bool }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct CreatePoolArgs {
+    pub member_cap: u32,
+    pub minimum_deposit: u64,
+    pub member_obligation_amount: u64,
+    pub initial_deposit: u64,
+    pub enrollment_fee: u64,
+    pub vote_threshold: u32,
+    pub voting_period_seconds: i64,
+    pub timelock_seconds: i64,
+    pub cycle_duration_seconds: i64,
+    pub action_allowance_per_cycle: u64,
+    pub max_sponsored_action_charge: u64,
+    pub creator_alias_hash: [u8; 32],
+    pub creator_encryption_public_key: [u8; 32],
+    pub testing_enabled: bool,
+}
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct JoinPoolArgs { pub initial_deposit: u64, pub alias_hash: [u8; 32], pub encryption_public_key: [u8; 32] }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct WithdrawalArgs { pub recipient: Pubkey, pub amount: u64, pub justification_hash: [u8; 32], pub requires_proposal: bool }
 
@@ -649,6 +751,7 @@ mod tests {
             member_cap: 10,
             member_count: 1,
             minimum_deposit: 100,
+            member_obligation_amount: 50,
             vote_threshold: 1,
             voting_period_seconds: 100,
             timelock_seconds: 50,
@@ -661,6 +764,10 @@ mod tests {
             next_proposal_id: 0,
             bump: 255,
             testing_enabled: true,
+            has_pending_config: false,
+            pending_vote_threshold: 1,
+            pending_cycle_duration_seconds: 1000,
+            pending_member_obligation_amount: 50,
         };
 
         assert!(pool.ensure_testing_enabled().is_ok());
@@ -694,4 +801,111 @@ mod tests {
         member.role = MemberRole::Admin;
         assert!(member.can_request_spend());
     }
+
+    #[test]
+    fn test_member_obligation_and_funded_status() {
+        let pool = Pool {
+            global: Pubkey::default(),
+            id: 0,
+            creator: Pubkey::default(),
+            vault: Pubkey::default(),
+            member_cap: 10,
+            member_count: 1,
+            minimum_deposit: 10,
+            member_obligation_amount: 50,
+            vote_threshold: 2,
+            voting_period_seconds: 100,
+            timelock_seconds: 50,
+            current_cycle: 0,
+            cycle_duration_seconds: 1000,
+            cycle_started_at: 0,
+            action_allowance_per_cycle: 100,
+            max_sponsored_action_charge: 10,
+            next_request_id: 0,
+            next_proposal_id: 0,
+            bump: 255,
+            testing_enabled: true,
+            has_pending_config: false,
+            pending_vote_threshold: 2,
+            pending_cycle_duration_seconds: 1000,
+            pending_member_obligation_amount: 50,
+        };
+
+        let mut member = Member {
+            pool: Pubkey::default(),
+            wallet: Pubkey::default(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 40,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+        };
+
+        // Deposited 40 < 50 obligation: not counted as funded member
+        assert!(!member.is_funded_for_pool(&pool));
+
+        // Deposited 50 >= 50 obligation: counted as funded member
+        member.deposited_total = 50;
+        assert!(member.is_funded_for_pool(&pool));
+
+        // Member marked as unfunded even with total met
+        member.is_funded = false;
+        assert!(!member.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_configuration_modification_deferred_until_cycle_roll() {
+        let mut pool = Pool {
+            global: Pubkey::default(),
+            id: 0,
+            creator: Pubkey::default(),
+            vault: Pubkey::default(),
+            member_cap: 10,
+            member_count: 1,
+            minimum_deposit: 10,
+            member_obligation_amount: 50,
+            vote_threshold: 2,
+            voting_period_seconds: 100,
+            timelock_seconds: 50,
+            current_cycle: 0,
+            cycle_duration_seconds: 1000,
+            cycle_started_at: 0,
+            action_allowance_per_cycle: 100,
+            max_sponsored_action_charge: 10,
+            next_request_id: 0,
+            next_proposal_id: 0,
+            bump: 255,
+            testing_enabled: true,
+            has_pending_config: false,
+            pending_vote_threshold: 2,
+            pending_cycle_duration_seconds: 1000,
+            pending_member_obligation_amount: 50,
+        };
+
+        // Stage new configuration
+        pool.has_pending_config = true;
+        pool.pending_vote_threshold = 4;
+        pool.pending_cycle_duration_seconds = 2000;
+        pool.pending_member_obligation_amount = 150;
+
+        // Current active config has NOT changed yet (not immediately)
+        assert_eq!(pool.vote_threshold, 2);
+        assert_eq!(pool.cycle_duration_seconds, 1000);
+        assert_eq!(pool.member_obligation_amount, 50);
+
+        // Advance cycle
+        pool.current_cycle += 1;
+        pool.apply_pending_config();
+
+        // New config is now active
+        assert_eq!(pool.vote_threshold, 4);
+        assert_eq!(pool.cycle_duration_seconds, 2000);
+        assert_eq!(pool.member_obligation_amount, 150);
+        assert!(!pool.has_pending_config);
+    }
 }
+

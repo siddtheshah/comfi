@@ -25,6 +25,7 @@ export function App() {
   const [createPoolArgs, setCreatePoolArgs] = useState({
     memberCap: 24,
     minimumDeposit: 10,
+    memberObligationAmount: 10,
     initialDeposit: 100,
     enrollmentFee: 1,
     voteThreshold: 2,
@@ -56,6 +57,9 @@ export function App() {
     targetWalletName: 'member2',
     cap: 100,
     requestAddress: '',
+    newVoteThreshold: 2,
+    newCycleDurationSeconds: 2592000,
+    newMemberObligationAmount: 10,
   })
 
   const [voteArgs, setVoteArgs] = useState({
@@ -355,6 +359,15 @@ export function App() {
               />
             </div>
             <div className="form-group">
+              <label>Member Obligation ($)</label>
+              <input
+                type="number"
+                value={createPoolArgs.memberObligationAmount}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, memberObligationAmount: parseFloat(e.target.value) || 0 })}
+                style={{ width: '120px' }}
+              />
+            </div>
+            <div className="form-group">
               <label>Initial Deposit ($)</label>
               <input
                 type="number"
@@ -441,65 +454,84 @@ export function App() {
           </div>
 
           {selectedPool ? (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-              <table className="data-table">
-                <tbody>
-                  <tr>
-                    <td>Address</td>
-                    <td className="mono">{selectedPool.address}</td>
-                  </tr>
-                  <tr>
-                    <td>Vault Address</td>
-                    <td className="mono">{selectedPool.vault}</td>
-                  </tr>
-                  <tr>
-                    <td>Vault USDC Balance</td>
-                    <td><strong style={{ color: '#3fb950' }}>{selectedPool.vaultUsdcBalance}</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Members</td>
-                    <td>{selectedPool.memberCount} / {selectedPool.memberCap}</td>
-                  </tr>
-                  <tr>
-                    <td>Min Deposit</td>
-                    <td>{selectedPool.minimumDeposit}</td>
-                  </tr>
-                </tbody>
-              </table>
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                <table className="data-table">
+                  <tbody>
+                    <tr>
+                      <td>Address</td>
+                      <td className="mono">{selectedPool.address}</td>
+                    </tr>
+                    <tr>
+                      <td>Vault Address</td>
+                      <td className="mono">{selectedPool.vault}</td>
+                    </tr>
+                    <tr>
+                      <td>Vault USDC Balance</td>
+                      <td><strong style={{ color: '#3fb950' }}>{selectedPool.vaultUsdcBalance}</strong></td>
+                    </tr>
+                    <tr>
+                      <td>Members</td>
+                      <td>{selectedPool.memberCount} / {selectedPool.memberCap}</td>
+                    </tr>
+                    <tr>
+                      <td>Min Deposit</td>
+                      <td>{selectedPool.minimumDeposit}</td>
+                    </tr>
+                    <tr>
+                      <td>Member Obligation</td>
+                      <td><strong style={{ color: '#58a6ff' }}>{selectedPool.memberObligationAmount}</strong></td>
+                    </tr>
+                  </tbody>
+                </table>
 
-              <table className="data-table">
-                <tbody>
-                  <tr>
-                    <td>Vote Threshold</td>
-                    <td>{selectedPool.voteThreshold} votes</td>
-                  </tr>
-                  <tr>
-                    <td>Current Cycle</td>
-                    <td><strong>Cycle {selectedPool.currentCycle}</strong></td>
-                  </tr>
-                  <tr>
-                    <td>Cycle Started At</td>
-                    <td>{new Date(selectedPool.cycleStartedAt * 1000).toLocaleString()}</td>
-                  </tr>
-                  <tr>
-                    <td>Next Request ID</td>
-                    <td>{selectedPool.nextRequestId}</td>
-                  </tr>
-                  <tr>
-                    <td>Next Proposal ID</td>
-                    <td>{selectedPool.nextProposalId}</td>
-                  </tr>
-                  <tr>
-                    <td>Testing Mode</td>
-                    <td>
-                      <span className={selectedPool.testingEnabled ? 'badge green' : 'badge red'}>
-                        {selectedPool.testingEnabled ? '✓ Enabled (Bypass Allowed)' : '✗ Disabled'}
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+                <table className="data-table">
+                  <tbody>
+                    <tr>
+                      <td>Vote Threshold</td>
+                      <td>{selectedPool.voteThreshold} votes</td>
+                    </tr>
+                    <tr>
+                      <td>Cycle Duration</td>
+                      <td>{selectedPool.cycleDurationSeconds}s</td>
+                    </tr>
+                    <tr>
+                      <td>Current Cycle</td>
+                      <td><strong>Cycle {selectedPool.currentCycle}</strong></td>
+                    </tr>
+                    <tr>
+                      <td>Cycle Started At</td>
+                      <td>{new Date(selectedPool.cycleStartedAt * 1000).toLocaleString()}</td>
+                    </tr>
+                    <tr>
+                      <td>Next Request ID</td>
+                      <td>{selectedPool.nextRequestId}</td>
+                    </tr>
+                    <tr>
+                      <td>Next Proposal ID</td>
+                      <td>{selectedPool.nextProposalId}</td>
+                    </tr>
+                    <tr>
+                      <td>Testing Mode</td>
+                      <td>
+                        <span className={selectedPool.testingEnabled ? 'badge green' : 'badge red'}>
+                          {selectedPool.testingEnabled ? '✓ Enabled (Bypass Allowed)' : '✗ Disabled'}
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {selectedPool.hasPendingConfig && (
+                <div style={{ background: 'rgba(56, 139, 253, 0.15)', border: '1px solid #388bfd', borderRadius: '6px', padding: '10px 14px', marginTop: '10px', fontSize: '13px' }}>
+                  <strong style={{ color: '#58a6ff' }}>⏳ Pending Configuration Modification (Applies Next Cycle):</strong>
+                  <div style={{ marginTop: '4px', color: '#c9d1d9' }}>
+                    Vote Threshold: <strong>{selectedPool.pendingVoteThreshold} votes</strong> &bull; Cycle Duration: <strong>{selectedPool.pendingCycleDurationSeconds}s</strong> &bull; Member Obligation: <strong>{selectedPool.pendingMemberObligationAmount}</strong>
+                  </div>
+                </div>
+              )}
+            </>
           ) : (
             <p>No pool selected or no pools deployed.</p>
           )}
@@ -749,6 +781,7 @@ export function App() {
             >
               <option value="SetSpenderLimit">Set Spender Limit</option>
               <option value="ApproveWithdrawal">Approve Withdrawal</option>
+              <option value="ConfigurationModification">Configuration Modification</option>
             </select>
           </div>
 
@@ -774,7 +807,7 @@ export function App() {
                 />
               </div>
             </div>
-          ) : (
+          ) : proposalArgs.actionKind === 'ApproveWithdrawal' ? (
             <div className="form-group">
               <label>Request Address</label>
               <select
@@ -788,6 +821,36 @@ export function App() {
                   </option>
                 ))}
               </select>
+            </div>
+          ) : (
+            <div className="form-row">
+              <div className="form-group">
+                <label>New Vote Threshold</label>
+                <input
+                  type="number"
+                  value={proposalArgs.newVoteThreshold}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newVoteThreshold: parseInt(e.target.value) || 1 })}
+                  style={{ width: '90px' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>New Cycle (s)</label>
+                <input
+                  type="number"
+                  value={proposalArgs.newCycleDurationSeconds}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newCycleDurationSeconds: parseInt(e.target.value) || 60 })}
+                  style={{ width: '100px' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>New Obligation ($)</label>
+                <input
+                  type="number"
+                  value={proposalArgs.newMemberObligationAmount}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newMemberObligationAmount: parseFloat(e.target.value) || 0 })}
+                  style={{ width: '110px' }}
+                />
+              </div>
             </div>
           )}
 
@@ -804,6 +867,9 @@ export function App() {
                   targetWalletName: proposalArgs.targetWalletName,
                   cap: proposalArgs.cap,
                   requestAddress: proposalArgs.requestAddress,
+                  voteThreshold: proposalArgs.newVoteThreshold,
+                  cycleDurationSeconds: proposalArgs.newCycleDurationSeconds,
+                  memberObligationAmount: proposalArgs.newMemberObligationAmount,
                 },
                 `Create Proposal (${proposalArgs.actionKind})`
               )
@@ -918,6 +984,21 @@ export function App() {
                             }
                           >
                             Execute Spender Limit
+                          </button>
+                        )}
+                        {p.state === 'Executable' && p.actionType === 'ConfigurationModification' && (
+                          <button
+                            className="btn small primary"
+                            disabled={loading}
+                            onClick={() =>
+                              void runAction(
+                                'execute_configuration_modification',
+                                { proposalAddress: p.address, executorWalletName: 'creator' },
+                                `Execute Configuration Modification for #${p.id}`
+                              )
+                            }
+                          >
+                            Execute Config Modification
                           </button>
                         )}
                       </div>
