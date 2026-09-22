@@ -1,0 +1,344 @@
+use anchor_lang::prelude::*;
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    token::{Mint, Token, TokenAccount},
+};
+use crate::pool::{transfer_user_tokens, Member, MemberRole, Pool};
+use crate::ComfiError;
+
+#[account]
+pub struct GlobalConfig {
+    pub administrator: Pubkey,
+    pub usdc_mint: Pubkey,
+    pub treasury_usdc: Pubkey,
+    pub quote_authority: Pubkey,
+    pub paused_new_pools: bool,
+    pub next_pool_id: u64,
+    pub bump: u8,
+}
+
+impl GlobalConfig {
+    pub const SPACE: usize = 8 + 32 * 4 + 1 + 8 + 1;
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct CreatePoolArgs {
+    pub member_cap: u32,
+    pub minimum_deposit: u64,
+    pub member_obligation_amount: u64,
+    pub initial_deposit: u64,
+    pub enrollment_fee: u64,
+    pub vote_threshold: u32,
+    pub voting_period_seconds: i64,
+    pub timelock_seconds: i64,
+    pub cycle_duration_seconds: i64,
+    pub action_allowance_per_cycle: u64,
+    pub max_sponsored_action_charge: u64,
+    pub creator_alias_hash: [u8; 32],
+    pub creator_encryption_public_key: [u8; 32],
+    pub testing_enabled: bool,
+}
+
+pub fn validate_create_pool(paused_new_pools: bool, args: &CreatePoolArgs) -> Result<()> {
+    require!(!paused_new_pools, ComfiError::NewPoolsPaused);
+    require!(args.member_cap > 0, ComfiError::InvalidMemberCap);
+    require!(
+        args.initial_deposit >= args.minimum_deposit,
+        ComfiError::DepositBelowMinimum
+    );
+    require!(
+        args.vote_threshold > 0 && args.vote_threshold <= args.member_cap,
+        ComfiError::InvalidVoteThreshold
+    );
+    require!(
+        args.cycle_duration_seconds > 0,
+        ComfiError::InvalidCycleDuration
+    );
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct InitializeGlobalConfig<'info> {
+    #[account(mut)]
+    pub administrator: Signer<'info>,
+    pub usdc_mint: Account<'info, Mint>,
+    #[account(constraint = treasury_usdc.mint == usdc_mint.key() @ ComfiError::WrongMint)]
+    pub treasury_usdc: Account<'info, TokenAccount>,
+    #[account(init, payer = administrator, space = GlobalConfig::SPACE, seeds = [b"global"], bump)]
+    pub global: Account<'info, GlobalConfig>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateGlobalConfig<'info> {
+    #[account(mut, seeds = [b"global"], bump = global.bump, has_one = administrator)]
+    pub global: Account<'info, GlobalConfig>,
+    pub administrator: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(args: CreatePoolArgs)]
+pub struct CreatePool<'info> {
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    #[account(mut, seeds = [b"global"], bump = global.bump)]
+    pub global: Box<Account<'info, GlobalConfig>>,
+    #[account(
+        mut,
+        constraint = creator_usdc.owner == creator.key() @ ComfiError::Unauthorized,
+        constraint = creator_usdc.mint == global.usdc_mint @ ComfiError::WrongMint
+    )]
+    pub creator_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        address = global.treasury_usdc @ ComfiError::InvalidTreasury,
+        constraint = treasury_usdc.mint == global.usdc_mint @ ComfiError::WrongMint
+    )]
+    pub treasury_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(
+        init,
+        payer = creator,
+        space = Pool::SPACE,
+        seeds = [b"pool".as_ref(), &global.next_pool_id.to_le_bytes()],
+        bump
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+    #[account(
+        init,
+        payer = creator,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = pool
+    )]
+    pub vault: Box<Account<'info, TokenAccount>>,
+    #[account(address = global.usdc_mint @ ComfiError::WrongMint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    #[account(
+        init,
+        payer = creator,
+        space = Member::SPACE,
+        seeds = [b"member", pool.key().as_ref(), creator.key().as_ref()],
+        bump
+    )]
+    pub creator_member: Box<Account<'info, Member>>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+pub mod deployer_handlers {
+    use super::*;
+
+    pub fn initialize_global_config(
+        ctx: Context<InitializeGlobalConfig>,
+        quote_authority: Pubkey,
+    ) -> Result<()> {
+        let global = &mut ctx.accounts.global;
+        global.administrator = ctx.accounts.administrator.key();
+        global.usdc_mint = ctx.accounts.usdc_mint.key();
+        global.treasury_usdc = ctx.accounts.treasury_usdc.key();
+        global.quote_authority = quote_authority;
+        global.paused_new_pools = false;
+        global.next_pool_id = 0;
+        global.bump = ctx.bumps.global;
+        Ok(())
+    }
+
+    pub fn update_global_config(
+        ctx: Context<UpdateGlobalConfig>,
+        new_treasury_usdc: Pubkey,
+        new_quote_authority: Pubkey,
+    ) -> Result<()> {
+        let global = &mut ctx.accounts.global;
+        global.treasury_usdc = new_treasury_usdc;
+        global.quote_authority = new_quote_authority;
+        Ok(())
+    }
+
+    pub fn pause_new_pool_creation(ctx: Context<UpdateGlobalConfig>, paused: bool) -> Result<()> {
+        ctx.accounts.global.paused_new_pools = paused;
+        Ok(())
+    }
+
+    pub fn create_pool(ctx: Context<CreatePool>, args: CreatePoolArgs) -> Result<()> {
+        validate_create_pool(ctx.accounts.global.paused_new_pools, &args)?;
+
+        transfer_user_tokens(
+            &ctx.accounts.token_program,
+            &ctx.accounts.creator_usdc,
+            &ctx.accounts.treasury_usdc,
+            &ctx.accounts.creator,
+            args.enrollment_fee,
+        )?;
+        transfer_user_tokens(
+            &ctx.accounts.token_program,
+            &ctx.accounts.creator_usdc,
+            &ctx.accounts.vault,
+            &ctx.accounts.creator,
+            args.initial_deposit,
+        )?;
+
+        let pool = &mut ctx.accounts.pool;
+        pool.global = ctx.accounts.global.key();
+        pool.id = ctx.accounts.global.next_pool_id;
+        pool.creator = ctx.accounts.creator.key();
+        pool.vault = ctx.accounts.vault.key();
+        pool.member_cap = args.member_cap;
+        pool.member_count = 1;
+        pool.minimum_deposit = args.minimum_deposit;
+        pool.member_obligation_amount = args.member_obligation_amount;
+        pool.vote_threshold = args.vote_threshold;
+        pool.voting_period_seconds = args.voting_period_seconds;
+        pool.timelock_seconds = args.timelock_seconds;
+        pool.current_cycle = 0;
+        pool.cycle_duration_seconds = args.cycle_duration_seconds;
+        pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        pool.action_allowance_per_cycle = args.action_allowance_per_cycle;
+        pool.max_sponsored_action_charge = args.max_sponsored_action_charge;
+        pool.next_request_id = 0;
+        pool.next_proposal_id = 0;
+        pool.bump = ctx.bumps.pool;
+        pool.testing_enabled = args.testing_enabled;
+        pool.has_pending_config = false;
+        pool.pending_vote_threshold = args.vote_threshold;
+        pool.pending_cycle_duration_seconds = args.cycle_duration_seconds;
+        pool.pending_member_obligation_amount = args.member_obligation_amount;
+        ctx.accounts.global.next_pool_id = ctx
+            .accounts
+            .global
+            .next_pool_id
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+
+        let member = &mut ctx.accounts.creator_member;
+        member.pool = pool.key();
+        member.wallet = ctx.accounts.creator.key();
+        member.role = MemberRole::Admin;
+        member.is_funded = args.initial_deposit >= args.member_obligation_amount;
+        member.deposited_total = args.initial_deposit;
+        member.alias_hash = args.creator_alias_hash;
+        member.encryption_public_key = args.creator_encryption_public_key;
+        member.alias_version = 1;
+        member.allowance_cycle = 0;
+        member.action_allowance_used = 0;
+        member.bump = ctx.bumps.creator_member;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_args() -> CreatePoolArgs {
+        CreatePoolArgs {
+            member_cap: 10,
+            minimum_deposit: 100,
+            member_obligation_amount: 50,
+            initial_deposit: 100,
+            enrollment_fee: 10,
+            vote_threshold: 2,
+            voting_period_seconds: 604800,
+            timelock_seconds: 86400,
+            cycle_duration_seconds: 2592000,
+            action_allowance_per_cycle: 1000,
+            max_sponsored_action_charge: 50,
+            creator_alias_hash: [0u8; 32],
+            creator_encryption_public_key: [0u8; 32],
+            testing_enabled: false,
+        }
+    }
+
+    #[test]
+    fn test_global_config_space_constant() {
+        // 8 discriminator + 4 * 32 (admin, usdc_mint, treasury, quote_auth) + 1 (paused) + 8 (next_pool_id) + 1 (bump)
+        assert_eq!(GlobalConfig::SPACE, 8 + 32 * 4 + 1 + 8 + 1);
+        assert_eq!(GlobalConfig::SPACE, 146);
+    }
+
+    #[test]
+    fn test_validate_create_pool_success() {
+        let args = valid_args();
+        assert!(validate_create_pool(false, &args).is_ok());
+    }
+
+    #[test]
+    fn test_validate_create_pool_paused() {
+        let args = valid_args();
+        let err = validate_create_pool(true, &args).unwrap_err();
+        assert_eq!(err, ComfiError::NewPoolsPaused.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_zero_member_cap() {
+        let mut args = valid_args();
+        args.member_cap = 0;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidMemberCap.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_deposit_below_minimum() {
+        let mut args = valid_args();
+        args.minimum_deposit = 200;
+        args.initial_deposit = 100;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::DepositBelowMinimum.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_invalid_vote_threshold_zero() {
+        let mut args = valid_args();
+        args.vote_threshold = 0;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidVoteThreshold.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_invalid_vote_threshold_exceeds_cap() {
+        let mut args = valid_args();
+        args.member_cap = 5;
+        args.vote_threshold = 6;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidVoteThreshold.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_zero_cycle_duration() {
+        let mut args = valid_args();
+        args.cycle_duration_seconds = 0;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidCycleDuration.into());
+    }
+
+    #[test]
+    fn test_global_config_state_mutation() {
+        let mut config = GlobalConfig {
+            administrator: Pubkey::new_unique(),
+            usdc_mint: Pubkey::new_unique(),
+            treasury_usdc: Pubkey::new_unique(),
+            quote_authority: Pubkey::new_unique(),
+            paused_new_pools: false,
+            next_pool_id: 0,
+            bump: 254,
+        };
+
+        // Update treasury and quote authority
+        let new_treasury = Pubkey::new_unique();
+        let new_quote_auth = Pubkey::new_unique();
+        config.treasury_usdc = new_treasury;
+        config.quote_authority = new_quote_auth;
+        assert_eq!(config.treasury_usdc, new_treasury);
+        assert_eq!(config.quote_authority, new_quote_auth);
+
+        // Toggle pause
+        config.paused_new_pools = true;
+        assert!(config.paused_new_pools);
+        config.paused_new_pools = false;
+        assert!(!config.paused_new_pools);
+
+        // Next pool id increment
+        config.next_pool_id = config.next_pool_id.checked_add(1).unwrap();
+        assert_eq!(config.next_pool_id, 1);
+    }
+}
