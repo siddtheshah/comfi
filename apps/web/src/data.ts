@@ -11,11 +11,39 @@ export const mockSponsorResponse = {
   signature: 'demo_signature_replace_with_sponsor_signature',
 } as const
 
-export const pools = [
+export type PoolItem = {
+  id: string
+  icon: string
+  name: string
+  role: string
+  status: string
+  balance: string
+  funds: string
+  nextDate: string
+  proposals: number
+  requests: number
+  cap: number
+  slots: number
+  accent: string
+  address?: string
+  vault?: string
+  creator?: string
+  onChain?: boolean
+  minimumDeposit?: string
+  voteThreshold?: number
+  votingPeriodSeconds?: number
+  timelockSeconds?: number
+  currentCycle?: number
+  cycleStartedAt?: number
+}
+
+export const demoPools: PoolItem[] = [
   { id: 'neighbors', icon: '✦', name: 'Maple Street Mutual Aid', role: 'Member', status: 'Up to date', balance: '$4,860.20', funds: '18 of 24', nextDate: 'Aug 1', proposals: 2, requests: 1, cap: 24, slots: 6, accent: 'coral' },
   { id: 'garden', icon: '♣', name: 'Eastside Community Garden', role: 'Coordinator', status: 'Up to date', balance: '$1,273.80', funds: '12 of 16', nextDate: 'Aug 5', proposals: 1, requests: 0, cap: 16, slots: 4, accent: 'lime' },
   { id: 'parents', icon: '☻', name: 'Room 204 Family Fund', role: 'Member', status: 'Contribution due', balance: '$892.00', funds: '9 of 15', nextDate: 'Today', proposals: 0, requests: 0, cap: 15, slots: 2, accent: 'sky' },
 ]
+
+export const pools = demoPools
 
 export const activity: Activity[] = [
   { initials: 'JR', who: 'Jordan R.', action: 'added to the fund', detail: 'August contribution', amount: '+ $25.00', time: 'Today, 9:42 AM', tone: 'in' },

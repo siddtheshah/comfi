@@ -473,7 +473,7 @@ impl GlobalConfig { pub const SPACE: usize = 8 + 32 * 4 + 1 + 8 + 1; }
 /// PDA seeds: ["pool", pool_id.to_le_bytes()]. It is also the vault authority.
 #[account]
 pub struct Pool { pub global: Pubkey, pub id: u64, pub creator: Pubkey, pub vault: Pubkey, pub member_cap: u32, pub member_count: u32, pub minimum_deposit: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub current_cycle: u64, pub cycle_duration_seconds: i64, pub cycle_started_at: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub next_request_id: u64, pub next_proposal_id: u64, pub bump: u8 }
-impl Pool { pub const SPACE: usize = 197; }
+impl Pool { pub const SPACE: usize = 8 + 197; }
 
 /// PDA seeds: ["member", pool, wallet]. Alias bytes are never stored on chain.
 #[account]

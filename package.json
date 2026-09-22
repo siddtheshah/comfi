@@ -11,9 +11,22 @@
     "dev": "npm run dev --workspace=@comfi/web",
     "build": "npm run build --workspace=@comfi/web",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspace=@comfi/web && npm run check --workspace=@comfi/sponsor-api"
+    "typecheck": "npm run typecheck --workspace=@comfi/web && npm run check --workspace=@comfi/sponsor-api",
+    "localnet:start": "bash scripts/localnet-start.sh",
+    "localnet:setup": "bash scripts/localnet-setup.sh",
+    "localnet:create-test-pool": "node scripts/create-test-pool.mjs",
+    "test:e2e": "playwright test"
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.31.1",
+    "@playwright/test": "^1.55.0",
+    "@solana/spl-token": "^0.4.13",
+    "@solana/web3.js": "^1.98.4",
+    "@types/bn.js": "^5.1.6",
+    "bn.js": "^5.2.2",
+    "playwright": "^1.55.0"
   }
 }

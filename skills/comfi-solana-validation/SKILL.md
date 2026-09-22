@@ -6,21 +6,16 @@ description: Build, validate, and locally deploy the ComFi Anchor/Solana program
 # ComFi Solana validation
 
 Run this workflow from the repository root, which contains `programs/comfi`,
-`Anchor.toml`, and `target/`. In PowerShell, derive the WSL repository path
-instead of assuming a particular Windows username or drive:
-
-```powershell
-$repoWsl = (wsl.exe -- wslpath -a (Get-Location).Path).Trim()
-```
+`Anchor.toml`, and `target/`. Toolchain paths can be configured in `.env`.
 
 ## Validate the toolchain and build
 
-Use WSL because the Solana and Anchor CLIs are installed there. Confirm the
+Use a shell environment with Solana and Anchor installed. Confirm the
 versions match the repository pins before building:
 
-```powershell
-wsl.exe -- bash -lc 'anchor --version; solana --version; cargo --version; rustc --version'
-wsl.exe -- bash -lc "cd '$repoWsl' && anchor build"
+```shell
+anchor --version; solana --version; cargo --version; rustc --version
+anchor build
 ```
 
 The project pins Anchor `1.1.2` and Solana `3.1.10`. Treat a successful
@@ -43,15 +38,15 @@ empty; do not present it as usable generated TypeScript client output.
 
 ## Deploy to an isolated localnet
 
-Use this only for a local validation. Do not rely on the WSL CLI default URL:
+Use this only for a local validation. Do not rely on the default URL:
 it may be `mainnet-beta`. Always pass `localnet` or `http://127.0.0.1:8899`
-explicitly.
+explicitly, or use `npm run localnet:setup`.
 
 1. Start a temporary validator and confirm it responds:
 
-```powershell
-wsl.exe -- bash -lc 'solana-test-validator --reset'
-wsl.exe -- bash -lc 'solana -u http://127.0.0.1:8899 cluster-version'
+```shell
+solana-test-validator --reset
+solana -u http://127.0.0.1:8899 cluster-version
 ```
 
 2. If the configured WSL signer is unavailable, create a temporary payer under

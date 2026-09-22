@@ -15,9 +15,8 @@ withdrawal request and a per-cycle spend limit.
 The repository already provides the root `Anchor.toml`, a matching program
 keypair, and localnet configuration. Build from the repository root:
 
-```powershell
-$repoWsl = (wsl.exe -- wslpath -a (Get-Location).Path).Trim()
-wsl.exe -- bash -lc "cd '$repoWsl' && anchor build"
+```shell
+anchor build
 ```
 
 The current WSL toolchain is Anchor `1.1.2` and Solana CLI `3.1.10`, matching

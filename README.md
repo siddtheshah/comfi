@@ -24,7 +24,7 @@ The first implementation slice is organized as a small workspace:
 
 Run the web prototype with Node 22+:
 
-```powershell
+```shell
 npm install
 npm run dev
 ```
@@ -32,6 +32,23 @@ npm run dev
 Run validation with `npm run typecheck`, `npm run test`, and `npm run build`.
 The Solana program additionally needs the Rust, Solana, and Anchor toolchains;
 see `programs/comfi/README.md` before attempting a deployment.
+Configure local toolchain paths by copying `.env.example` to `.env`.
+
+## Localnet demo
+
+For the complete UI-ready test chain, run:
+
+```shell
+npm run localnet:setup
+```
+
+It starts a reset isolated validator, creates and funds a temporary local deployment payer, builds and deploys ComFi, initializes the deployer, and funds the deterministic mock test wallet with local SOL and test USDC. It intentionally does not create a pool; use **Start a pool** in the UI to test that action. It refuses to reset an already-running validator.
+
+`npm run localnet:start` remains available for manual validator control. The `localnet:create-test-pool` command creates a deterministic demo pool directly. Bootstrap output contains public addresses only and is written to ignored `localnet.json`.
+
+Configuration for both the toolchain and web UI is read from `.env` (`VITE_WALLET_MODE`, `VITE_SOLANA_RPC`, `VITE_PROGRAM_ID`). Copy `.env.example` to `.env` to configure your environment.
+
+Run `npm run test:e2e` to verify the mock-wallet, pool review, proposal, and payment-request journeys.
 
 ## Community Vigilance
 

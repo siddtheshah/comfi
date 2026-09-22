@@ -7,6 +7,10 @@ coverage/
 .anchor/
 target/
 test-ledger/
+.localnet/
+localnet.json
+playwright-report/
+test-results/
 .DS_Store
 *.tsbuildinfo
 apps/web/vite.config.js
