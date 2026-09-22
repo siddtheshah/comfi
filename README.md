@@ -18,37 +18,49 @@ The authorized spenders may take from the pool up to their spend limit on a give
 
 The first implementation slice is organized as a small workspace:
 
-- `apps/web` — responsive member workspace for viewing pools, activity, proposals, and payment requests.
+- `apps/web` — responsive member workspace for viewing live on-chain pools, vault balances, activity, proposals, and payment requests.
 - `services/sponsor-api` — bounded, short-lived sponsorship and enrollment quote service.
-- `programs/comfi` — Anchor program scaffold that guards the pool USDC vault and governance flows.
+- `programs/comfi` — Anchor program that guards the pool USDC vault and governance flows.
 
-Run the web prototype with Node 22+:
+---
 
-```shell
-npm install
-npm run dev
-```
+## Installation & Setup
 
-Run validation with `npm run typecheck`, `npm run test`, and `npm run build`.
-The Solana program additionally needs the Rust, Solana, and Anchor toolchains;
-see `programs/comfi/README.md` before attempting a deployment.
-Configure local toolchain paths by copying `.env.example` to `.env`.
+For full installation requirements (Node.js 22+, Rust, Solana CLI, Anchor CLI, and WSL2 instructions), please read the comprehensive **[Installation Guide](file:///c:/Users/sidds/Documents/comfi/INSTALL.md)**.
 
-## Localnet demo
+### Quick Start (from scratch)
 
-For the complete UI-ready test chain, run:
+1. **Install dependencies**:
+   ```shell
+   npm install
+   ```
+2. **Configure environment**:
+   ```shell
+   cp .env.example .env
+   ```
+3. **Build the Anchor smart contract**:
+   ```shell
+   anchor build
+   ```
+4. **Bootstrap the isolated localnet validator and deployer**:
+   ```shell
+   npm run localnet:setup
+   ```
+   *This starts the validator on `http://127.0.0.1:8899`, deploys `programs/comfi`, initializes the USDC mint and treasury, and funds the development mock wallet.*
+5. **Start the Web UI**:
+   ```shell
+   npm run dev
+   ```
+   *Open `http://localhost:5173` to view live on-chain pools, inspect contract parameters, and deploy new pools with **Start a pool**.*
 
-```shell
-npm run localnet:setup
-```
+---
 
-It starts a reset isolated validator, creates and funds a temporary local deployment payer, builds and deploys ComFi, initializes the deployer, and funds the deterministic mock test wallet with local SOL and test USDC. It intentionally does not create a pool; use **Start a pool** in the UI to test that action. It refuses to reset an already-running validator.
+## Validation & Testing
 
-`npm run localnet:start` remains available for manual validator control. The `localnet:create-test-pool` command creates a deterministic demo pool directly. Bootstrap output contains public addresses only and is written to ignored `localnet.json`.
+- `npm run test` — runs workspace unit tests (quote generation, member allowances, structured error handling).
+- `npm run typecheck` — strict TypeScript verification across `@comfi/web` and `@comfi/sponsor-api`.
+- `npm run test:e2e` — Playwright end-to-end tests validating mock wallet connections, on-chain pool inspections, proposals, and payment requests.
 
-Configuration for both the toolchain and web UI is read from `.env` (`VITE_WALLET_MODE`, `VITE_SOLANA_RPC`, `VITE_PROGRAM_ID`). Copy `.env.example` to `.env` to configure your environment.
-
-Run `npm run test:e2e` to verify the mock-wallet, pool review, proposal, and payment-request journeys.
 
 ## Community Vigilance
 

@@ -9,9 +9,11 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=@comfi/web",
+    "dev:testing": "npm run dev --workspace=@comfi/testing",
     "build": "npm run build --workspace=@comfi/web",
+    "build:testing": "npm run build --workspace=@comfi/testing",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspace=@comfi/web && npm run check --workspace=@comfi/sponsor-api",
+    "typecheck": "npm run typecheck --workspace=@comfi/web && npm run check --workspace=@comfi/sponsor-api && npm run typecheck --workspace=@comfi/testing",
     "localnet:start": "bash scripts/localnet-start.sh",
     "localnet:setup": "bash scripts/localnet-setup.sh",
     "localnet:create-test-pool": "node scripts/create-test-pool.mjs",

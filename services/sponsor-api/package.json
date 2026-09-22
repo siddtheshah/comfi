@@ -4,6 +4,8 @@
   "private": true,
   "description": "Quote issuance boundary for ComFi's Solana sponsorship flows.",
   "type": "module",
+  "main": "./dist/src/index.js",
+  "exports": "./dist/src/index.js",
   "engines": {
     "node": ">=20"
   },
