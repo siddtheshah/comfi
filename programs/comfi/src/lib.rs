@@ -83,6 +83,7 @@ pub mod comfi {
         pool.next_request_id = 0;
         pool.next_proposal_id = 0;
         pool.bump = ctx.bumps.pool;
+        pool.testing_enabled = args.testing_enabled;
         ctx.accounts.global.next_pool_id = ctx.accounts.global.next_pool_id.checked_add(1).ok_or(ComfiError::MathOverflow)?;
 
         let member = &mut ctx.accounts.creator_member;
@@ -184,9 +185,58 @@ pub mod comfi {
     pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
         let next_start = pool.cycle_started_at.checked_add(pool.cycle_duration_seconds).ok_or(ComfiError::MathOverflow)?;
-        require!(Clock::get()?.unix_timestamp >= next_start, ComfiError::CycleNotReady);
+        if !pool.testing_enabled {
+            require!(Clock::get()?.unix_timestamp >= next_start, ComfiError::CycleNotReady);
+        }
         pool.current_cycle = pool.current_cycle.checked_add(1).ok_or(ComfiError::MathOverflow)?;
         pool.cycle_started_at = next_start;
+        Ok(())
+    }
+
+    pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.ensure_testing_enabled()?;
+        pool.current_cycle = pool.current_cycle.checked_add(1).ok_or(ComfiError::MathOverflow)?;
+        pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        Ok(())
+    }
+
+    pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()> {
+        require!(count > 0, ComfiError::InvalidAmount);
+        let pool = &mut ctx.accounts.pool;
+        pool.ensure_testing_enabled()?;
+        pool.current_cycle = pool.current_cycle.checked_add(count).ok_or(ComfiError::MathOverflow)?;
+        pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        Ok(())
+    }
+
+    pub fn test_set_cycle(ctx: Context<TestPoolOnly>, cycle: u64) -> Result<()> {
+        let pool = &mut ctx.accounts.pool;
+        pool.ensure_testing_enabled()?;
+        pool.current_cycle = cycle;
+        pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        Ok(())
+    }
+
+    pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> {
+        ctx.accounts.pool.ensure_testing_enabled()?;
+        let clock = Clock::get()?;
+        let proposal = &mut ctx.accounts.proposal;
+        require!(proposal.state == ProposalState::Open, ComfiError::ProposalNotOpen);
+        if proposal.yes_votes >= ctx.accounts.pool.vote_threshold && proposal.yes_votes > proposal.no_votes {
+            proposal.state = ProposalState::Executable;
+            proposal.executable_after = clock.unix_timestamp;
+        } else {
+            proposal.state = ProposalState::Rejected;
+        }
+        Ok(())
+    }
+
+    pub fn test_reset_member_allowance(ctx: Context<TestMemberOnly>) -> Result<()> {
+        ctx.accounts.pool.ensure_testing_enabled()?;
+        let member = &mut ctx.accounts.member;
+        member.allowance_cycle = ctx.accounts.pool.current_cycle;
+        member.action_allowance_used = 0;
         Ok(())
     }
 
@@ -472,8 +522,14 @@ impl GlobalConfig { pub const SPACE: usize = 8 + 32 * 4 + 1 + 8 + 1; }
 
 /// PDA seeds: ["pool", pool_id.to_le_bytes()]. It is also the vault authority.
 #[account]
-pub struct Pool { pub global: Pubkey, pub id: u64, pub creator: Pubkey, pub vault: Pubkey, pub member_cap: u32, pub member_count: u32, pub minimum_deposit: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub current_cycle: u64, pub cycle_duration_seconds: i64, pub cycle_started_at: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub next_request_id: u64, pub next_proposal_id: u64, pub bump: u8 }
-impl Pool { pub const SPACE: usize = 8 + 197; }
+pub struct Pool { pub global: Pubkey, pub id: u64, pub creator: Pubkey, pub vault: Pubkey, pub member_cap: u32, pub member_count: u32, pub minimum_deposit: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub current_cycle: u64, pub cycle_duration_seconds: i64, pub cycle_started_at: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub next_request_id: u64, pub next_proposal_id: u64, pub bump: u8, pub testing_enabled: bool }
+impl Pool {
+    pub const SPACE: usize = 8 + 198;
+    pub fn ensure_testing_enabled(&self) -> Result<()> {
+        require!(self.testing_enabled, ComfiError::TestingNotEnabled);
+        Ok(())
+    }
+}
 
 /// PDA seeds: ["member", pool, wallet]. Alias bytes are never stored on chain.
 #[account]
@@ -512,7 +568,7 @@ impl SponsorQuoteReceipt { pub const SPACE: usize = 8 + 32 + 32 + 32 + 1; }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)] pub struct SponsorQuote { pub quote_id: [u8; 32], pub pool: Pubkey, pub member: Pubkey, pub action: SponsoredAction, pub charge_usdc: u64, pub expires_at: i64, pub treasury_usdc: Pubkey }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)] pub enum SponsoredAction { SetAlias }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct CreatePoolArgs { pub member_cap: u32, pub minimum_deposit: u64, pub initial_deposit: u64, pub enrollment_fee: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub cycle_duration_seconds: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub creator_alias_hash: [u8; 32], pub creator_encryption_public_key: [u8; 32] }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct CreatePoolArgs { pub member_cap: u32, pub minimum_deposit: u64, pub initial_deposit: u64, pub enrollment_fee: u64, pub vote_threshold: u32, pub voting_period_seconds: i64, pub timelock_seconds: i64, pub cycle_duration_seconds: i64, pub action_allowance_per_cycle: u64, pub max_sponsored_action_charge: u64, pub creator_alias_hash: [u8; 32], pub creator_encryption_public_key: [u8; 32], pub testing_enabled: bool }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct JoinPoolArgs { pub initial_deposit: u64, pub alias_hash: [u8; 32], pub encryption_public_key: [u8; 32] }
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)] pub struct WithdrawalArgs { pub recipient: Pubkey, pub amount: u64, pub justification_hash: [u8; 32], pub requires_proposal: bool }
 
@@ -554,4 +610,61 @@ pub enum ComfiError {
     #[msg("Sponsor charge would exceed the member's cycle allowance.")] ActionAllowanceExceeded,
     #[msg("Missing the required preceding Ed25519 quote verification.")] MissingQuoteVerification,
     #[msg("Sponsor quote signature or signed message is invalid.")] InvalidQuoteSignature,
+    #[msg("This pool is not enabled for testing.")] TestingNotEnabled,
+}
+
+#[derive(Accounts)]
+pub struct TestPoolOnly<'info> {
+    #[account(mut)]
+    pub pool: Account<'info, Pool>,
+}
+
+#[derive(Accounts)]
+pub struct TestFinalizeProposal<'info> {
+    pub pool: Account<'info, Pool>,
+    #[account(mut, has_one = pool)]
+    pub proposal: Account<'info, Proposal>,
+}
+
+#[derive(Accounts)]
+pub struct TestMemberOnly<'info> {
+    pub pool: Account<'info, Pool>,
+    #[account(mut, has_one = pool)]
+    pub member: Account<'info, Member>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_testing_enabled_check() {
+        let mut pool = Pool {
+            global: Pubkey::default(),
+            id: 0,
+            creator: Pubkey::default(),
+            vault: Pubkey::default(),
+            member_cap: 10,
+            member_count: 1,
+            minimum_deposit: 100,
+            vote_threshold: 1,
+            voting_period_seconds: 100,
+            timelock_seconds: 50,
+            current_cycle: 0,
+            cycle_duration_seconds: 1000,
+            cycle_started_at: 0,
+            action_allowance_per_cycle: 100,
+            max_sponsored_action_charge: 10,
+            next_request_id: 0,
+            next_proposal_id: 0,
+            bump: 255,
+            testing_enabled: true,
+        };
+
+        assert!(pool.ensure_testing_enabled().is_ok());
+
+        pool.testing_enabled = false;
+        let err = pool.ensure_testing_enabled().unwrap_err();
+        assert_eq!(err, ComfiError::TestingNotEnabled.into());
+    }
 }

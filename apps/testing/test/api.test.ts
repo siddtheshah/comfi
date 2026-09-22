@@ -53,6 +53,62 @@ test('executeAction escalates on missing required poolAddress parameter for pool
     },
     { message: /Missing poolAddress/ }
   )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_roll_cycle', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_advance_cycles', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_advance_cycles', { poolAddress: '11111111111111111111111111111111', count: -1 })
+    },
+    { message: /Invalid count/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_set_cycle', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_set_cycle', { poolAddress: '11111111111111111111111111111111', cycle: -1 })
+    },
+    { message: /Invalid cycle/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_finalize_proposal', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_finalize_proposal', { poolAddress: '11111111111111111111111111111111' })
+    },
+    { message: /Missing proposalAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('test_reset_member_allowance', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
 })
 
 test('executeAction escalates on invalid wallet names', async () => {

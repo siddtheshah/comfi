@@ -163,6 +163,7 @@ export async function getSystemStatus(): Promise<SystemStatus> {
         maxSponsoredActionCharge: formatUsdc(p.maxSponsoredActionCharge.toString()),
         nextRequestId: Number(p.nextRequestId),
         nextProposalId: Number(p.nextProposalId),
+        testingEnabled: Boolean(p.testingEnabled),
       }
     })
   )
@@ -406,6 +407,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
           maxSponsoredActionCharge: new BN(BigInt(Math.floor(maxSponsoredActionCharge * 1e6)).toString()),
           creatorAliasHash: Array(32).fill(0),
           creatorEncryptionPublicKey: Array(32).fill(0),
+          testingEnabled: payload.testingEnabled ?? true,
         })
         .accounts({
           creator: wallets.creator.publicKey,
@@ -541,6 +543,94 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         .rpc()
 
       return { tx, pool: poolAddress }
+    }
+
+    case 'test_roll_cycle': {
+      const { poolAddress } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for test_roll_cycle')
+      const poolPubkey = new PublicKey(poolAddress)
+
+      const tx = await program.methods
+        .testRollCycle()
+        .accounts({
+          pool: poolPubkey,
+        })
+        .rpc()
+
+      return { tx, pool: poolAddress }
+    }
+
+    case 'test_advance_cycles': {
+      const { poolAddress, count = 1 } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for test_advance_cycles')
+      if (typeof count !== 'number' || count <= 0) throw new Error(`Invalid count for test_advance_cycles: ${count}`)
+      const poolPubkey = new PublicKey(poolAddress)
+
+      const tx = await program.methods
+        .testAdvanceCycles(new BN(count))
+        .accounts({
+          pool: poolPubkey,
+        })
+        .rpc()
+
+      return { tx, pool: poolAddress, count }
+    }
+
+    case 'test_set_cycle': {
+      const { poolAddress, cycle } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for test_set_cycle')
+      if (typeof cycle !== 'number' || cycle < 0) throw new Error(`Invalid cycle for test_set_cycle: ${cycle}`)
+      const poolPubkey = new PublicKey(poolAddress)
+
+      const tx = await program.methods
+        .testSetCycle(new BN(cycle))
+        .accounts({
+          pool: poolPubkey,
+        })
+        .rpc()
+
+      return { tx, pool: poolAddress, cycle }
+    }
+
+    case 'test_finalize_proposal': {
+      const { poolAddress, proposalAddress } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for test_finalize_proposal')
+      if (!proposalAddress) throw new Error('Missing proposalAddress for test_finalize_proposal')
+      const poolPubkey = new PublicKey(poolAddress)
+      const proposalPubkey = new PublicKey(proposalAddress)
+
+      const tx = await program.methods
+        .testFinalizeProposal()
+        .accounts({
+          pool: poolPubkey,
+          proposal: proposalPubkey,
+        })
+        .rpc()
+
+      return { tx, pool: poolAddress, proposal: proposalAddress }
+    }
+
+    case 'test_reset_member_allowance': {
+      const { poolAddress, walletName = 'creator' } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for test_reset_member_allowance')
+      const targetWallet = wallets[walletName as keyof typeof wallets]
+      if (!targetWallet) throw new Error(`Invalid walletName: ${walletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const [memberPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('member'), poolPubkey.toBuffer(), targetWallet.publicKey.toBuffer()],
+        programId
+      )
+
+      const tx = await program.methods
+        .testResetMemberAllowance()
+        .accounts({
+          pool: poolPubkey,
+          member: memberPda,
+        })
+        .rpc()
+
+      return { tx, pool: poolAddress, member: memberPda.toBase58() }
     }
 
     case 'create_proposal': {

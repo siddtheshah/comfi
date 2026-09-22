@@ -31,6 +31,7 @@ export function App() {
     cycleDurationSeconds: 2592000,
     actionAllowancePerCycle: 5,
     maxSponsoredActionCharge: 1,
+    testingEnabled: true,
   })
 
   const [joinPoolArgs, setJoinPoolArgs] = useState({
@@ -400,6 +401,16 @@ export function App() {
                 style={{ width: '120px' }}
               />
             </div>
+            <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '6px', paddingTop: '16px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '12px' }}>
+                <input
+                  type="checkbox"
+                  checked={createPoolArgs.testingEnabled}
+                  onChange={e => setCreatePoolArgs({ ...createPoolArgs, testingEnabled: e.target.checked })}
+                />
+                Testing Enabled
+              </label>
+            </div>
           </div>
           <button
             className="btn primary"
@@ -478,6 +489,14 @@ export function App() {
                     <td>Next Proposal ID</td>
                     <td>{selectedPool.nextProposalId}</td>
                   </tr>
+                  <tr>
+                    <td>Testing Mode</td>
+                    <td>
+                      <span className={selectedPool.testingEnabled ? 'badge green' : 'badge red'}>
+                        {selectedPool.testingEnabled ? '✓ Enabled (Bypass Allowed)' : '✗ Disabled'}
+                      </span>
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>
@@ -486,14 +505,44 @@ export function App() {
           )}
 
           {selectedPool && (
-            <div className="form-row">
-              <button
-                className="btn small"
-                disabled={loading}
-                onClick={() => void runAction('roll_cycle', { poolAddress: selectedPool.address }, `Roll Cycle for Pool #${selectedPool.id}`)}
-              >
-                Roll Cycle
-              </button>
+            <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div className="form-row" style={{ alignItems: 'center' }}>
+                <button
+                  className="btn small"
+                  disabled={loading}
+                  onClick={() => void runAction('roll_cycle', { poolAddress: selectedPool.address }, `Roll Cycle for Pool #${selectedPool.id}`)}
+                >
+                  Roll Cycle
+                </button>
+                <button
+                  className="btn small primary"
+                  disabled={loading}
+                  title="Force rolls the cycle forward immediately (requires testing enabled)"
+                  onClick={() => void runAction('test_roll_cycle', { poolAddress: selectedPool.address }, `Test Roll Cycle for Pool #${selectedPool.id}`)}
+                >
+                  ⚡ Test Roll Cycle
+                </button>
+              </div>
+              <div className="form-row" style={{ alignItems: 'center' }}>
+                <input
+                  type="number"
+                  min="1"
+                  defaultValue="1"
+                  id="advance-cycles-input"
+                  style={{ width: '60px', padding: '4px 6px', fontSize: '12px' }}
+                />
+                <button
+                  className="btn small"
+                  disabled={loading}
+                  onClick={() => {
+                    const input = document.getElementById('advance-cycles-input') as HTMLInputElement
+                    const count = parseInt(input?.value || '1', 10)
+                    void runAction('test_advance_cycles', { poolAddress: selectedPool.address, count }, `Advance ${count} Cycles`)
+                  }}
+                >
+                  Advance Cycles
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -828,6 +877,21 @@ export function App() {
                               }
                             >
                               Finalize
+                            </button>
+                            <button
+                              className="btn small"
+                              style={{ borderColor: 'var(--accent)' }}
+                              disabled={loading}
+                              title="Test Finalize (Bypasses voting deadline and timelock)"
+                              onClick={() =>
+                                void runAction(
+                                  'test_finalize_proposal',
+                                  { poolAddress: selectedPool?.address, proposalAddress: p.address },
+                                  `Test Finalize Proposal #${p.id} (Dev Bypass)`
+                                )
+                              }
+                            >
+                              ⚡ Test Finalize
                             </button>
                           </>
                         )}

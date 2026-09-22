@@ -36,6 +36,7 @@ export interface PoolInfo {
   maxSponsoredActionCharge: string
   nextRequestId: number
   nextProposalId: number
+  testingEnabled: boolean
 }
 
 export interface MemberInfo {

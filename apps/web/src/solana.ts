@@ -48,6 +48,7 @@ export type OnChainPool = {
   maxSponsoredActionCharge: bigint
   nextRequestId: bigint
   nextProposalId: bigint
+  testingEnabled: boolean
   balanceUsdc: string
 }
 
@@ -81,6 +82,7 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
   const maxSponsoredActionCharge = view.getBigUint64(180, true)
   const nextRequestId = view.getBigUint64(188, true)
   const nextProposalId = view.getBigUint64(196, true)
+  const testingEnabled = dataBytes.length >= 206 ? view.getUint8(205) === 1 : false
 
   return {
     address,
@@ -100,6 +102,7 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
     maxSponsoredActionCharge,
     nextRequestId,
     nextProposalId,
+    testingEnabled,
   }
 }
 

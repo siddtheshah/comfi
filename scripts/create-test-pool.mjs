@@ -98,6 +98,7 @@ if (!poolAccount) {
     memberCap: 24, minimumDeposit: new BN(10n * oneUsdc), initialDeposit: new BN(100n * oneUsdc), enrollmentFee: new BN(1n * oneUsdc),
     voteThreshold: 2, votingPeriodSeconds: new BN(604800), timelockSeconds: new BN(86400), cycleDurationSeconds: new BN(2592000),
     actionAllowancePerCycle: new BN(5n * oneUsdc), maxSponsoredActionCharge: new BN(1n * oneUsdc), creatorAliasHash: Array(32).fill(0), creatorEncryptionPublicKey: Array(32).fill(0),
+    testingEnabled: true,
   }).accounts({ creator: creator.publicKey, global, creatorUsdc: creatorUsdc.address, treasuryUsdc: treasury.address, pool, vault, usdcMint: mint, creatorMember }).signers([creator]).rpc();
   poolAccount = await program.account.pool.fetch(pool);
 }
