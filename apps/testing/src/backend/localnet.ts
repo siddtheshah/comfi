@@ -190,26 +190,41 @@ export async function getPoolDetails(poolAddress: string): Promise<{
   const poolPubkey = new PublicKey(poolAddress)
   const program = await getProgram()
 
+  const poolAccount = await program.account.pool.fetch(poolPubkey)
+  const currentCycle = new BN(poolAccount.currentCycle.toString())
+
   // Fetch members for this pool
   const memberAccounts = await program.account.member.all([
     { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
   ])
-  const members: MemberInfo[] = memberAccounts.map((item: any) => {
-    const m = item.account
-    return {
-      address: item.publicKey.toBase58(),
-      pool: m.pool.toBase58(),
-      wallet: m.wallet.toBase58(),
-      role: m.role.admin ? 'Admin' : 'Member',
-      isFunded: Boolean(m.isFunded),
-      depositedTotal: formatUsdc(m.depositedTotal.toString()),
-      aliasHashHex: Buffer.from(m.aliasHash).toString('hex'),
-      encryptionPubKeyHex: Buffer.from(m.encryptionPublicKey).toString('hex'),
-      aliasVersion: Number(m.aliasVersion),
-      allowanceCycle: Number(m.allowanceCycle),
-      actionAllowanceUsed: formatUsdc(m.actionAllowanceUsed.toString()),
-    }
-  })
+  const members: MemberInfo[] = await Promise.all(
+    memberAccounts.map(async (item: any) => {
+      const m = item.account
+      const [spenderCyclePda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('cycle'), poolPubkey.toBuffer(), item.publicKey.toBuffer(), currentCycle.toArrayLike(Buffer, 'le', 8)],
+        programId
+      )
+      const cycleAccount = (await program.account.spenderCycle.fetchNullable(spenderCyclePda)) as any
+      const spendLimit = cycleAccount ? formatUsdc(cycleAccount.cap.toString()) : '$0.00'
+      const spentCurrentCycle = cycleAccount ? formatUsdc(cycleAccount.spent.toString()) : '$0.00'
+
+      return {
+        address: item.publicKey.toBase58(),
+        pool: m.pool.toBase58(),
+        wallet: m.wallet.toBase58(),
+        role: m.role.admin ? 'Admin' : m.role.spender ? 'Spender' : 'Member',
+        isFunded: Boolean(m.isFunded),
+        depositedTotal: formatUsdc(m.depositedTotal.toString()),
+        aliasHashHex: Buffer.from(m.aliasHash).toString('hex'),
+        encryptionPubKeyHex: Buffer.from(m.encryptionPublicKey).toString('hex'),
+        aliasVersion: Number(m.aliasVersion),
+        allowanceCycle: Number(m.allowanceCycle),
+        actionAllowanceUsed: formatUsdc(m.actionAllowanceUsed.toString()),
+        spendLimit,
+        spentCurrentCycle,
+      }
+    })
+  )
 
   // Fetch proposals for this pool
   const proposalAccounts = await program.account.proposal.all([

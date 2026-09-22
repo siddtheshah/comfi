@@ -43,7 +43,7 @@ export interface MemberInfo {
   address: string
   pool: string
   wallet: string
-  role: 'Admin' | 'Member'
+  role: 'Admin' | 'Spender' | 'Member'
   isFunded: boolean
   depositedTotal: string
   aliasHashHex: string
@@ -51,6 +51,8 @@ export interface MemberInfo {
   aliasVersion: number
   allowanceCycle: number
   actionAllowanceUsed: string
+  spendLimit?: string
+  spentCurrentCycle?: string
 }
 
 export interface ProposalInfo {

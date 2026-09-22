@@ -129,6 +129,8 @@ Run the all-in-one localnet setup script:
 npm run localnet:setup
 ```
 
+The script runs the localnet in the foreground and waits. When you are finished, press **`Ctrl+C`** to gracefully shut down the validator and clean up local ledger resources.
+
 ### What `npm run localnet:setup` does:
 1. **Starts an isolated validator**: Launches `solana-test-validator` with a clean ledger in `/tmp/comfi-localnet-ledger` listening on `http://127.0.0.1:8899`.
 2. **Generates and funds deployment payer**: Creates `/tmp/comfi-local-payer.json` and airdrops local SOL.
@@ -136,6 +138,7 @@ npm run localnet:setup
 4. **Initializes Global State**: Calls `initialize_global_config`, creates a 6-decimal test-USDC mint, and configures the protocol treasury.
 5. **Funds Development Wallet**: Creates the associated token account for the deterministic mock wallet (`GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB`) and mints 10,000 test USDC and SOL.
 6. **Emits Public Metadata**: Writes `localnet.json` containing the deployed public addresses.
+7. **Monitors & Cleans Up**: Keeps the localnet alive until you press `Ctrl+C`, which automatically terminates the validator and removes the temporary ledger.
 
 *(Optional)* If you want to manually start the validator without redeploying:
 ```bash
@@ -198,7 +201,7 @@ npm run test:e2e
 
 ### 2. `A validator is already listening on http://127.0.0.1:8899`
 - `npm run localnet:setup` will safely refuse to reset a validator that is already running.
-- **Fix**: To start fresh, terminate the existing validator session first:
+- **Fix**: If an active `localnet:setup` session is running in another terminal tab, switch to it and press `Ctrl+C` to cleanly shut it down. If an orphaned session remains in the background:
   ```bash
   # If running in tmux:
   tmux kill-session -t comfi-validator

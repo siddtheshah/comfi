@@ -111,7 +111,7 @@ pub mod comfi {
         let member = &mut ctx.accounts.member;
         member.pool = pool.key();
         member.wallet = ctx.accounts.user.key();
-        member.role = MemberRole::Member;
+        member.role = MemberRole::Spender;
         member.is_funded = true;
         member.deposited_total = args.initial_deposit;
         member.alias_hash = args.alias_hash;
@@ -310,7 +310,9 @@ pub mod comfi {
             _ => return err!(ComfiError::WrongProposalAction),
         };
         require_keys_eq!(target, ctx.accounts.spender_member.key(), ComfiError::ProposalTargetMismatch);
-        require!(ctx.accounts.spender_member.can_request_spend(), ComfiError::NotSpender);
+        if ctx.accounts.spender_member.role == MemberRole::Member {
+            ctx.accounts.spender_member.role = MemberRole::Spender;
+        }
         let cycle = &mut ctx.accounts.spender_cycle;
         cycle.pool = ctx.accounts.pool.key();
         cycle.member = ctx.accounts.spender_member.key();
@@ -497,7 +499,7 @@ pub struct FinalizeProposal<'info> { pub pool: Account<'info, Pool>, #[account(m
 pub struct ExecuteSpenderLimit<'info> {
     #[account(mut)] pub executor: Signer<'info>, #[account(mut)] pub pool: Account<'info, Pool>,
     #[account(mut, has_one = pool)] pub proposal: Account<'info, Proposal>,
-    #[account(has_one = pool)] pub spender_member: Account<'info, Member>,
+    #[account(mut, has_one = pool)] pub spender_member: Account<'info, Member>,
     #[account(init_if_needed, payer = executor, space = SpenderCycle::SPACE, seeds = [b"cycle", pool.key().as_ref(), spender_member.key().as_ref(), &pool.current_cycle.to_le_bytes()], bump)] pub spender_cycle: Account<'info, SpenderCycle>,
     pub system_program: Program<'info, System>,
 }
@@ -534,7 +536,7 @@ impl Pool {
 /// PDA seeds: ["member", pool, wallet]. Alias bytes are never stored on chain.
 #[account]
 pub struct Member { pub pool: Pubkey, pub wallet: Pubkey, pub role: MemberRole, pub is_funded: bool, pub deposited_total: u64, pub alias_hash: [u8; 32], pub encryption_public_key: [u8; 32], pub alias_version: u32, pub allowance_cycle: u64, pub action_allowance_used: u64, pub bump: u8 }
-impl Member { pub const SPACE: usize = 8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1; fn can_request_spend(&self) -> bool { matches!(self.role, MemberRole::Spender | MemberRole::Admin) } }
+impl Member { pub const SPACE: usize = 8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1; fn can_request_spend(&self) -> bool { matches!(self.role, MemberRole::Member | MemberRole::Spender | MemberRole::Admin) } }
 
 /// PDA seeds: ["cycle", pool, member, cycle.to_le_bytes()].
 #[account]
@@ -666,5 +668,30 @@ mod tests {
         pool.testing_enabled = false;
         let err = pool.ensure_testing_enabled().unwrap_err();
         assert_eq!(err, ComfiError::TestingNotEnabled.into());
+    }
+
+    #[test]
+    fn test_can_request_spend() {
+        let mut member = Member {
+            pool: Pubkey::default(),
+            wallet: Pubkey::default(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+        };
+
+        assert!(member.can_request_spend());
+
+        member.role = MemberRole::Spender;
+        assert!(member.can_request_spend());
+
+        member.role = MemberRole::Admin;
+        assert!(member.can_request_spend());
     }
 }

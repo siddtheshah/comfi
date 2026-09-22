@@ -77,29 +77,86 @@ if "$SOLANA" -u "$RPC_URL" cluster-version >/dev/null 2>&1; then
   exit 1
 fi
 
+VALIDATOR_PID=""
+CLEANED_UP=0
+
+cleanup() {
+  local exit_code=$?
+  if [ "$CLEANED_UP" -eq 1 ]; then
+    return
+  fi
+  CLEANED_UP=1
+  trap - EXIT INT TERM
+
+  if [ -n "${VALIDATOR_PID:-}" ]; then
+    echo ""
+    echo "Shutting down localnet and cleaning up..."
+    if kill -0 "$VALIDATOR_PID" 2>/dev/null; then
+      echo "Stopping solana-test-validator (PID: $VALIDATOR_PID)..."
+      kill -TERM "$VALIDATOR_PID" 2>/dev/null || true
+      for _ in $(seq 1 10); do
+        if ! kill -0 "$VALIDATOR_PID" 2>/dev/null; then
+          break
+        fi
+        sleep 0.5
+      done
+      if kill -0 "$VALIDATOR_PID" 2>/dev/null; then
+        echo "Force stopping solana-test-validator..."
+        kill -9 "$VALIDATOR_PID" 2>/dev/null || true
+      fi
+    fi
+
+    if command -v tmux >/dev/null 2>&1; then
+      tmux kill-session -t comfi-validator >/dev/null 2>&1 || true
+    fi
+
+    if [ "${KEEP_LEDGER:-false}" != "true" ] && [ -d "$LEDGER" ]; then
+      echo "Removing ledger directory: $LEDGER"
+      rm -rf "$LEDGER"
+    fi
+
+    echo "Localnet stopped and cleaned up."
+  fi
+
+  if [ "$exit_code" -eq 130 ] || [ "$exit_code" -eq 0 ]; then
+    exit 0
+  else
+    exit "$exit_code"
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
 echo "Starting a reset isolated validator with ledger: $LEDGER"
 if command -v tmux >/dev/null 2>&1; then
   tmux kill-session -t comfi-validator >/dev/null 2>&1 || true
-  tmux new-session -d -s comfi-validator "$SOLANA_TEST_VALIDATOR" --reset --ledger "$LEDGER"
-else
-  nohup "$SOLANA_TEST_VALIDATOR" --reset --ledger "$LEDGER" >/tmp/comfi-validator.log 2>&1 &
 fi
+
+"$SOLANA_TEST_VALIDATOR" --reset --ledger "$LEDGER" >/tmp/comfi-validator.log 2>&1 &
+VALIDATOR_PID=$!
 
 READY=false
 for attempt in $(seq 1 30); do
-  sleep 1
   if "$SOLANA" -u "$RPC_URL" cluster-version >/dev/null 2>&1; then
     READY=true
     break
   fi
+  if ! kill -0 "$VALIDATOR_PID" 2>/dev/null; then
+    echo "Error: solana-test-validator exited while waiting for RPC to become ready." >&2
+    if [ -f /tmp/comfi-validator.log ]; then
+      tail -n 20 /tmp/comfi-validator.log >&2 || true
+    fi
+    exit 1
+  fi
+  sleep 1
 done
 
 if [ "$READY" != "true" ]; then
-  echo "Error: Local validator did not become ready at $RPC_URL." >&2
+  echo "Error: Local validator did not become ready at $RPC_URL within 30 seconds." >&2
   exit 1
 fi
 
-echo "Validator is ready at $RPC_URL"
+echo "Validator is ready at $RPC_URL (PID: $VALIDATOR_PID)"
 
 # Create payer keypair if it does not exist
 if [ ! -f "$PAYER" ]; then
@@ -124,4 +181,16 @@ export COMFI_POOL_MODE="fund-wallet"
 "$NODE" scripts/create-test-pool.mjs
 unset COMFI_POOL_MODE
 
-echo "Localnet is ready: program deployed, deployer initialized, and mock test wallet funded. Start the UI and use Start a pool."
+echo ""
+echo "=========================================================================="
+echo "  Localnet is ready: program deployed, deployer initialized, and mock test wallet funded."
+echo "  RPC endpoint: $RPC_URL"
+echo "  Validator PID: $VALIDATOR_PID"
+echo "  Validator logs: /tmp/comfi-validator.log"
+echo ""
+echo "  Localnet is active. Press Ctrl+C to stop localnet and clean up."
+echo "=========================================================================="
+echo ""
+
+# Keep running in foreground until Ctrl+C (SIGINT) or validator process exits
+wait "$VALIDATOR_PID" 2>/dev/null || true

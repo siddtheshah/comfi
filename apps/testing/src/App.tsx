@@ -687,6 +687,7 @@ export function App() {
               <tr>
                 <th>Wallet</th>
                 <th>Role</th>
+                <th>Spend Limit</th>
                 <th>Funded</th>
                 <th>Deposited</th>
                 <th>Alias Ver</th>
@@ -698,7 +699,16 @@ export function App() {
                 poolMembers.map(m => (
                   <tr key={m.address}>
                     <td className="mono" title={m.wallet}>{m.wallet.slice(0, 6)}…{m.wallet.slice(-4)}</td>
-                    <td>{m.role === 'Admin' ? <span className="badge orange">Admin</span> : <span className="badge blue">Member</span>}</td>
+                    <td>
+                      {m.role === 'Admin' ? (
+                        <span className="badge orange">Admin</span>
+                      ) : m.role === 'Spender' ? (
+                        <span className="badge green">Spender</span>
+                      ) : (
+                        <span className="badge blue">Member</span>
+                      )}
+                    </td>
+                    <td><strong>{m.spendLimit ?? '$0.00'}</strong></td>
                     <td>{m.isFunded ? <span className="badge green">YES</span> : <span className="badge red">NO</span>}</td>
                     <td>{m.depositedTotal}</td>
                     <td>v{m.aliasVersion}</td>
@@ -707,7 +717,7 @@ export function App() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No members found for this pool.</td>
+                  <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No members found for this pool.</td>
                 </tr>
               )}
             </tbody>
