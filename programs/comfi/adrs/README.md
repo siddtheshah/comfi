@@ -52,6 +52,7 @@ What mathematical and state invariants must hold?
 - **Positive**: Advantages gained.
 - **Negative / Trade-offs**: Complexities introduced.
 
-## Implementation & Test References
-Links to source files and unit tests validating the decision.
+## Implementation References
+Links to source files, account definitions, and instruction handlers implementing the decision.
 ```
+

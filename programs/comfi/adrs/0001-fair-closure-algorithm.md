@@ -224,7 +224,6 @@ $$\text{surplus\_refund} = \min(\text{member.surplus\_amount}, \text{vault.amoun
   $$\text{net\_conferred\_share} = 50 - 0 (\text{benefit}) = 50 \text{ USDC}$$
   $$\text{Total Refund for } M_3 = 50 + 50 = 100 \text{ USDC}$$
 - **Result**: Cartel receives 0 USDC. $M_3$ recovers 100% of their deposited capital. The 51% attack fails completely.
-- *Verified in test: [`test_anti_51_percent_attack_on_pool_closure_settlement`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L2505-L2605).*
 
 ### 2. Bank Run on Vault Deficit
 
@@ -243,7 +242,6 @@ $$\text{surplus\_refund} = \min(\text{member.surplus\_amount}, \text{vault.amoun
   $$\text{refund}_B = \frac{50 \times 60}{100} = 30 \text{ USDC}$$
   Vault balance drops from 30 to 0.
 - **Result**: Both members receive an equal 30 USDC (50% of available funds). Front-running yields zero economic advantage.
-- *Verified in test: [`test_pro_rata_settlement_on_vault_deficit`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3104-L3183).*
 
 ### 3. Multi-Member, Multi-Cycle Timeline
 
@@ -264,7 +262,6 @@ $$\text{surplus\_refund} = \min(\text{member.surplus\_amount}, \text{vault.amoun
   - $C$ (deposited 100, 50 surplus): $50 \text{ surplus} + (50 - 20) = 80 \text{ USDC}$
   - $D$ (deposited 50, 0 surplus): $0 \text{ surplus} + (50 - 20) = 30 \text{ USDC}$
 - **Global Invariant**: $110 + 80 + 80 + 30 = 300 \text{ USDC}$. The vault is exhausted to exactly 0 with zero dust.
-- *Verified in test: [`test_complex_multicycle_multimember_pool_closure_refund_settlement`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L2865-L3101).*
 
 ### 4. Unfunded Member Protection
 
@@ -277,7 +274,6 @@ $$\text{surplus\_refund} = \min(\text{member.surplus\_amount}, \text{vault.amoun
 - `sync_benefit` checks `self.is_funded_for_pool(pool)`. Because the member was unfunded, their `cumulative_benefit_received` remains 0.
 - Upon closure, $\text{net\_conferred\_share} = \text{total\_contributions} - 0 = \text{total\_contributions}$.
 - **Result**: The unfunded user recovers their entire unconferred deposit without dilution.
-- *Verified in test: [`test_unfunded_member_refund_preserved`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3231-L3270).*
 
 ---
 
@@ -316,22 +312,18 @@ The Fair Closure implementation guarantees the following formal invariants:
 
 ---
 
-## Implementation & Test Reference
+## Implementation References
 
 | Component | File Path | Line Range |
 | --- | --- | --- |
 | Benefit Accumulator Constant (`BENEFIT_SCALE`) | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L463) | L463 |
-| Pool Closure Fields | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L504-L514) | L504–L514 |
+| Pool Closure & Settlement State | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L504-L514) | L504–L514 |
+| Pool Closure Gatekeeper (`ensure_not_closing`) | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L527-L530) | L527–L530 |
 | Member Closure & Benefit Fields | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L578-L585) | L578–L585 |
+| `JoinPool` Closure Constraint | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L108-L113) | L108–L113 |
+| `Deposit` Closure Constraint & Mutability | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L141-L148) | L141–L148 |
 | `sync_surplus` Implementation | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L601-L611) | L601–L611 |
 | `sync_benefit` Implementation | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L613-L627) | L613–L627 |
 | `spend` Accumulator Delta | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1598-L1613) | L1598–L1613 |
 | `claim_closure_refund` Instruction | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1618-L1689) | L1618–L1689 |
-| Test: Anti-51% Cartel Attack | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L2505-L2605) | L2505–L2605 |
-| Test: Multi-Cycle Multi-Member Closure | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L2865-L3101) | L2865–L3101 |
-| Test: Pro-Rata Deficit Settlement | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3104-L3183) | L3104–L3183 |
-| Test: Surplus Consumed Across Cycles | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3186-L3228) | L3186–L3228 |
-| Test: Unfunded Member Refund Preserved | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3231-L3270) | L3231–L3270 |
-| Test: Surplus Deficit Graceful Refund | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3273-L3281) | L3273–L3281 |
-| Test: Deposits & Joins Blocked When Closing | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L3291-L3324) | L3291–L3324 |
 
