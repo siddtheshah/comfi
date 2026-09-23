@@ -190,14 +190,15 @@ pub mod deployer_handlers {
     pub fn create_pool(ctx: Context<CreatePool>, args: CreatePoolArgs) -> Result<()> {
         validate_create_pool(ctx.accounts.global.paused_new_pools, &args)?;
 
-        let (is_funded, surplus) = if args.initial_deposit >= args.member_obligation_amount {
-            let excess = args.initial_deposit
-                .checked_sub(args.member_obligation_amount)
-                .ok_or(ComfiError::MathOverflow)?;
-            (true, excess)
-        } else {
-            (false, 0)
-        };
+        let (is_funded, surplus, initial_conferred, initial_non_conferred) =
+            if args.initial_deposit >= args.member_obligation_amount {
+                let excess = args.initial_deposit
+                    .checked_sub(args.member_obligation_amount)
+                    .ok_or(ComfiError::MathOverflow)?;
+                (true, excess, args.member_obligation_amount, excess)
+            } else {
+                (false, 0, 0, args.initial_deposit)
+            };
 
         transfer_user_tokens(
             &ctx.accounts.token_program,
@@ -252,14 +253,16 @@ pub mod deployer_handlers {
         pool.pending_withdrawal_execution_mode = args.withdrawal_execution_mode;
         pool.pending_config_modification_execution_mode = args.config_modification_execution_mode;
         pool.is_closing = false;
-        pool.total_surplus = surplus;
+        pool.total_non_conferred_capital = initial_non_conferred;
         pool.close_deadline_cycles = args.withdrawal_deadline_cycles;
         pool.close_execution_mode = ExecutionMode::OnDeadline;
         pool.total_settled_capital = 0;
         pool.funded_member_count = if is_funded { 1 } else { 0 };
         pool.cumulative_benefit_per_member = 0;
-        pool.total_conferred_capital = args.initial_deposit.saturating_sub(surplus);
-        pool.closing_conferred_vault = 0;
+        pool.total_conferred_capital = initial_conferred;
+        pool.has_snapshotted_closure = false;
+        pool.closing_vault_basis = 0;
+        pool.closing_non_conferred_basis = 0;
         pool.closing_conferred_pool_capital = 0;
         ctx.accounts.global.next_pool_id = ctx
             .accounts

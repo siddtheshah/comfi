@@ -54,7 +54,7 @@ To resolve these challenges, ComFi implements the **Fair Closure Algorithm**: a 
 
 ## Detailed Technical Specification
 
-### 1. Data Structures & State Variables
+#### 1. Data Structures & State Variables
 
 The Fair Closure Algorithm relies on coordinated fields in the [`Pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L465-L515) and [`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L565-L586) accounts:
 
@@ -62,12 +62,14 @@ The Fair Closure Algorithm relies on coordinated fields in the [`Pool`](file:///
 // Pool state fields relevant to Fair Closure
 pub struct Pool {
     pub is_closing: bool,
-    pub total_surplus: u64,
+    pub total_non_conferred_capital: u64,    // Senior Tier 1: surplus prepayments & unfunded deposits
     pub funded_member_count: u32,
     pub cumulative_benefit_per_member: u128, // Scaled by BENEFIT_SCALE (1e12)
-    pub total_conferred_capital: u64,
-    pub closing_conferred_vault: u64,       // Pro-rata basis snapshot
-    pub closing_conferred_pool_capital: u64, // Pro-rata basis snapshot
+    pub total_conferred_capital: u64,        // Junior Tier 2: active obligation capital
+    pub has_snapshotted_closure: bool,       // Atomic snapshot gatekeeper flag
+    pub closing_vault_basis: u64,            // Total vault balance snapshot at initial closure claim
+    pub closing_non_conferred_basis: u64,    // Total non-conferred basis snapshot
+    pub closing_conferred_pool_capital: u64, // Total conferred pool capital snapshot
     pub total_settled_capital: u64,
     // ...
 }
@@ -94,12 +96,14 @@ $$\text{BENEFIT\_SCALE} = 10^{12} = 1{,}000{,}000{,}000{,}000$$
 #### A. Spend Execution Accumulator (`spend`)
 Whenever a delegated spend of amount $S$ is executed:
 1. Verify active funded members: $\text{funded\_member\_count} > 0$.
-2. Calculate per-member benefit increment:
+2. Verify non-conferred capital inviolability: $\text{vault.amount} - S \ge \text{pool.total\_non\_conferred\_capital}$.
+3. Verify conferred sufficiency: $S \le \text{pool.total\_conferred\_capital}$.
+4. Calculate per-member benefit increment:
    $$\Delta \text{benefit} = \frac{S \times \text{BENEFIT\_SCALE}}{\text{funded\_member\_count}}$$
-3. Update global pool accumulator:
+5. Update global pool accumulator:
    $$\text{pool.cumulative\_benefit\_per\_member} \mathrel{+}= \Delta \text{benefit}$$
-4. Reduce conferred capital:
-   $$\text{pool.total\_conferred\_capital} = \text{pool.total\_conferred\_capital} \mathbin{\dot{-}} S$$
+6. Reduce conferred capital:
+   $$\text{pool.total\_conferred\_capital} = \text{pool.total\_conferred\_capital} - S$$
 
 #### B. Member State Synchronization (`sync_benefit`)
 When an individual member deposits, joins, or claims:
@@ -117,7 +121,7 @@ When an individual member deposits, joins, or claims:
 Surplus represents prepayment for future cycles:
 - If $\text{pool.current\_cycle} > \text{member.surplus\_cycle}$:
   - The cycle has advanced, consuming the prepaid surplus into active conferred capital:
-    $$\text{pool.total\_surplus} = \text{pool.total\_surplus} \mathbin{\dot{-}} \text{member.surplus\_amount}$$
+    $$\text{pool.total\_non\_conferred\_capital} = \text{pool.total\_non\_conferred\_capital} \mathbin{\dot{-}} \text{member.surplus\_amount}$$
     $$\text{pool.total\_conferred\_capital} = \text{pool.total\_conferred\_capital} + \text{member.surplus\_amount}$$
     $$\text{member.surplus\_amount} = 0$$
     $$\text{member.surplus\_cycle} = \text{pool.current\_cycle}$$
@@ -126,7 +130,7 @@ Surplus represents prepayment for future cycles:
 
 ### 3. The Closure Settlement Engine (`claim_closure_refund`)
 
-When a member invokes [`claim_closure_refund`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1618-L1689), the program enforces a strict execution sequence:
+When a member invokes [`claim_closure_refund`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1618-L1689), the program enforces a two-tier settlement sequence:
 
 ```mermaid
 flowchart TD
@@ -136,24 +140,28 @@ flowchart TD
     C -- No --> C_Err[Error: ClosureRefundAlreadyClaimed]
     C -- Yes --> D[member.sync_surplus: advance surplus if cycle rolled]
     D --> E[member.sync_benefit: accrue uncollected spend benefits]
-    E --> F{Initial Claim?<br/>closing_conferred_vault == 0 &&<br/>total_settled_capital == 0}
-    F -- Yes --> G[Snapshot Basis:<br/>closing_conferred_vault = vault - total_surplus<br/>closing_conferred_pool_capital = total_conferred_capital]
+    E --> F{!pool.has_snapshotted_closure?}
+    F -- Yes --> G[Snapshot Basis:<br/>closing_vault_basis = vault.amount<br/>closing_non_conferred_basis = total_non_conferred_capital<br/>closing_conferred_pool_capital = total_conferred_capital<br/>has_snapshotted_closure = true]
     F -- No --> H[Use Existing Snapshot Basis]
-    G --> I[Priority 1: Surplus Refund<br/>surplus_refund = min member.surplus, vault]
+    G --> I[Priority 1: Senior Non-Conferred Refund]
     H --> I
-    I --> J[Calculate Net Conferred Share:<br/>conferred_contrib = total_contributions - surplus<br/>net_conferred = conferred_contrib - cumulative_benefit]
-    J --> K{Deficit Detected?<br/>closing_vault < closing_capital}
-    K -- Yes --> L["Pro-Rata Haircut:<br/>conferred_refund = (net_conferred * closing_vault) / closing_capital"]
-    K -- No --> M["Full Refund:<br/>conferred_refund = net_conferred"]
-    L --> N[Bound by Available Vault:<br/>conferred_refund = min conferred_refund, vault - surplus_refund]
-    M --> N
-    N --> O[Total Refund = surplus_refund + conferred_refund]
-    O --> P{total_refund > 0?}
-    P -- Yes --> Q[CPI Transfer from Vault to member_usdc]
-    P -- No --> R[Skip Transfer]
-    Q --> S[Update State:<br/>total_surplus -= surplus_refund<br/>total_settled_capital += conferred_refund<br/>member.surplus_amount = 0<br/>member.closure_claimed = true]
-    R --> S
-    S --> T[End: Return Ok]
+    I --> J{Vault < Non-Conferred Basis?}
+    J -- Yes --> K["Pro-Rata Tier 1 Haircut:<br/>refund_nc = (non_conferred_share * vault_basis) / non_conferred_basis"]
+    J -- No --> L["Full 100% Tier 1 Refund:<br/>refund_nc = non_conferred_share"]
+    K --> M[Priority 2: Junior Conferred Refund]
+    L --> M
+    M --> N[Available Conferred Vault:<br/>vault_for_conferred = vault_basis - non_conferred_basis]
+    N --> O{vault_for_conferred < conferred_capital?}
+    O -- Yes --> P["Pro-Rata Tier 2 Haircut:<br/>refund_c = (net_conferred_share * vault_for_conferred) / conferred_capital"]
+    O -- No --> Q["Full Tier 2 Refund:<br/>refund_c = net_conferred_share"]
+    P --> R[Bound Total Refund by Remaining Vault]
+    Q --> R
+    R --> S{total_refund > 0?}
+    S -- Yes --> T[CPI Transfer from Vault to member_usdc]
+    S -- No --> U[Skip Transfer]
+    T --> V[Update State:<br/>total_non_conferred_capital -= refund_nc<br/>total_settled_capital += refund_c<br/>member.surplus_amount = 0<br/>member.closure_claimed = true]
+    U --> V
+    V --> W[End: Return Ok]
 ```
 
 #### Step 1: Guard Checks & State Synchronization
@@ -165,40 +173,47 @@ flowchart TD
 #### Step 2: Atomic Pro-Rata Basis Snapshot
 On the very first claim transaction after pool closure:
 ```rust
-if pool.closing_conferred_vault == 0 && pool.total_settled_capital == 0 {
-    let vault_for_conferred = ctx.accounts.vault.amount.saturating_sub(pool.total_surplus);
-    pool.closing_conferred_vault = vault_for_conferred;
+if !pool.has_snapshotted_closure {
+    pool.closing_vault_basis = ctx.accounts.vault.amount;
+    pool.closing_non_conferred_basis = pool.total_non_conferred_capital;
     pool.closing_conferred_pool_capital = pool.total_conferred_capital;
+    pool.has_snapshotted_closure = true;
 }
 ```
 This freezes the relative deficit ratio permanently, guaranteeing that claim order cannot alter payouts.
 
-#### Step 3: Priority 1 — Unconsumed Surplus Refund
-Surplus capital was explicitly not committed to the current cycle's communal spending. It is refunded first at 100% face value:
-$$\text{surplus\_refund} = \min(\text{member.surplus\_amount}, \text{vault.amount})$$
-*(Note: Bounded gracefully by vault balance to avoid transaction reverts if external losses occurred).*
+#### Step 3: Priority 1 — Non-Conferred Capital Settlement (Senior Tier)
+Non-conferred capital consists of unconsumed advance surplus prepayments and partial deposits from unfunded members:
+$$\text{non\_conferred\_share} = \text{member.non\_conferred\_amount}()$$
+If the vault cannot cover the non-conferred basis, all non-conferred holders receive an equitable pro-rata haircut:
+$$\text{non\_conferred\_refund} = \begin{cases}
+\min\left(\left\lfloor \frac{\text{non\_conferred\_share} \times \text{pool.closing\_vault\_basis}}{\text{pool.closing\_non\_conferred\_basis}} \right\rfloor, \text{vault.amount}\right) & \text{if } \text{closing\_vault\_basis} < \text{closing\_non\_conferred\_basis} \\
+\min(\text{non\_conferred\_share}, \text{vault.amount}) & \text{otherwise}
+\end{cases}$$
 
-#### Step 4: Priority 2 — Net Conferred Capital Share
+#### Step 4: Priority 2 — Net Conferred Capital Share (Junior Tier)
 1. Compute the member's historical conferred contribution:
-   $$\text{conferred\_contribution} = \text{member.total\_contributions} \mathbin{\dot{-}} \text{member.surplus\_amount}$$
+   $$\text{conferred\_contribution} = \text{member.conferred\_contribution}()$$
 2. Subtract all benefits previously extracted from the pool via spends:
    $$\text{net\_conferred\_share} = \text{conferred\_contribution} \mathbin{\dot{-}} \text{member.cumulative\_benefit\_received}$$
-3. Apply the pro-rata deficit adjustment if the pool has a recorded deficit:
-   $$\text{vault\_after\_surplus} = \text{vault.amount} \mathbin{\dot{-}} \text{surplus\_refund}$$
+3. Compute vault remaining for the conferred tier:
+   $$\text{closing\_vault\_for\_conferred} = \text{pool.closing\_vault\_basis} \mathbin{\dot{-}} \text{pool.closing\_non\_conferred\_basis}$$
+4. Apply the pro-rata deficit adjustment if the conferred tier has a recorded deficit:
+   $$\text{vault\_after\_non\_conferred} = \text{vault.amount} \mathbin{\dot{-}} \text{non\_conferred\_refund}$$
    $$\text{conferred\_refund} = \begin{cases}
-   \min\left(\left\lfloor \frac{\text{net\_conferred\_share} \times \text{closing\_conferred\_vault}}{\text{closing\_conferred\_pool\_capital}} \right\rfloor, \text{vault\_after\_surplus}\right) & \text{if } \text{closing\_vault} < \text{closing\_capital} \\
-   \min(\text{net\_conferred\_share}, \text{vault\_after\_surplus}) & \text{otherwise}
+   \min\left(\left\lfloor \frac{\text{net\_conferred\_share} \times \text{closing\_vault\_for\_conferred}}{\text{pool.closing\_conferred\_pool\_capital}} \right\rfloor, \text{vault\_after\_non\_conferred}\right) & \text{if } \text{closing\_vault\_for\_conferred} < \text{closing\_conferred\_pool\_capital} \\
+   \min(\text{net\_conferred\_share}, \text{vault\_after\_non\_conferred}) & \text{otherwise}
    \end{cases}$$
 
 #### Step 5: Transfer & Accounting Settlement
 1. Sum total refund:
-   $$\text{total\_refund} = \text{surplus\_refund} + \text{conferred\_refund}$$
+   $$\text{total\_refund} = \text{non\_conferred\_refund} + \text{conferred\_refund}$$
 2. Execute CPI transfer from pool vault ATA to member's USDC token account signed by pool PDA seeds `[b"pool", &pool.id.to_le_bytes(), &[pool.bump]]`.
 3. Update pool and member accounting:
-   $$\text{pool.total\_surplus} = \text{pool.total\_surplus} \mathbin{\dot{-}} \text{surplus\_refund}$$
+   $$\text{pool.total\_non\_conferred\_capital} = \text{pool.total\_non\_conferred\_capital} \mathbin{\dot{-}} \text{non\_conferred\_refund}$$
    $$\text{pool.total\_settled\_capital} = \text{pool.total\_settled\_capital} + \text{conferred\_refund}$$
-   $$\text{member.surplus\_amount} = 0$$
-   $$\text{member.closure_claimed} = \text{true}$$
+   $$\text{member.surplus_amount} = 0$$
+   $$\text{member.closure_claimed} = \text{true}$$e}$$
 
 ---
 
@@ -208,72 +223,71 @@ $$\text{surplus\_refund} = \min(\text{member.surplus\_amount}, \text{vault.amoun
 
 **Threat Scenario**:
 - Cartel members $C_1$ and $C_2$ hold a voting majority.
-- Each contributed 100 USDC (total 200 USDC).
+- Each contributed 100 USDC (total 200 USDC conferred capital).
 - A delegated spend of 200 USDC is executed, entirely draining the vault. Both $C_1$ and $C_2$ received 100 USDC in benefit.
-- An honest member $M_3$ joins the pool, depositing 50 USDC obligation + 50 USDC surplus (vault now holds 100 USDC).
+- An honest member $M_3$ joins the pool, depositing 50 USDC obligation + 50 USDC surplus (vault now holds 100 USDC; 50 USDC non-conferred surplus, 50 USDC conferred).
 - Cartel passes a `ClosePool` proposal and attempts to claim closure refunds.
 
 **Algorithm Mitigation**:
 - $C_1$ and $C_2$ benefit calculation:
-  $$\text{conferred\_contrib} = 100 - 0 = 100$$
+  $$\text{conferred\_contribution} = 100 \text{ USDC}$$
   $$\text{net\_conferred\_share} = 100 - 100 (\text{benefit}) = 0$$
   $$\text{Total Refund for } C_1 / C_2 = 0 \text{ USDC}$$
 - $M_3$ calculation:
-  $$\text{Priority 1 Surplus Refund} = 50 \text{ USDC}$$
-  $$\text{conferred\_contrib} = 100 - 50 = 50$$
+  $$\text{Senior Tier 1 Refund (Surplus)} = 50 \text{ USDC}$$
+  $$\text{conferred\_contribution} = 50 \text{ USDC}$$
   $$\text{net\_conferred\_share} = 50 - 0 (\text{benefit}) = 50 \text{ USDC}$$
   $$\text{Total Refund for } M_3 = 50 + 50 = 100 \text{ USDC}$$
 - **Result**: Cartel receives 0 USDC. $M_3$ recovers 100% of their deposited capital. The 51% attack fails completely.
 
-### 2. Bank Run on Vault Deficit
+### 2. Priority 1 & 2 Bank Run on Vault Deficit
 
 **Threat Scenario**:
-- Members $A$ and $B$ each have 50 USDC net conferred share (total 100 USDC).
-- Due to an external incident or token discrepancy, the vault holds only 60 USDC (a 40% deficit).
-- $A$ attempts to front-run $B$ to claim 50 USDC first.
+- Members $A$ and $B$ each have 50 USDC net conferred share (total 100 USDC conferred capital).
+- Due to an external slashing incident, bridge freeze, or vault loss, the vault holds only 60 USDC (a 40% deficit).
+- $A$ attempts to front-run $B$ to claim 50 USDC first on a First-Come-First-Served basis.
 
 **Algorithm Mitigation**:
-- On initial claim, basis is snapshotted:
-  $$\text{closing\_conferred\_vault} = 60, \quad \text{closing\_conferred\_pool\_capital} = 100$$
+- On initial closure claim, the atomic snapshot bases freeze:
+  $$\text{closing\_vault\_basis} = 60, \quad \text{closing\_non\_conferred\_basis} = 0, \quad \text{closing\_conferred\_pool\_capital} = 100$$
+- Tier 2 vault balance for conferred capital:
+  $$\text{closing\_vault\_for\_conferred} = 60 \mathbin{\dot{-}} 0 = 60$$
 - Member $A$ claims:
-  $$\text{refund}_A = \frac{50 \times 60}{100} = 30 \text{ USDC}$$
-  Vault balance drops from 60 to 30.
+  $$\text{refund}_A = \min\left(\left\lfloor \frac{50 \times 60}{100} \right\rfloor, 60\right) = 30 \text{ USDC}$$
+  Vault balance drops from 60 to 30 USDC.
 - Member $B$ claims:
-  $$\text{refund}_B = \frac{50 \times 60}{100} = 30 \text{ USDC}$$
-  Vault balance drops from 30 to 0.
-- **Result**: Both members receive an equal 30 USDC (50% of available funds). Front-running yields zero economic advantage.
+  $$\text{refund}_B = \min\left(\left\lfloor \frac{50 \times 60}{100} \right\rfloor, 30\right) = 30 \text{ USDC}$$
+  Vault balance drops from 30 to 0 USDC.
+- **Result**: Both members receive exactly 30 USDC (50% of their claimable entitlement). Front-running yields zero economic advantage.
 
-### 3. Multi-Member, Multi-Cycle Timeline
-
-**Threat Scenario**:
-- Members $A$ and $B$ fund from Cycle 1 through Cycle 3, participating in Spends 1 (60 USDC) and 2 (40 USDC).
-- Members $C$ and $D$ join in Cycle 3. $C$ prepays surplus.
-- Spend 3 (80 USDC) occurs across all 4 funded members.
-- Pool enters closure with 300 USDC in vault.
-
-**Algorithm Mitigation**:
-- Cumulative benefits accrued:
-  - $A$ & $B$: $30 + 20 + 20 = 70 \text{ USDC each}$
-  - $C$ & $D$: $0 + 0 + 20 = 20 \text{ USDC each}$
-  - Total benefits delivered = 180 USDC (exact match to spends).
-- Settlement claims:
-  - $A$ (deposited 180, 30 surplus): $30 \text{ surplus} + (150 - 70) = 110 \text{ USDC}$
-  - $B$ (deposited 150, 0 surplus): $0 \text{ surplus} + (150 - 70) = 80 \text{ USDC}$
-  - $C$ (deposited 100, 50 surplus): $50 \text{ surplus} + (50 - 20) = 80 \text{ USDC}$
-  - $D$ (deposited 50, 0 surplus): $0 \text{ surplus} + (50 - 20) = 30 \text{ USDC}$
-- **Global Invariant**: $110 + 80 + 80 + 30 = 300 \text{ USDC}$. The vault is exhausted to exactly 0 with zero dust.
-
-### 4. Unfunded Member Protection
+### 3. Non-Conferred Capital Deficit Waterfall
 
 **Threat Scenario**:
-- A user deposits less than the full cycle obligation (`deposited_total < member_obligation_amount`), remaining unfunded.
-- Spends take place in the pool.
-- The pool closes.
+- User $X$ deposited 100 USDC but remained unfunded (`total_contributions = 100`, Senior Tier 1).
+- Member $Y$ has 100 USDC in unconsumed surplus (Senior Tier 1).
+- Total senior non-conferred capital $C_{\text{nc}} = 200 \text{ USDC}$.
+- Member $Z$ has 100 USDC net conferred capital (Junior Tier 2).
+- Catastrophic loss reduces the vault to 100 USDC ($V_0 = 100 < C_{\text{nc}}$).
 
 **Algorithm Mitigation**:
-- `sync_benefit` checks `self.is_funded_for_pool(pool)`. Because the member was unfunded, their `cumulative_benefit_received` remains 0.
-- Upon closure, $\text{net\_conferred\_share} = \text{total\_contributions} - 0 = \text{total\_contributions}$.
-- **Result**: The unfunded user recovers their entire unconferred deposit without dilution.
+- Senior Tier 1 deficit kicks in pro-rata:
+  $$\text{refund}_X = \left\lfloor \frac{100 \times 100}{200} \right\rfloor = 50 \text{ USDC}$$
+  $$\text{refund}_Y = \left\lfloor \frac{100 \times 100}{200} \right\rfloor = 50 \text{ USDC}$$
+- Conferred tier residual:
+  $$\text{closing\_vault\_for\_conferred} = 100 \mathbin{\dot{-}} 200 = 0$$
+  $$\text{refund}_Z = 0 \text{ USDC}$$
+- **Result**: Junior risk-bearing capital absorbs 100% of the loss first before senior capital is touched. Senior claimants equitably share the remaining vault pro-rata.
+
+### 4. Post-Closure Fee Drainage Prevention
+
+**Threat Scenario**:
+- The pool passes `ClosePool` and transitions to `is_closing = true`.
+- An attacker spams `run_sponsored_set_alias` to siphon vault funds as sponsored relay fees before members claim their refunds.
+
+**Algorithm Mitigation**:
+- `RunSponsoredSetAlias` checks `constraint = !pool.is_closing @ ComfiError::PoolIsClosing`.
+- Transaction is rejected immediately.
+- Sponsored action fees during active operations are also debited from `total_conferred_capital`, guarded against non-conferred reserve, and accounted for in `cumulative_benefit_received`.
 
 ---
 
@@ -286,15 +300,19 @@ The Fair Closure implementation guarantees the following formal invariants:
    Total distributions during closure can never exceed the initial vault balance at closure initiation.
 
 2. **Full Liquidation Invariant (Solvent Pool)**:
-   If $\text{closing\_conferred\_vault} \ge \text{closing\_conferred\_pool\_capital}$, then upon all members claiming:
+   If $\text{closing\_vault\_basis} \ge \text{closing\_non\_conferred\_basis} + \text{closing\_conferred\_pool\_capital}$, then upon all members claiming:
    $$\sum_{i=1}^N \text{total\_refund}_i = \text{Vault}_{\text{closure}}$$
    $$\text{Vault}_{\text{final}} = 0$$
 
-3. **Benefit Conservation Invariant**:
-   $$\sum_{i=1}^N \text{cumulative\_benefit\_received}_i = \sum_{k=1}^M \text{Spend}_k$$
+3. **Senior Capital Protection Invariant**:
+   $$\forall t \text{ (during active cycles)}, \quad \text{Vault}(t) \ge \text{pool.total\_non\_conferred\_capital}$$
+   Neither governance spends nor sponsored fees can reduce vault balances below the aggregate non-conferred capital.
+
+4. **Benefit Conservation Invariant**:
+   $$\sum_{i=1}^N \text{cumulative\_benefit\_received}_i = \sum_{k=1}^M \text{Spend}_k + \sum_{j=1}^P \text{SponsoredFee}_j$$
    *(modulo integer division truncation scaled at $10^{-12}$).*
 
-4. **Idempotency Invariant**:
+5. **Idempotency Invariant**:
    Calling `claim_closure_refund` more than once on the same member PDA is rejected with `ClosureRefundAlreadyClaimed`.
 
 ---
@@ -302,13 +320,14 @@ The Fair Closure implementation guarantees the following formal invariants:
 ## Consequences
 
 ### Positive
-- **Provable Fairness**: Guarantees that neither cartels nor early front-runners can exploit cooperative vault members.
-- **Constant Gas / Compute ($O(1)$)**: Highly optimized for Solana's 200k compute unit instruction budget.
-- **Clean Accounting Clean-up**: Eliminates locked token dust in standard solvent operations.
+- **Provable Fairness**: Two-tier capital tracking guarantees senior priority for unspent surplus and unfunded deposits, while junior risk-bearing capital absorbs operational expenditures.
+- **Deficit Immunity**: Atomic snapshot bases on the first claim prevent front-running and MEV bank runs on impaired vaults across both tiers.
+- **Post-Closure Sealing**: All active state mutations (`join_pool`, `deposit`, `spend`, `run_sponsored_set_alias`) are strictly disallowed once `is_closing` is set.
+- **$O(1)$ Compute Efficiency**: No iterating over members; fully compliant with Solana's compute limits.
 
 ### Negative / Trade-Offs
 - **Integer Truncation Dust**: Fixed-point division by `funded_member_count` can leave negligible sub-lamport remainder scaled by $10^{12}$; in practice, standard 6-decimal USDC calculations retain sub-cent accuracy.
-- **Snapshot Dependency**: The deficit pro-rata ratio relies on the vault balance at the time of the *first* claim. If funds are deposited into the vault after the first claim during closure, they are not automatically reflected in `closing_conferred_vault`. (Mitigated by blocking all normal deposits once `pool.is_closing == true`).
+- **Snapshot Immutability**: The deficit pro-rata ratio relies on the vault balance at the time of the *first* claim. If external funds are sent to the vault PDA after the first claim, they are not automatically reflected in the snapshotted bases.
 
 ---
 
@@ -316,14 +335,17 @@ The Fair Closure implementation guarantees the following formal invariants:
 
 | Component | File Path | Line Range |
 | --- | --- | --- |
-| Benefit Accumulator Constant (`BENEFIT_SCALE`) | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L463) | L463 |
-| Pool Closure & Settlement State | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L504-L514) | L504–L514 |
-| Pool Closure Gatekeeper (`ensure_not_closing`) | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L527-L530) | L527–L530 |
-| Member Closure & Benefit Fields | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L578-L585) | L578–L585 |
-| `JoinPool` Closure Constraint | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L108-L113) | L108–L113 |
-| `Deposit` Closure Constraint & Mutability | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L141-L148) | L141–L148 |
-| `sync_surplus` Implementation | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L601-L611) | L601–L611 |
-| `sync_benefit` Implementation | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L613-L627) | L613–L627 |
-| `spend` Accumulator Delta | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1598-L1613) | L1598–L1613 |
-| `claim_closure_refund` Instruction | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1618-L1689) | L1618–L1689 |
+| Benefit Accumulator Constant (`BENEFIT_SCALE`) | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L468) | L468 |
+| Pool Struct Two-Tier & Closure Basis Fields | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L509-L521) | L509–L521 |
+| Pool Closure Gatekeeper (`ensure_not_closing`) | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L531-L534) | L531–L534 |
+| Member Struct Two-Tier & Benefit Fields | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L582-L597) | L582–L597 |
+| Member Two-Tier Classification Helpers | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L613-L623) | L613–L623 |
+| `Member::sync_surplus` Implementation | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L625-L635) | L625–L635 |
+| `Member::sync_benefit` Implementation | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L637-L650) | L637–L650 |
+| `JoinPool` Closure Constraint & Two-Tier Routing | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L108-L113) | L108–L113 |
+| `Deposit` Closure Constraint & Two-Tier Rebalancing | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L141-L148) | L141–L148, L1022–L1045 |
+| `spend` Accumulator Delta & Non-Conferred Guard | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1610-L1663) | L1610–L1663 |
+| `RunSponsoredSetAlias` Post-Closure Constraint | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1854-L1880) | L1854–L1880 |
+| `claim_closure_refund` Two-Tier Waterfall Settlement | [`pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1666-L1755) | L1666–L1755 |
+| `create_pool` Initial Two-Tier Capital Zeroing | [`deployer.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs#L159-L165) | L159–L165 |
 
