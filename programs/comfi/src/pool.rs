@@ -291,6 +291,7 @@ pub struct Vote<'info> {
     #[account(mut, has_one = pool)]
     pub proposal: Account<'info, Proposal>,
     #[account(
+        mut,
         seeds = [b"member", pool.key().as_ref(), voter_wallet.key().as_ref()],
         bump = voter.bump,
         has_one = pool,
@@ -701,6 +702,29 @@ pub struct Proposal {
 
 impl Proposal {
     pub const SPACE: usize = 8 + 32 + 8 + 32 + 48 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4;
+
+    pub fn required_votes_for_pool(&self, pool: &Pool) -> Result<u32> {
+        let threshold_bps = if self.vote_threshold <= 100 {
+            (self.vote_threshold as u64)
+                .checked_mul(100)
+                .ok_or(ComfiError::MathOverflow)?
+        } else {
+            self.vote_threshold as u64
+        };
+        let active_members = (pool.funded_member_count as u64).max(1);
+        let required = active_members
+            .checked_mul(threshold_bps)
+            .ok_or(ComfiError::MathOverflow)?
+            .checked_add(9999)
+            .ok_or(ComfiError::MathOverflow)?
+            / 10_000;
+        Ok((required as u32).max(1))
+    }
+
+    pub fn is_passed_for_pool(&self, pool: &Pool) -> Result<bool> {
+        let required = self.required_votes_for_pool(pool)?;
+        Ok(self.yes_votes >= required && self.yes_votes > self.no_votes)
+    }
 }
 
 #[account]
@@ -1104,7 +1128,7 @@ pub fn process_cycle_proposals<'info>(
             continue;
         }
 
-        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let passed = proposal.is_passed_for_pool(pool)?;
         let is_deadline = ending_cycle >= proposal.deadline_cycle;
 
         let should_resolve = match proposal.execution_mode {
@@ -1284,9 +1308,8 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
         proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
     );
-    if proposal.yes_votes >= proposal.vote_threshold
-        && proposal.yes_votes > proposal.no_votes
-    {
+    let passed = proposal.is_passed_for_pool(&ctx.accounts.pool)?;
+    if passed {
         if proposal.action == ProposalAction::ClosePool {
             ctx.accounts.pool.is_closing = true;
             proposal.state = ProposalState::Executed;
@@ -1401,8 +1424,9 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
     let pool = &ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let proposal = &mut ctx.accounts.proposal;
+    let voter = &mut ctx.accounts.voter;
     require!(
-        ctx.accounts.voter.is_funded_for_pool(pool),
+        voter.is_funded_for_pool(pool),
         ComfiError::MemberNotFunded
     );
     require!(
@@ -1418,6 +1442,9 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
         ComfiError::VotingClosed
     );
     proposal.state = ProposalState::Open;
+
+    // Enforce invariant: casting a vote always totals any accrued spend benefits against the voter!
+    voter.sync_benefit(pool)?;
 
     if approve {
         proposal.yes_votes = proposal
@@ -1446,8 +1473,7 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
         proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
     );
-    let passed = proposal.yes_votes >= proposal.vote_threshold
-        && proposal.yes_votes > proposal.no_votes;
+    let passed = proposal.is_passed_for_pool(pool)?;
     let deadline_reached = pool.current_cycle > proposal.deadline_cycle;
     let can_finalize = match proposal.execution_mode {
         ExecutionMode::OnDeadline => deadline_reached,
@@ -1544,7 +1570,7 @@ pub fn execute_configuration_modification(
         _ => return err!(ComfiError::WrongProposalAction),
     };
     require!(
-        vote_threshold > 0 && vote_threshold <= pool.member_cap,
+        vote_threshold > 0 && vote_threshold <= 10_000,
         ComfiError::InvalidVoteThreshold
     );
     require!(
@@ -3771,6 +3797,254 @@ mod tests {
 
         let net_share = requester.conferred_contribution().saturating_sub(requester.cumulative_benefit_received);
         assert_eq!(net_share, 40);
+    }
+
+    #[test]
+    fn test_vote_totals_accrued_benefit_against_voter() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2;
+        pool.cumulative_benefit_per_member = 0;
+
+        // Simulate socialized spend in pool: 100 total distributed among 2 funded members = 50 per member
+        let spend_1: u64 = 100;
+        let benefit_delta_1 = (spend_1 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_1;
+        assert_eq!(pool.cumulative_benefit_per_member, 50 * BENEFIT_SCALE);
+
+        let mut voter = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Invariant: prior to voting sync, voter has 0 cumulative benefit totaled
+        assert_eq!(voter.cumulative_benefit_received, 0);
+        assert_eq!(voter.last_benefit_index, 0);
+
+        // Being able to cast a vote always means benefit is totaled against the voter!
+        assert!(voter.is_funded_for_pool(&pool));
+        voter.sync_benefit(&pool).unwrap();
+
+        // Voter's benefit received must now reflect the pool's accrued benefit (50)
+        assert_eq!(voter.cumulative_benefit_received, 50);
+        assert_eq!(voter.last_benefit_index, 50 * BENEFIT_SCALE);
+
+        // A second benefit distribution occurs in the pool: 60 among 2 members = 30 per member
+        let spend_2: u64 = 60;
+        let benefit_delta_2 = (spend_2 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_2;
+        assert_eq!(pool.cumulative_benefit_per_member, 80 * BENEFIT_SCALE);
+
+        // Next vote sync totals new incremental benefit against voter (50 + 30 = 80)
+        voter.sync_benefit(&pool).unwrap();
+        assert_eq!(voter.cumulative_benefit_received, 80);
+        assert_eq!(voter.last_benefit_index, 80 * BENEFIT_SCALE);
+
+        // An unfunded member cannot vote
+        let unfunded_voter = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 0,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 0,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+        assert!(!unfunded_voter.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_proportion_based_vote_threshold_scaling() {
+        let mut pool = create_test_pool();
+
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 50, // 50% normalized to 5000 bps
+        };
+
+        // 50% threshold scaling with ceiling division:
+        // 1 member: ceil(1 * 0.5) = 1
+        pool.funded_member_count = 1;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 1);
+
+        // 2 members: ceil(2 * 0.5) = 1
+        pool.funded_member_count = 2;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 1);
+
+        // 3 members: ceil(3 * 0.5) = 2
+        pool.funded_member_count = 3;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
+
+        // 4 members: ceil(4 * 0.5) = 2
+        pool.funded_member_count = 4;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
+
+        // 5 members: ceil(5 * 0.5) = 3
+        pool.funded_member_count = 5;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
+
+        // 10 members: ceil(10 * 0.5) = 5
+        pool.funded_member_count = 10;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 5);
+
+        // Strict majority 51% (5100 bps)
+        proposal.vote_threshold = 5100;
+        // 10 members: ceil(10 * 0.51) = ceil(5.1) = 6
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 6);
+        // 100 members: ceil(100 * 0.51) = 51
+        pool.funded_member_count = 100;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 51);
+
+        // Two-thirds supermajority 6667 bps
+        proposal.vote_threshold = 6667;
+        pool.funded_member_count = 3;
+        // ceil(3 * 0.6667) = ceil(2.0001) = 3
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
+        pool.funded_member_count = 4;
+        // ceil(4 * 0.6667) = ceil(2.6668) = 3
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
+
+        // 100% threshold requires all members
+        proposal.vote_threshold = 100;
+        pool.funded_member_count = 7;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 7);
+
+        // Passing logic validation:
+        // Set up 5 members with 50% threshold -> requires 3 yes votes
+        proposal.vote_threshold = 50;
+        pool.funded_member_count = 5;
+
+        proposal.yes_votes = 2;
+        proposal.no_votes = 0;
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap()); // 2 < 3 required
+
+        proposal.yes_votes = 3;
+        proposal.no_votes = 3;
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap()); // tied vote fails
+
+        proposal.yes_votes = 3;
+        proposal.no_votes = 1;
+        assert!(proposal.is_passed_for_pool(&pool).unwrap()); // 3 >= 3 and 3 > 1 passes!
+    }
+
+    #[test]
+    fn test_voting_idempotence_across_multiple_proposals_in_cycle() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 1;
+        pool.funded_member_count = 3;
+        pool.cumulative_benefit_per_member = 0;
+
+        // Spend in cycle 1: 150 USDC shared across 3 members = 50 USDC per member
+        let spend_cycle_1: u64 = 150;
+        let benefit_delta_1 = (spend_cycle_1 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_1;
+        assert_eq!(pool.cumulative_benefit_per_member, 50 * BENEFIT_SCALE);
+
+        let mut voter = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Initially, voter has 0 cumulative benefit totaled
+        assert_eq!(voter.cumulative_benefit_received, 0);
+        assert_eq!(voter.last_benefit_index, 0);
+
+        // Vote 1: Cast vote on Proposal A in cycle 1
+        voter.sync_benefit(&pool).unwrap();
+        assert_eq!(voter.cumulative_benefit_received, 50);
+        assert_eq!(voter.last_benefit_index, 50 * BENEFIT_SCALE);
+
+        // Vote 2: Cast vote on Proposal B in the same cycle 1
+        // IDEMPOTENCE INVARIANT: Casting vote on a 2nd proposal must NOT total extra benefit!
+        voter.sync_benefit(&pool).unwrap();
+        assert_eq!(voter.cumulative_benefit_received, 50);
+        assert_eq!(voter.last_benefit_index, 50 * BENEFIT_SCALE);
+
+        // Vote 3: Cast vote on Proposal C in the same cycle 1
+        // IDEMPOTENCE INVARIANT: Casting vote on a 3rd proposal must NOT total extra benefit!
+        voter.sync_benefit(&pool).unwrap();
+        assert_eq!(voter.cumulative_benefit_received, 50);
+        assert_eq!(voter.last_benefit_index, 50 * BENEFIT_SCALE);
+
+        // Simulate casting votes on 10 more proposals in the same cycle
+        for _ in 0..10 {
+            voter.sync_benefit(&pool).unwrap();
+            assert_eq!(voter.cumulative_benefit_received, 50);
+            assert_eq!(voter.last_benefit_index, 50 * BENEFIT_SCALE);
+        }
+
+        // Cycle 2: A new spend of 60 USDC occurs (20 USDC per member)
+        pool.current_cycle = 2;
+        let spend_cycle_2: u64 = 60;
+        let benefit_delta_2 = (spend_cycle_2 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_2;
+        assert_eq!(pool.cumulative_benefit_per_member, 70 * BENEFIT_SCALE);
+
+        // Vote 1 in Cycle 2: Voter casts vote on Proposal D
+        // Accrues only the newly spent delta (20 USDC) -> total 70 USDC
+        voter.sync_benefit(&pool).unwrap();
+        assert_eq!(voter.cumulative_benefit_received, 70);
+        assert_eq!(voter.last_benefit_index, 70 * BENEFIT_SCALE);
+
+        // Vote 2 in Cycle 2: Voter casts vote on Proposal E
+        // Remains strictly idempotent: no extra benefit totaled!
+        voter.sync_benefit(&pool).unwrap();
+        assert_eq!(voter.cumulative_benefit_received, 70);
+        assert_eq!(voter.last_benefit_index, 70 * BENEFIT_SCALE);
     }
 }
 
