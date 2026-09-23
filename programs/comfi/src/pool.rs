@@ -25,15 +25,13 @@ pub fn transfer_user_tokens<'info>(
 
 pub fn assert_executable(proposal: &Account<Proposal>) -> Result<()> {
     require!(
-        proposal.state == ProposalState::Executable || proposal.state == ProposalState::Executed,
+        proposal.state == ProposalState::Executable,
         ComfiError::ProposalNotExecutable
     );
-    if proposal.state == ProposalState::Executable {
-        require!(
-            Clock::get()?.unix_timestamp >= proposal.executable_after,
-            ComfiError::TimelockActive
-        );
-    }
+    require!(
+        Clock::get()?.unix_timestamp >= proposal.executable_after,
+        ComfiError::TimelockActive
+    );
     Ok(())
 }
 
@@ -597,7 +595,7 @@ pub struct Member {
 }
 
 impl Member {
-    pub const SPACE: usize = 8 + 214;
+    pub const SPACE: usize = 8 + 216;
 
     pub fn can_request_spend(&self) -> bool {
         matches!(
@@ -1144,6 +1142,7 @@ pub fn process_cycle_proposals<'info>(
                     proposal.state = ProposalState::Executed;
                 }
                 ProposalAction::SetSpenderLimit { member, cap } => {
+                    let mut executed_inline = false;
                     for acc in remaining_accounts.iter() {
                         if acc.key() == member && acc.is_writable && acc.data_len() >= 8 {
                             let member_data = acc.try_borrow_data()?;
@@ -1169,15 +1168,28 @@ pub fn process_cycle_proposals<'info>(
                                         sc.cap = cap;
                                         sc.spent = 0;
                                         sc.try_serialize(&mut *acc.try_borrow_mut_data()?)?;
+                                        executed_inline = true;
                                     }
                                 }
                             }
                         }
                     }
-                    proposal.state = ProposalState::Executed;
+                    if executed_inline {
+                        proposal.state = ProposalState::Executed;
+                    } else {
+                        proposal.state = ProposalState::Executable;
+                        proposal.executable_after = Clock::get()?
+                            .unix_timestamp
+                            .checked_add(pool.timelock_seconds)
+                            .ok_or(ComfiError::MathOverflow)?;
+                    }
                 }
                 ProposalAction::ApproveWithdrawal { .. } => {
-                    proposal.state = ProposalState::Executed;
+                    proposal.state = ProposalState::Executable;
+                    proposal.executable_after = Clock::get()?
+                        .unix_timestamp
+                        .checked_add(pool.timelock_seconds)
+                        .ok_or(ComfiError::MathOverflow)?;
                 }
                 ProposalAction::ClosePool => {
                     pool.is_closing = true;
@@ -1277,9 +1289,12 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
     {
         if proposal.action == ProposalAction::ClosePool {
             ctx.accounts.pool.is_closing = true;
+            proposal.state = ProposalState::Executed;
+            proposal.executable_after = clock.unix_timestamp;
+        } else {
+            proposal.state = ProposalState::Executable;
+            proposal.executable_after = clock.unix_timestamp;
         }
-        proposal.state = ProposalState::Executed;
-        proposal.executable_after = clock.unix_timestamp;
     } else {
         proposal.state = ProposalState::Rejected;
     }
@@ -1445,9 +1460,15 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
     if passed {
         if proposal.action == ProposalAction::ClosePool {
             ctx.accounts.pool.is_closing = true;
+            proposal.state = ProposalState::Executed;
+            proposal.executable_after = clock.unix_timestamp;
+        } else {
+            proposal.state = ProposalState::Executable;
+            proposal.executable_after = clock
+                .unix_timestamp
+                .checked_add(pool.timelock_seconds)
+                .ok_or(ComfiError::MathOverflow)?;
         }
-        proposal.state = ProposalState::Executed;
-        proposal.executable_after = clock.unix_timestamp;
     } else {
         proposal.state = ProposalState::Rejected;
     }
@@ -1458,9 +1479,7 @@ pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
     let pool = &ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let proposal = &mut ctx.accounts.proposal;
-    if proposal.state != ProposalState::Executed {
-        assert_executable(proposal)?;
-    }
+    assert_executable(proposal)?;
     let (target, cap) = match proposal.action {
         ProposalAction::SetSpenderLimit { member, cap } => (member, cap),
         _ => return err!(ComfiError::WrongProposalAction),
@@ -1478,7 +1497,6 @@ pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
     cycle.member = ctx.accounts.spender_member.key();
     cycle.cycle = pool.current_cycle;
     cycle.cap = cap;
-    cycle.spent = 0;
     cycle.bump = ctx.bumps.spender_cycle;
     proposal.state = ProposalState::Executed;
     Ok(())
@@ -1490,9 +1508,7 @@ pub fn execute_configuration_modification(
     let pool = &mut ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let proposal = &mut ctx.accounts.proposal;
-    if proposal.state != ProposalState::Executed {
-        assert_executable(proposal)?;
-    }
+    assert_executable(proposal)?;
     let (
         vote_threshold,
         cycle_duration_seconds,
@@ -1637,23 +1653,30 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
         .checked_add(request.amount)
         .ok_or(ComfiError::MathOverflow)?;
 
-    // All spends provide delegated benefit split evenly over active funded members:
-    require!(
-        ctx.accounts.pool.funded_member_count > 0,
-        ComfiError::MemberNotFunded
-    );
-    let active_funded_members = ctx.accounts.pool.funded_member_count as u128;
-    let benefit_delta = (request.amount as u128)
-        .checked_mul(BENEFIT_SCALE)
-        .ok_or(ComfiError::MathOverflow)?
-        .checked_div(active_funded_members)
-        .ok_or(ComfiError::MathOverflow)?;
-    ctx.accounts.pool.cumulative_benefit_per_member = ctx.accounts.pool
-        .cumulative_benefit_per_member
-        .checked_add(benefit_delta)
-        .ok_or(ComfiError::MathOverflow)?;
+    if request.requires_proposal {
+        requester.cumulative_benefit_received = requester
+            .cumulative_benefit_received
+            .checked_add(request.amount)
+            .ok_or(ComfiError::MathOverflow)?;
+    } else {
+        // All shared pool operating spends provide delegated benefit split evenly over active funded members:
+        require!(
+            ctx.accounts.pool.funded_member_count > 0,
+            ComfiError::MemberNotFunded
+        );
+        let active_funded_members = ctx.accounts.pool.funded_member_count as u128;
+        let benefit_delta = (request.amount as u128)
+            .checked_mul(BENEFIT_SCALE)
+            .ok_or(ComfiError::MathOverflow)?
+            .checked_div(active_funded_members)
+            .ok_or(ComfiError::MathOverflow)?;
+        ctx.accounts.pool.cumulative_benefit_per_member = ctx.accounts.pool
+            .cumulative_benefit_per_member
+            .checked_add(benefit_delta)
+            .ok_or(ComfiError::MathOverflow)?;
 
-    requester.sync_benefit(&ctx.accounts.pool)?;
+        requester.sync_benefit(&ctx.accounts.pool)?;
+    }
     ctx.accounts.pool.total_conferred_capital = ctx.accounts.pool
         .total_conferred_capital
         .checked_sub(request.amount)
@@ -1951,7 +1974,7 @@ mod tests {
         assert_eq!(Pool::SPACE, 8 + 360);
         assert_eq!(
             Member::SPACE,
-            8 + 214
+            8 + 216
         );
         assert_eq!(SpenderCycle::SPACE, 8 + 32 + 32 + 8 + 8 + 8 + 1);
         assert_eq!(
@@ -3598,6 +3621,156 @@ mod tests {
         let join_res = attempt_join(&pool, 100);
         assert!(join_res.is_err());
         assert_eq!(join_res.unwrap_err(), ComfiError::PoolIsClosing.into());
+    }
+
+    #[test]
+    fn test_assert_executable_rejects_already_executed_proposals() {
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::SetSpenderLimit {
+                member: Pubkey::new_unique(),
+                cap: 500,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executed,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        let assert_exec = |p: &Proposal, now: i64| -> Result<()> {
+            require!(
+                p.state == ProposalState::Executable,
+                ComfiError::ProposalNotExecutable
+            );
+            require!(
+                now >= p.executable_after,
+                ComfiError::TimelockActive
+            );
+            Ok(())
+        };
+
+        let res = assert_exec(&proposal, 100);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::ProposalNotExecutable.into());
+
+        proposal.state = ProposalState::Executable;
+        proposal.executable_after = 200;
+        let timelock_res = assert_exec(&proposal, 150);
+        assert!(timelock_res.is_err());
+        assert_eq!(timelock_res.unwrap_err(), ComfiError::TimelockActive.into());
+
+        let ok_res = assert_exec(&proposal, 250);
+        assert!(ok_res.is_ok());
+    }
+
+    #[test]
+    fn test_spender_limit_proposal_cannot_be_replayed() {
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::SetSpenderLimit {
+                member: Pubkey::new_unique(),
+                cap: 500,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 100,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        let mut sc = SpenderCycle {
+            pool: proposal.pool,
+            member: Pubkey::new_unique(),
+            cycle: 1,
+            cap: 0,
+            spent: 0,
+            bump: 255,
+        };
+
+        // 1. First execution succeeds and transitions proposal to Executed
+        assert_eq!(proposal.state, ProposalState::Executable);
+        sc.cap = 500;
+        proposal.state = ProposalState::Executed;
+
+        // 2. Spender spends 500
+        sc.spent = 500;
+        assert_eq!(sc.spent, sc.cap);
+
+        // 3. Attempting second execution with the same proposal is rejected
+        let assert_exec = |p: &Proposal, now: i64| -> Result<()> {
+            require!(
+                p.state == ProposalState::Executable,
+                ComfiError::ProposalNotExecutable
+            );
+            require!(
+                now >= p.executable_after,
+                ComfiError::TimelockActive
+            );
+            Ok(())
+        };
+
+        let replay_res = assert_exec(&proposal, 200);
+        assert!(replay_res.is_err());
+        assert_eq!(replay_res.unwrap_err(), ComfiError::ProposalNotExecutable.into());
+        // Spender spent remains 500, spent cannot be reset to 0!
+        assert_eq!(sc.spent, 500);
+    }
+
+    #[test]
+    fn test_individual_withdrawal_direct_attribution_in_spend() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 3;
+        pool.cumulative_benefit_per_member = 0;
+        pool.total_conferred_capital = 300;
+
+        let mut requester = Member {
+            pool: Pubkey::new_unique(),
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
+        };
+
+        let withdrawal_amount: u64 = 60;
+        let requires_proposal = true;
+
+        if requires_proposal {
+            requester.cumulative_benefit_received += withdrawal_amount;
+        }
+
+        assert_eq!(requester.cumulative_benefit_received, 60);
+        assert_eq!(pool.cumulative_benefit_per_member, 0);
+
+        let net_share = requester.conferred_contribution().saturating_sub(requester.cumulative_benefit_received);
+        assert_eq!(net_share, 40);
     }
 }
 
