@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import type {
   DevLogEntry,
+  ExecutionMode,
   MemberInfo,
   PoolInfo,
   ProposalInfo,
@@ -33,6 +34,12 @@ export function App() {
     actionAllowancePerCycle: 5,
     maxSponsoredActionCharge: 1,
     testingEnabled: true,
+    spenderLimitDeadlineCycles: 1,
+    withdrawalDeadlineCycles: 1,
+    configModificationDeadlineCycles: 2,
+    spenderLimitExecutionMode: 'on_deadline' as ExecutionMode,
+    withdrawalExecutionMode: 'on_deadline' as ExecutionMode,
+    configModificationExecutionMode: 'on_deadline' as ExecutionMode,
   })
 
   const [joinPoolArgs, setJoinPoolArgs] = useState({
@@ -60,6 +67,12 @@ export function App() {
     newVoteThreshold: 2,
     newCycleDurationSeconds: 2592000,
     newMemberObligationAmount: 10,
+    newSpenderLimitDeadlineCycles: 1,
+    newWithdrawalDeadlineCycles: 1,
+    newConfigModificationDeadlineCycles: 2,
+    newSpenderLimitExecutionMode: 'on_deadline' as ExecutionMode,
+    newWithdrawalExecutionMode: 'on_deadline' as ExecutionMode,
+    newConfigModificationExecutionMode: 'on_deadline' as ExecutionMode,
   })
 
   const [voteArgs, setVoteArgs] = useState({
@@ -414,6 +427,66 @@ export function App() {
                 style={{ width: '120px' }}
               />
             </div>
+            <div className="form-group">
+              <label>Spender Deadline (cycles)</label>
+              <input
+                type="number"
+                value={createPoolArgs.spenderLimitDeadlineCycles}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, spenderLimitDeadlineCycles: parseInt(e.target.value) || 1 })}
+                style={{ width: '120px' }}
+              />
+            </div>
+            <div className="form-group">
+              <label>Withdrawal Deadline (cycles)</label>
+              <input
+                type="number"
+                value={createPoolArgs.withdrawalDeadlineCycles}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, withdrawalDeadlineCycles: parseInt(e.target.value) || 1 })}
+                style={{ width: '120px' }}
+              />
+            </div>
+            <div className="form-group">
+              <label>Config Deadline (cycles)</label>
+              <input
+                type="number"
+                value={createPoolArgs.configModificationDeadlineCycles}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, configModificationDeadlineCycles: parseInt(e.target.value) || 1 })}
+                style={{ width: '120px' }}
+              />
+            </div>
+            <div className="form-group">
+              <label>Spender Mode</label>
+              <select
+                value={createPoolArgs.spenderLimitExecutionMode}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, spenderLimitExecutionMode: e.target.value as ExecutionMode })}
+                style={{ width: '130px' }}
+              >
+                <option value="on_deadline">On Deadline</option>
+                <option value="threshold_met">Threshold Met</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Withdrawal Mode</label>
+              <select
+                value={createPoolArgs.withdrawalExecutionMode}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, withdrawalExecutionMode: e.target.value as ExecutionMode })}
+                style={{ width: '130px' }}
+              >
+                <option value="on_deadline">On Deadline</option>
+                <option value="threshold_met">Threshold Met</option>
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Config Mode</label>
+              <select
+                value={createPoolArgs.configModificationExecutionMode}
+                onChange={e => setCreatePoolArgs({ ...createPoolArgs, configModificationExecutionMode: e.target.value as ExecutionMode })}
+                style={{ width: '130px' }}
+              >
+                <option value="on_deadline">On Deadline</option>
+                <option value="threshold_met">Threshold Met</option>
+              </select>
+            </div>
             <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '6px', paddingTop: '16px' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '12px' }}>
                 <input
@@ -519,6 +592,12 @@ export function App() {
                         </span>
                       </td>
                     </tr>
+                    <tr>
+                      <td>Proposal Deadlines & Modes</td>
+                      <td>
+                        Spender: <strong>{selectedPool.spenderLimitDeadlineCycles}c</strong> ({selectedPool.spenderLimitExecutionMode}) &bull; Withdrawal: <strong>{selectedPool.withdrawalDeadlineCycles}c</strong> ({selectedPool.withdrawalExecutionMode}) &bull; Config: <strong>{selectedPool.configModificationDeadlineCycles}c</strong> ({selectedPool.configModificationExecutionMode})
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -528,6 +607,9 @@ export function App() {
                   <strong style={{ color: '#58a6ff' }}>⏳ Pending Configuration Modification (Applies Next Cycle):</strong>
                   <div style={{ marginTop: '4px', color: '#c9d1d9' }}>
                     Vote Threshold: <strong>{selectedPool.pendingVoteThreshold} votes</strong> &bull; Cycle Duration: <strong>{selectedPool.pendingCycleDurationSeconds}s</strong> &bull; Member Obligation: <strong>{selectedPool.pendingMemberObligationAmount}</strong>
+                  </div>
+                  <div style={{ marginTop: '4px', color: '#8b949e', fontSize: '12px' }}>
+                    Deadlines: Spender: <strong>{selectedPool.pendingSpenderLimitDeadlineCycles}c</strong> ({selectedPool.pendingSpenderLimitExecutionMode}) &bull; Withdrawal: <strong>{selectedPool.pendingWithdrawalDeadlineCycles}c</strong> ({selectedPool.pendingWithdrawalExecutionMode}) &bull; Config: <strong>{selectedPool.pendingConfigModificationDeadlineCycles}c</strong> ({selectedPool.pendingConfigModificationExecutionMode})
                   </div>
                 </div>
               )}
@@ -851,6 +933,66 @@ export function App() {
                   style={{ width: '110px' }}
                 />
               </div>
+              <div className="form-group">
+                <label>Spender Deadline (c)</label>
+                <input
+                  type="number"
+                  value={proposalArgs.newSpenderLimitDeadlineCycles}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newSpenderLimitDeadlineCycles: parseInt(e.target.value) || 1 })}
+                  style={{ width: '90px' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>Withdrawal Deadline (c)</label>
+                <input
+                  type="number"
+                  value={proposalArgs.newWithdrawalDeadlineCycles}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newWithdrawalDeadlineCycles: parseInt(e.target.value) || 1 })}
+                  style={{ width: '90px' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>Config Deadline (c)</label>
+                <input
+                  type="number"
+                  value={proposalArgs.newConfigModificationDeadlineCycles}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newConfigModificationDeadlineCycles: parseInt(e.target.value) || 1 })}
+                  style={{ width: '90px' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>Spender Mode</label>
+                <select
+                  value={proposalArgs.newSpenderLimitExecutionMode}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newSpenderLimitExecutionMode: e.target.value as ExecutionMode })}
+                  style={{ width: '130px' }}
+                >
+                  <option value="on_deadline">On Deadline</option>
+                  <option value="threshold_met">Threshold Met</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Withdrawal Mode</label>
+                <select
+                  value={proposalArgs.newWithdrawalExecutionMode}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newWithdrawalExecutionMode: e.target.value as ExecutionMode })}
+                  style={{ width: '130px' }}
+                >
+                  <option value="on_deadline">On Deadline</option>
+                  <option value="threshold_met">Threshold Met</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Config Mode</label>
+                <select
+                  value={proposalArgs.newConfigModificationExecutionMode}
+                  onChange={e => setProposalArgs({ ...proposalArgs, newConfigModificationExecutionMode: e.target.value as ExecutionMode })}
+                  style={{ width: '130px' }}
+                >
+                  <option value="on_deadline">On Deadline</option>
+                  <option value="threshold_met">Threshold Met</option>
+                </select>
+              </div>
             </div>
           )}
 
@@ -870,6 +1012,12 @@ export function App() {
                   voteThreshold: proposalArgs.newVoteThreshold,
                   cycleDurationSeconds: proposalArgs.newCycleDurationSeconds,
                   memberObligationAmount: proposalArgs.newMemberObligationAmount,
+                  spenderLimitDeadlineCycles: proposalArgs.newSpenderLimitDeadlineCycles,
+                  withdrawalDeadlineCycles: proposalArgs.newWithdrawalDeadlineCycles,
+                  configModificationDeadlineCycles: proposalArgs.newConfigModificationDeadlineCycles,
+                  spenderLimitExecutionMode: proposalArgs.newSpenderLimitExecutionMode,
+                  withdrawalExecutionMode: proposalArgs.newWithdrawalExecutionMode,
+                  configModificationExecutionMode: proposalArgs.newConfigModificationExecutionMode,
                 },
                 `Create Proposal (${proposalArgs.actionKind})`
               )
@@ -903,20 +1051,30 @@ export function App() {
                     <td><strong>{p.actionType}</strong></td>
                     <td style={{ fontSize: '11px' }}>{p.actionDetails}</td>
                     <td>
-                      <span style={{ color: '#3fb950' }}>{p.yesVotes} Y</span> / <span style={{ color: '#f85149' }}>{p.noVotes} N</span>
+                      <div>
+                        <span style={{ color: '#3fb950' }}>{p.yesVotes} Y</span> / <span style={{ color: '#f85149' }}>{p.noVotes} N</span>
+                      </div>
+                      <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                        req {p.voteThreshold}
+                      </div>
                     </td>
                     <td>
-                      {p.state === 'Queued' && <span className="badge purple" title={`Enqueued to be votable in cycle ${p.votingCycle}`}>Enqueued (Cycle {p.votingCycle})</span>}
-                      {p.state === 'Open' && <span className="badge blue">Open</span>}
-                      {p.state === 'Executable' && <span className="badge green">Executable</span>}
-                      {p.state === 'Executed' && <span className="badge orange">Executed</span>}
-                      {p.state === 'Rejected' && <span className="badge red">Rejected</span>}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {p.state === 'Queued' && <span className="badge purple" title={`Enqueued: voting open in cycles ${p.votingCycle} to ${p.deadlineCycle}`}>Enqueued (Cycle {p.votingCycle}-{p.deadlineCycle})</span>}
+                        {p.state === 'Open' && <span className="badge blue" title={`Voting active in cycles ${p.votingCycle} to ${p.deadlineCycle}`}>Open (Cycle {p.votingCycle}-{p.deadlineCycle})</span>}
+                        {p.state === 'Executable' && <span className="badge green">Executable</span>}
+                        {p.state === 'Executed' && <span className="badge orange">Executed</span>}
+                        {p.state === 'Rejected' && <span className="badge red">Rejected</span>}
+                        <span className="badge teal" title={`Execution Mode: ${p.executionMode === 'threshold_met' ? 'Threshold Met (runs on next available cycle)' : 'On Deadline (runs on deadline cycle)'}`}>
+                          {p.executionMode === 'threshold_met' ? '⚡ Threshold Met' : '⏳ On Deadline'}
+                        </span>
+                      </div>
                     </td>
                     <td>
                       <div className="form-row">
                         {p.state === 'Queued' && (
                           <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic', marginRight: '8px' }}>
-                            Opens for vote in Cycle {p.votingCycle}
+                            Opens in Cycle {p.votingCycle} (deadline Cycle {p.deadlineCycle})
                           </span>
                         )}
                         {p.state === 'Open' && (

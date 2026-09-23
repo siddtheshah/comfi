@@ -194,4 +194,7 @@ pub enum ComfiError {
     InvalidQuoteSignature,
     #[msg("This pool is not enabled for testing.")]
     TestingNotEnabled,
+    #[msg("Proposal deadline cycles must be greater than zero.")]
+    InvalidProposalDeadline,
 }
+

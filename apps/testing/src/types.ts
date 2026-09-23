@@ -42,7 +42,21 @@ export interface PoolInfo {
   pendingVoteThreshold: number
   pendingCycleDurationSeconds: number
   pendingMemberObligationAmount: string
+  spenderLimitDeadlineCycles: number
+  withdrawalDeadlineCycles: number
+  configModificationDeadlineCycles: number
+  pendingSpenderLimitDeadlineCycles: number
+  pendingWithdrawalDeadlineCycles: number
+  pendingConfigModificationDeadlineCycles: number
+  spenderLimitExecutionMode: ExecutionMode
+  withdrawalExecutionMode: ExecutionMode
+  configModificationExecutionMode: ExecutionMode
+  pendingSpenderLimitExecutionMode: ExecutionMode
+  pendingWithdrawalExecutionMode: ExecutionMode
+  pendingConfigModificationExecutionMode: ExecutionMode
 }
+
+export type ExecutionMode = 'on_deadline' | 'threshold_met'
 
 export interface MemberInfo {
   address: string
@@ -70,9 +84,12 @@ export interface ProposalInfo {
   yesVotes: number
   noVotes: number
   votingCycle: number
+  deadlineCycle: number
   deadline: number
   executableAfter: number
   state: 'Queued' | 'Open' | 'Executable' | 'Executed' | 'Rejected'
+  executionMode: ExecutionMode
+  voteThreshold: number
 }
 
 export interface WithdrawalRequestInfo {

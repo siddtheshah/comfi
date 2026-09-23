@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { executeAction, formatUsdc } from '../src/backend/localnet.ts'
+import { executeAction, formatUsdc, parseExecutionMode, toExecutionModeArg } from '../src/backend/localnet.ts'
 
 test('formatUsdc correctly formats atomic USDC amounts', () => {
   assert.equal(formatUsdc('1000000'), '$1.00')
@@ -138,3 +138,22 @@ test('sponsor quote action issues and verifies canonical HMAC quote', async () =
   assert.equal(result.action, 'set_alias')
   assert.ok(result.signature)
 })
+
+test('parseExecutionMode correctly converts Rust enum representations to ExecutionMode string', () => {
+  assert.equal(parseExecutionMode({ onDeadline: {} }), 'on_deadline')
+  assert.equal(parseExecutionMode({ thresholdMet: {} }), 'threshold_met')
+  assert.equal(parseExecutionMode('threshold_met'), 'threshold_met')
+  assert.equal(parseExecutionMode('ThresholdMet'), 'threshold_met')
+  assert.equal(parseExecutionMode('on_deadline'), 'on_deadline')
+  assert.equal(parseExecutionMode('OnDeadline'), 'on_deadline')
+  assert.equal(parseExecutionMode(null), 'on_deadline')
+  assert.equal(parseExecutionMode(undefined), 'on_deadline')
+})
+
+test('toExecutionModeArg converts string modes to Anchor instruction object representation', () => {
+  assert.deepEqual(toExecutionModeArg('threshold_met'), { thresholdMet: {} })
+  assert.deepEqual(toExecutionModeArg('ThresholdMet'), { thresholdMet: {} })
+  assert.deepEqual(toExecutionModeArg('on_deadline'), { onDeadline: {} })
+  assert.deepEqual(toExecutionModeArg(undefined), { onDeadline: {} })
+})
+

@@ -54,8 +54,22 @@ export type OnChainPool = {
   pendingVoteThreshold: number
   pendingCycleDurationSeconds: bigint
   pendingMemberObligationAmountAtomic: bigint
+  spenderLimitDeadlineCycles: bigint
+  withdrawalDeadlineCycles: bigint
+  configModificationDeadlineCycles: bigint
+  pendingSpenderLimitDeadlineCycles: bigint
+  pendingWithdrawalDeadlineCycles: bigint
+  pendingConfigModificationDeadlineCycles: bigint
+  spenderLimitExecutionMode: ExecutionMode
+  withdrawalExecutionMode: ExecutionMode
+  configModificationExecutionMode: ExecutionMode
+  pendingSpenderLimitExecutionMode: ExecutionMode
+  pendingWithdrawalExecutionMode: ExecutionMode
+  pendingConfigModificationExecutionMode: ExecutionMode
   balanceUsdc: string
 }
+
+export type ExecutionMode = 'on_deadline' | 'threshold_met'
 
 function base64ToUint8Array(base64: string): Uint8Array {
   const binaryString = atob(base64)
@@ -67,10 +81,13 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 export function decodePoolAccountData(address: string, dataBytes: Uint8Array): Omit<OnChainPool, 'balanceUsdc'> {
-  if (dataBytes.length < 205) {
-    throw new Error(`Invalid Pool account data length for ${address}: expected at least 205 bytes, got ${dataBytes.length}`)
+  if (dataBytes.length < 206) {
+    throw new Error(`Invalid pool account data length: ${dataBytes.length} bytes (expected at least 206 bytes)`)
   }
+
   const view = new DataView(dataBytes.buffer, dataBytes.byteOffset, dataBytes.byteLength)
+
+  // Skip 8-byte Anchor account discriminator
   const idBig = view.getBigUint64(40, true)
   const creator = toBase58(dataBytes.subarray(48, 80))
   const vault = toBase58(dataBytes.subarray(80, 112))
@@ -80,6 +97,15 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
 
   // Backward-compatible decode if an older 206-byte pool exists
   const isNewLayout = dataBytes.length >= 235
+  const isDeadlineCyclesLayout = dataBytes.length >= 283
+  const isExecutionModeLayout = dataBytes.length >= 289
+  const parseModeByte = (byte: number): ExecutionMode => byte === 1 ? 'threshold_met' : 'on_deadline'
+  const spenderLimitExecutionMode = isExecutionModeLayout ? parseModeByte(view.getUint8(283)) : 'on_deadline'
+  const withdrawalExecutionMode = isExecutionModeLayout ? parseModeByte(view.getUint8(284)) : 'on_deadline'
+  const configModificationExecutionMode = isExecutionModeLayout ? parseModeByte(view.getUint8(285)) : 'on_deadline'
+  const pendingSpenderLimitExecutionMode = isExecutionModeLayout ? parseModeByte(view.getUint8(286)) : spenderLimitExecutionMode
+  const pendingWithdrawalExecutionMode = isExecutionModeLayout ? parseModeByte(view.getUint8(287)) : withdrawalExecutionMode
+  const pendingConfigModificationExecutionMode = isExecutionModeLayout ? parseModeByte(view.getUint8(288)) : configModificationExecutionMode
   const memberObligationAmountAtomic = isNewLayout ? view.getBigUint64(128, true) : minimumDepositAtomic
   const voteThreshold = isNewLayout ? view.getUint32(136, true) : view.getUint32(128, true)
   const votingPeriodSeconds = isNewLayout ? view.getBigInt64(140, true) : view.getBigInt64(132, true)
@@ -96,6 +122,12 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
   const pendingVoteThreshold = isNewLayout ? view.getUint32(215, true) : voteThreshold
   const pendingCycleDurationSeconds = isNewLayout ? view.getBigInt64(219, true) : cycleDurationSeconds
   const pendingMemberObligationAmountAtomic = isNewLayout ? view.getBigUint64(227, true) : memberObligationAmountAtomic
+  const spenderLimitDeadlineCycles = isDeadlineCyclesLayout ? view.getBigUint64(235, true) : 1n
+  const withdrawalDeadlineCycles = isDeadlineCyclesLayout ? view.getBigUint64(243, true) : 1n
+  const configModificationDeadlineCycles = isDeadlineCyclesLayout ? view.getBigUint64(251, true) : 1n
+  const pendingSpenderLimitDeadlineCycles = isDeadlineCyclesLayout ? view.getBigUint64(259, true) : spenderLimitDeadlineCycles
+  const pendingWithdrawalDeadlineCycles = isDeadlineCyclesLayout ? view.getBigUint64(267, true) : withdrawalDeadlineCycles
+  const pendingConfigModificationDeadlineCycles = isDeadlineCyclesLayout ? view.getBigUint64(275, true) : configModificationDeadlineCycles
 
   return {
     address,
@@ -121,6 +153,18 @@ export function decodePoolAccountData(address: string, dataBytes: Uint8Array): O
     pendingVoteThreshold,
     pendingCycleDurationSeconds,
     pendingMemberObligationAmountAtomic,
+    spenderLimitDeadlineCycles,
+    withdrawalDeadlineCycles,
+    configModificationDeadlineCycles,
+    pendingSpenderLimitDeadlineCycles,
+    pendingWithdrawalDeadlineCycles,
+    pendingConfigModificationDeadlineCycles,
+    spenderLimitExecutionMode,
+    withdrawalExecutionMode,
+    configModificationExecutionMode,
+    pendingSpenderLimitExecutionMode,
+    pendingWithdrawalExecutionMode,
+    pendingConfigModificationExecutionMode,
   }
 }
 

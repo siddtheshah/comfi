@@ -6,7 +6,23 @@ import BN from 'bn.js'
 import { createMint, getAccount, getOrCreateAssociatedTokenAccount, mintTo } from '@solana/spl-token'
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js'
 import { canonicalQuote, HmacSha256QuoteSigner, InMemorySponsorPolicyRepository, SponsorQuoteService } from '@comfi/sponsor-api'
-import type { GlobalConfigInfo, MemberInfo, PoolInfo, ProposalInfo, SponsorQuoteResult, SystemStatus, WalletInfo, WithdrawalRequestInfo } from '../types.js'
+import type { ExecutionMode, GlobalConfigInfo, MemberInfo, PoolInfo, ProposalInfo, SponsorQuoteResult, SystemStatus, WalletInfo, WithdrawalRequestInfo } from '../types.js'
+
+export function parseExecutionMode(mode: any): ExecutionMode {
+  if (!mode) return 'on_deadline'
+  if (typeof mode === 'string') {
+    return mode === 'threshold_met' || mode === 'ThresholdMet' ? 'threshold_met' : 'on_deadline'
+  }
+  if (mode.thresholdMet) return 'threshold_met'
+  return 'on_deadline'
+}
+
+export function toExecutionModeArg(mode?: string): { onDeadline: {} } | { thresholdMet: {} } {
+  if (mode === 'threshold_met' || mode === 'ThresholdMet') {
+    return { thresholdMet: {} }
+  }
+  return { onDeadline: {} }
+}
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..')
 const rpcUrl = process.env.VITE_SOLANA_RPC ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899'
@@ -169,6 +185,17 @@ export async function getSystemStatus(): Promise<SystemStatus> {
         pendingVoteThreshold: Number(p.pendingVoteThreshold ?? p.voteThreshold),
         pendingCycleDurationSeconds: Number(p.pendingCycleDurationSeconds ?? p.cycleDurationSeconds),
         pendingMemberObligationAmount: formatUsdc((p.pendingMemberObligationAmount ?? p.memberObligationAmount ?? p.minimumDeposit).toString()),
+        spenderLimitDeadlineCycles: Number(p.spenderLimitDeadlineCycles ?? 1),
+        withdrawalDeadlineCycles: Number(p.withdrawalDeadlineCycles ?? 1),
+        pendingSpenderLimitDeadlineCycles: Number(p.pendingSpenderLimitDeadlineCycles ?? p.spenderLimitDeadlineCycles ?? 1),
+        pendingWithdrawalDeadlineCycles: Number(p.pendingWithdrawalDeadlineCycles ?? p.withdrawalDeadlineCycles ?? 1),
+        pendingConfigModificationDeadlineCycles: Number(p.pendingConfigModificationDeadlineCycles ?? p.configModificationDeadlineCycles ?? 1),
+        spenderLimitExecutionMode: parseExecutionMode(p.spenderLimitExecutionMode),
+        withdrawalExecutionMode: parseExecutionMode(p.withdrawalExecutionMode),
+        configModificationExecutionMode: parseExecutionMode(p.configModificationExecutionMode),
+        pendingSpenderLimitExecutionMode: parseExecutionMode(p.pendingSpenderLimitExecutionMode ?? p.spenderLimitExecutionMode),
+        pendingWithdrawalExecutionMode: parseExecutionMode(p.pendingWithdrawalExecutionMode ?? p.withdrawalExecutionMode),
+        pendingConfigModificationExecutionMode: parseExecutionMode(p.pendingConfigModificationExecutionMode ?? p.configModificationExecutionMode),
       }
     })
   )
@@ -247,7 +274,8 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       actionDetails = `Request: ${p.action.approveWithdrawal.request.toBase58().slice(0, 8)}…`
     } else if (p.action.configurationModification) {
       actionType = 'ConfigurationModification'
-      actionDetails = `Threshold: ${p.action.configurationModification.voteThreshold}, Cycle: ${p.action.configurationModification.cycleDurationSeconds.toString()}s, Obligation: ${formatUsdc(p.action.configurationModification.memberObligationAmount.toString())}`
+      const cfg = p.action.configurationModification
+      actionDetails = `Threshold: ${cfg.voteThreshold}, Cycle: ${cfg.cycleDurationSeconds.toString()}s, Obligation: ${formatUsdc(cfg.memberObligationAmount.toString())}, Deadlines: Spender=${cfg.spenderLimitDeadlineCycles ?? 1}c (${parseExecutionMode(cfg.spenderLimitExecutionMode)}), Withdrawal=${cfg.withdrawalDeadlineCycles ?? 1}c (${parseExecutionMode(cfg.withdrawalExecutionMode)}), Config=${cfg.configModificationDeadlineCycles ?? 1}c (${parseExecutionMode(cfg.configModificationExecutionMode)})`
     }
 
     let state: ProposalInfo['state'] = 'Open'
@@ -267,11 +295,15 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       yesVotes: Number(p.yesVotes),
       noVotes: Number(p.noVotes),
       votingCycle: Number(p.votingCycle ?? 0),
+      deadlineCycle: Number(p.deadlineCycle ?? p.votingCycle ?? 0),
       deadline: Number(p.deadline),
       executableAfter: Number(p.executableAfter),
       state,
+      executionMode: parseExecutionMode(p.executionMode),
+      voteThreshold: Number(p.voteThreshold ?? poolAccount.voteThreshold ?? 1),
     }
   })
+
   proposals.sort((a, b) => a.id - b.id)
 
   // Fetch withdrawal requests for this pool
@@ -436,6 +468,12 @@ export async function executeAction(action: string, payload: any): Promise<any> 
           creatorAliasHash: Array(32).fill(0),
           creatorEncryptionPublicKey: Array(32).fill(0),
           testingEnabled: payload.testingEnabled ?? true,
+          spenderLimitDeadlineCycles: new BN(payload.spenderLimitDeadlineCycles ?? 1),
+          withdrawalDeadlineCycles: new BN(payload.withdrawalDeadlineCycles ?? 1),
+          configModificationDeadlineCycles: new BN(payload.configModificationDeadlineCycles ?? 1),
+          spenderLimitExecutionMode: toExecutionModeArg(payload.spenderLimitExecutionMode),
+          withdrawalExecutionMode: toExecutionModeArg(payload.withdrawalExecutionMode),
+          configModificationExecutionMode: toExecutionModeArg(payload.configModificationExecutionMode),
         })
         .accounts({
           creator: wallets.creator.publicKey,
@@ -572,7 +610,15 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
       for (const item of poolProposals) {
         const p = item.account
-        if (p.votingCycle && p.votingCycle.eq(currentCycle)) {
+        const stateIsActive = p.state.open || p.state.queued
+        const isVotingActive = currentCycle.gte(p.votingCycle)
+        const isDeadline = currentCycle.gte(p.deadlineCycle)
+        const isThresholdMetMode = parseExecutionMode(p.executionMode) === 'threshold_met'
+        const propThreshold = p.voteThreshold ?? poolAccount.voteThreshold
+        const passed = p.yesVotes >= propThreshold && p.yesVotes > p.noVotes
+        const shouldResolve = isThresholdMetMode ? (passed || isDeadline) : isDeadline
+
+        if (stateIsActive && isVotingActive && shouldResolve) {
           remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
           if (p.action.setSpenderLimit) {
             const targetMember = p.action.setSpenderLimit.member
@@ -611,7 +657,15 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
       for (const item of poolProposals) {
         const p = item.account
-        if (p.votingCycle && p.votingCycle.eq(currentCycle)) {
+        const stateIsActive = p.state.open || p.state.queued
+        const isVotingActive = currentCycle.gte(p.votingCycle)
+        const isDeadline = currentCycle.gte(p.deadlineCycle)
+        const isThresholdMetMode = parseExecutionMode(p.executionMode) === 'threshold_met'
+        const propThreshold = p.voteThreshold ?? poolAccount.voteThreshold
+        const passed = p.yesVotes >= propThreshold && p.yesVotes > p.noVotes
+        const shouldResolve = isThresholdMetMode ? (passed || isDeadline) : isDeadline
+
+        if (stateIsActive && isVotingActive && shouldResolve) {
           remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
           if (p.action.setSpenderLimit) {
             const targetMember = p.action.setSpenderLimit.member
@@ -651,7 +705,15 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
       for (const item of poolProposals) {
         const p = item.account
-        if (p.votingCycle && p.votingCycle.eq(currentCycle)) {
+        const stateIsActive = p.state.open || p.state.queued
+        const isVotingActive = nextCycle.gt(p.votingCycle)
+        const isDeadline = nextCycle.gt(p.deadlineCycle)
+        const isThresholdMetMode = parseExecutionMode(p.executionMode) === 'threshold_met'
+        const propThreshold = p.voteThreshold ?? poolAccount.voteThreshold
+        const passed = p.yesVotes >= propThreshold && p.yesVotes > p.noVotes
+        const shouldResolve = isThresholdMetMode ? (passed || isDeadline) : isDeadline
+
+        if (stateIsActive && isVotingActive && shouldResolve) {
           remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
           if (p.action.setSpenderLimit) {
             const targetMember = p.action.setSpenderLimit.member
@@ -769,12 +831,21 @@ export async function executeAction(action: string, payload: any): Promise<any> 
           voteThreshold = 2,
           cycleDurationSeconds = 2592000,
           memberObligationAmount = 10,
+          spenderLimitDeadlineCycles = 1,
+          withdrawalDeadlineCycles = 1,
+          configModificationDeadlineCycles = 1,
         } = payload
         actionPayload = {
           configurationModification: {
             voteThreshold: Number(voteThreshold),
             cycleDurationSeconds: new BN(cycleDurationSeconds),
             memberObligationAmount: new BN(BigInt(Math.floor(memberObligationAmount * 1e6)).toString()),
+            spenderLimitDeadlineCycles: new BN(spenderLimitDeadlineCycles),
+            withdrawalDeadlineCycles: new BN(withdrawalDeadlineCycles),
+            configModificationDeadlineCycles: new BN(configModificationDeadlineCycles),
+            spenderLimitExecutionMode: toExecutionModeArg(payload.spenderLimitExecutionMode),
+            withdrawalExecutionMode: toExecutionModeArg(payload.withdrawalExecutionMode),
+            configModificationExecutionMode: toExecutionModeArg(payload.configModificationExecutionMode),
           },
         }
       } else {

@@ -3,7 +3,7 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Mint, Token, TokenAccount},
 };
-use crate::pool::{transfer_user_tokens, Member, MemberRole, Pool};
+use crate::pool::{transfer_user_tokens, ExecutionMode, Member, MemberRole, Pool};
 use crate::ComfiError;
 
 #[account]
@@ -37,6 +37,12 @@ pub struct CreatePoolArgs {
     pub creator_alias_hash: [u8; 32],
     pub creator_encryption_public_key: [u8; 32],
     pub testing_enabled: bool,
+    pub spender_limit_deadline_cycles: u64,
+    pub withdrawal_deadline_cycles: u64,
+    pub config_modification_deadline_cycles: u64,
+    pub spender_limit_execution_mode: ExecutionMode,
+    pub withdrawal_execution_mode: ExecutionMode,
+    pub config_modification_execution_mode: ExecutionMode,
 }
 
 pub fn validate_create_pool(paused_new_pools: bool, args: &CreatePoolArgs) -> Result<()> {
@@ -53,6 +59,18 @@ pub fn validate_create_pool(paused_new_pools: bool, args: &CreatePoolArgs) -> Re
     require!(
         args.cycle_duration_seconds > 0,
         ComfiError::InvalidCycleDuration
+    );
+    require!(
+        args.spender_limit_deadline_cycles > 0,
+        ComfiError::InvalidProposalDeadline
+    );
+    require!(
+        args.withdrawal_deadline_cycles > 0,
+        ComfiError::InvalidProposalDeadline
+    );
+    require!(
+        args.config_modification_deadline_cycles > 0,
+        ComfiError::InvalidProposalDeadline
     );
     Ok(())
 }
@@ -203,6 +221,18 @@ pub mod deployer_handlers {
         pool.pending_vote_threshold = args.vote_threshold;
         pool.pending_cycle_duration_seconds = args.cycle_duration_seconds;
         pool.pending_member_obligation_amount = args.member_obligation_amount;
+        pool.spender_limit_deadline_cycles = args.spender_limit_deadline_cycles;
+        pool.withdrawal_deadline_cycles = args.withdrawal_deadline_cycles;
+        pool.config_modification_deadline_cycles = args.config_modification_deadline_cycles;
+        pool.pending_spender_limit_deadline_cycles = args.spender_limit_deadline_cycles;
+        pool.pending_withdrawal_deadline_cycles = args.withdrawal_deadline_cycles;
+        pool.pending_config_modification_deadline_cycles = args.config_modification_deadline_cycles;
+        pool.spender_limit_execution_mode = args.spender_limit_execution_mode;
+        pool.withdrawal_execution_mode = args.withdrawal_execution_mode;
+        pool.config_modification_execution_mode = args.config_modification_execution_mode;
+        pool.pending_spender_limit_execution_mode = args.spender_limit_execution_mode;
+        pool.pending_withdrawal_execution_mode = args.withdrawal_execution_mode;
+        pool.pending_config_modification_execution_mode = args.config_modification_execution_mode;
         ctx.accounts.global.next_pool_id = ctx
             .accounts
             .global
@@ -246,6 +276,12 @@ mod tests {
             creator_alias_hash: [0u8; 32],
             creator_encryption_public_key: [0u8; 32],
             testing_enabled: false,
+            spender_limit_deadline_cycles: 1,
+            withdrawal_deadline_cycles: 1,
+            config_modification_deadline_cycles: 2,
+            spender_limit_execution_mode: ExecutionMode::OnDeadline,
+            withdrawal_execution_mode: ExecutionMode::OnDeadline,
+            config_modification_execution_mode: ExecutionMode::OnDeadline,
         }
     }
 
@@ -309,6 +345,30 @@ mod tests {
         args.cycle_duration_seconds = 0;
         let err = validate_create_pool(false, &args).unwrap_err();
         assert_eq!(err, ComfiError::InvalidCycleDuration.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_zero_spender_limit_deadline_cycles() {
+        let mut args = valid_args();
+        args.spender_limit_deadline_cycles = 0;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidProposalDeadline.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_zero_withdrawal_deadline_cycles() {
+        let mut args = valid_args();
+        args.withdrawal_deadline_cycles = 0;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidProposalDeadline.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_zero_config_modification_deadline_cycles() {
+        let mut args = valid_args();
+        args.config_modification_deadline_cycles = 0;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::InvalidProposalDeadline.into());
     }
 
     #[test]

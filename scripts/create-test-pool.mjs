@@ -99,6 +99,12 @@ if (!poolAccount) {
     voteThreshold: 2, votingPeriodSeconds: new BN(604800), timelockSeconds: new BN(86400), cycleDurationSeconds: new BN(2592000),
     actionAllowancePerCycle: new BN(5n * oneUsdc), maxSponsoredActionCharge: new BN(1n * oneUsdc), creatorAliasHash: Array(32).fill(0), creatorEncryptionPublicKey: Array(32).fill(0),
     testingEnabled: true,
+    spenderLimitDeadlineCycles: new BN(1),
+    withdrawalDeadlineCycles: new BN(1),
+    configModificationDeadlineCycles: new BN(2),
+    spenderLimitExecutionMode: { onDeadline: {} },
+    withdrawalExecutionMode: { onDeadline: {} },
+    configModificationExecutionMode: { onDeadline: {} },
   }).accounts({ creator: creator.publicKey, global, creatorUsdc: creatorUsdc.address, treasuryUsdc: treasury.address, pool, vault, usdcMint: mint, creatorMember }).signers([creator]).rpc();
   poolAccount = await program.account.pool.fetch(pool);
 }

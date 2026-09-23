@@ -417,6 +417,12 @@ pub struct TestMemberOnly<'info> {
     pub member: Account<'info, Member>,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExecutionMode {
+    OnDeadline,
+    ThresholdMet,
+}
+
 /// PDA seeds: ["pool", pool_id.to_le_bytes()]. It is also the vault authority.
 #[account]
 pub struct Pool {
@@ -444,14 +450,46 @@ pub struct Pool {
     pub pending_vote_threshold: u32,
     pub pending_cycle_duration_seconds: i64,
     pub pending_member_obligation_amount: u64,
+    pub spender_limit_deadline_cycles: u64,
+    pub withdrawal_deadline_cycles: u64,
+    pub config_modification_deadline_cycles: u64,
+    pub pending_spender_limit_deadline_cycles: u64,
+    pub pending_withdrawal_deadline_cycles: u64,
+    pub pending_config_modification_deadline_cycles: u64,
+    pub spender_limit_execution_mode: ExecutionMode,
+    pub withdrawal_execution_mode: ExecutionMode,
+    pub config_modification_execution_mode: ExecutionMode,
+    pub pending_spender_limit_execution_mode: ExecutionMode,
+    pub pending_withdrawal_execution_mode: ExecutionMode,
+    pub pending_config_modification_execution_mode: ExecutionMode,
 }
 
 impl Pool {
-    pub const SPACE: usize = 8 + 227;
+    pub const SPACE: usize = 8 + 281;
 
     pub fn ensure_testing_enabled(&self) -> Result<()> {
         require!(self.testing_enabled, ComfiError::TestingNotEnabled);
         Ok(())
+    }
+
+    pub fn get_proposal_deadline_cycles(&self, action: &ProposalAction) -> u64 {
+        match action {
+            ProposalAction::SetSpenderLimit { .. } => self.spender_limit_deadline_cycles,
+            ProposalAction::ApproveWithdrawal { .. } => self.withdrawal_deadline_cycles,
+            ProposalAction::ConfigurationModification { .. } => {
+                self.config_modification_deadline_cycles
+            }
+        }
+    }
+
+    pub fn get_proposal_execution_mode(&self, action: &ProposalAction) -> ExecutionMode {
+        match action {
+            ProposalAction::SetSpenderLimit { .. } => self.spender_limit_execution_mode,
+            ProposalAction::ApproveWithdrawal { .. } => self.withdrawal_execution_mode,
+            ProposalAction::ConfigurationModification { .. } => {
+                self.config_modification_execution_mode
+            }
+        }
     }
 
     pub fn apply_pending_config(&mut self) {
@@ -459,6 +497,14 @@ impl Pool {
             self.vote_threshold = self.pending_vote_threshold;
             self.cycle_duration_seconds = self.pending_cycle_duration_seconds;
             self.member_obligation_amount = self.pending_member_obligation_amount;
+            self.spender_limit_deadline_cycles = self.pending_spender_limit_deadline_cycles;
+            self.withdrawal_deadline_cycles = self.pending_withdrawal_deadline_cycles;
+            self.config_modification_deadline_cycles =
+                self.pending_config_modification_deadline_cycles;
+            self.spender_limit_execution_mode = self.pending_spender_limit_execution_mode;
+            self.withdrawal_execution_mode = self.pending_withdrawal_execution_mode;
+            self.config_modification_execution_mode =
+                self.pending_config_modification_execution_mode;
             self.has_pending_config = false;
         }
     }
@@ -536,14 +582,17 @@ pub struct Proposal {
     pub yes_votes: u32,
     pub no_votes: u32,
     pub voting_cycle: u64,
+    pub deadline_cycle: u64,
     pub deadline: i64,
     pub executable_after: i64,
     pub state: ProposalState,
     pub bump: u8,
+    pub execution_mode: ExecutionMode,
+    pub vote_threshold: u32,
 }
 
 impl Proposal {
-    pub const SPACE: usize = 8 + 32 + 8 + 32 + 41 + 4 + 4 + 8 + 8 + 8 + 1 + 1;
+    pub const SPACE: usize = 8 + 32 + 8 + 32 + 48 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4;
 }
 
 #[account]
@@ -608,6 +657,12 @@ pub enum ProposalAction {
         vote_threshold: u32,
         cycle_duration_seconds: i64,
         member_obligation_amount: u64,
+        spender_limit_deadline_cycles: u64,
+        withdrawal_deadline_cycles: u64,
+        config_modification_deadline_cycles: u64,
+        spender_limit_execution_mode: ExecutionMode,
+        withdrawal_execution_mode: ExecutionMode,
+        config_modification_execution_mode: ExecutionMode,
     },
 }
 
@@ -823,24 +878,47 @@ pub fn process_cycle_proposals<'info>(
             Err(_) => continue,
         };
 
-        if proposal.pool != pool_key || proposal.voting_cycle != ending_cycle {
+        if proposal.pool != pool_key || ending_cycle < proposal.voting_cycle {
             continue;
         }
         if proposal.state != ProposalState::Queued && proposal.state != ProposalState::Open {
             continue;
         }
 
-        let passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let is_deadline = ending_cycle >= proposal.deadline_cycle;
+
+        let should_resolve = match proposal.execution_mode {
+            ExecutionMode::OnDeadline => is_deadline,
+            ExecutionMode::ThresholdMet => passed || is_deadline,
+        };
+
+        if !should_resolve {
+            continue;
+        }
+
         if passed {
             match proposal.action {
                 ProposalAction::ConfigurationModification {
                     vote_threshold,
                     cycle_duration_seconds,
                     member_obligation_amount,
+                    spender_limit_deadline_cycles,
+                    withdrawal_deadline_cycles,
+                    config_modification_deadline_cycles,
+                    spender_limit_execution_mode,
+                    withdrawal_execution_mode,
+                    config_modification_execution_mode,
                 } => {
                     pool.vote_threshold = vote_threshold;
                     pool.cycle_duration_seconds = cycle_duration_seconds;
                     pool.member_obligation_amount = member_obligation_amount;
+                    pool.spender_limit_deadline_cycles = spender_limit_deadline_cycles;
+                    pool.withdrawal_deadline_cycles = withdrawal_deadline_cycles;
+                    pool.config_modification_deadline_cycles = config_modification_deadline_cycles;
+                    pool.spender_limit_execution_mode = spender_limit_execution_mode;
+                    pool.withdrawal_execution_mode = withdrawal_execution_mode;
+                    pool.config_modification_execution_mode = config_modification_execution_mode;
                     pool.has_pending_config = false;
                     proposal.state = ProposalState::Executed;
                 }
@@ -965,7 +1043,7 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
         proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
     );
-    if proposal.yes_votes >= ctx.accounts.pool.vote_threshold
+    if proposal.yes_votes >= proposal.vote_threshold
         && proposal.yes_votes > proposal.no_votes
     {
         proposal.state = ProposalState::Executed;
@@ -1014,12 +1092,37 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
         ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool),
         ComfiError::MemberNotFunded
     );
+    let deadline_cycles = ctx.accounts.pool.get_proposal_deadline_cycles(&action);
+    require!(deadline_cycles > 0, ComfiError::InvalidProposalDeadline);
+    if let ProposalAction::ConfigurationModification {
+        spender_limit_deadline_cycles,
+        withdrawal_deadline_cycles,
+        config_modification_deadline_cycles,
+        ..
+    } = action
+    {
+        require!(
+            spender_limit_deadline_cycles > 0
+                && withdrawal_deadline_cycles > 0
+                && config_modification_deadline_cycles > 0,
+            ComfiError::InvalidProposalDeadline
+        );
+    }
     let clock = Clock::get()?;
     let pool = &mut ctx.accounts.pool;
     let next_voting_cycle = pool
         .current_cycle
         .checked_add(1)
         .ok_or(ComfiError::MathOverflow)?;
+    let deadline_cycle = next_voting_cycle
+        .checked_add(deadline_cycles)
+        .ok_or(ComfiError::MathOverflow)?
+        .checked_sub(1)
+        .ok_or(ComfiError::MathOverflow)?;
+    let duration_seconds = (deadline_cycles as i64)
+        .checked_mul(pool.cycle_duration_seconds)
+        .ok_or(ComfiError::MathOverflow)?;
+
     let proposal = &mut ctx.accounts.proposal;
     proposal.pool = pool.key();
     proposal.id = pool.next_proposal_id;
@@ -1028,13 +1131,16 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
     proposal.yes_votes = 0;
     proposal.no_votes = 0;
     proposal.voting_cycle = next_voting_cycle;
+    proposal.deadline_cycle = deadline_cycle;
     proposal.deadline = clock
         .unix_timestamp
-        .checked_add(pool.voting_period_seconds)
+        .checked_add(duration_seconds)
         .ok_or(ComfiError::MathOverflow)?;
     proposal.executable_after = 0;
     proposal.state = ProposalState::Queued;
     proposal.bump = ctx.bumps.proposal;
+    proposal.execution_mode = pool.get_proposal_execution_mode(&action);
+    proposal.vote_threshold = pool.vote_threshold;
     pool.next_proposal_id = pool
         .next_proposal_id
         .checked_add(1)
@@ -1043,7 +1149,6 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
 }
 
 pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
-    let clock = Clock::get()?;
     let pool = &ctx.accounts.pool;
     let proposal = &mut ctx.accounts.proposal;
     require!(
@@ -1059,15 +1164,9 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
         ComfiError::VotingNotStarted
     );
     require!(
-        pool.current_cycle == proposal.voting_cycle,
+        pool.current_cycle <= proposal.deadline_cycle,
         ComfiError::VotingClosed
     );
-    if !pool.testing_enabled {
-        require!(
-            clock.unix_timestamp <= proposal.deadline,
-            ComfiError::VotingClosed
-        );
-    }
     proposal.state = ProposalState::Open;
 
     if approve {
@@ -1097,13 +1196,18 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
         proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
     );
+    let passed = proposal.yes_votes >= proposal.vote_threshold
+        && proposal.yes_votes > proposal.no_votes;
+    let deadline_reached = pool.current_cycle > proposal.deadline_cycle;
+    let can_finalize = match proposal.execution_mode {
+        ExecutionMode::OnDeadline => deadline_reached,
+        ExecutionMode::ThresholdMet => passed || deadline_reached,
+    };
     require!(
-        pool.current_cycle > proposal.voting_cycle || clock.unix_timestamp > proposal.deadline,
+        can_finalize,
         ComfiError::VotingStillOpen
     );
-    if proposal.yes_votes >= pool.vote_threshold
-        && proposal.yes_votes > proposal.no_votes
-    {
+    if passed {
         proposal.state = ProposalState::Executed;
         proposal.executable_after = clock.unix_timestamp;
     } else {
@@ -1149,15 +1253,37 @@ pub fn execute_configuration_modification(
     if proposal.state != ProposalState::Executed {
         assert_executable(proposal)?;
     }
-    let (vote_threshold, cycle_duration_seconds, member_obligation_amount) = match proposal.action {
+    let (
+        vote_threshold,
+        cycle_duration_seconds,
+        member_obligation_amount,
+        spender_limit_deadline_cycles,
+        withdrawal_deadline_cycles,
+        config_modification_deadline_cycles,
+        spender_limit_execution_mode,
+        withdrawal_execution_mode,
+        config_modification_execution_mode,
+    ) = match proposal.action {
         ProposalAction::ConfigurationModification {
             vote_threshold,
             cycle_duration_seconds,
             member_obligation_amount,
+            spender_limit_deadline_cycles,
+            withdrawal_deadline_cycles,
+            config_modification_deadline_cycles,
+            spender_limit_execution_mode,
+            withdrawal_execution_mode,
+            config_modification_execution_mode,
         } => (
             vote_threshold,
             cycle_duration_seconds,
             member_obligation_amount,
+            spender_limit_deadline_cycles,
+            withdrawal_deadline_cycles,
+            config_modification_deadline_cycles,
+            spender_limit_execution_mode,
+            withdrawal_execution_mode,
+            config_modification_execution_mode,
         ),
         _ => return err!(ComfiError::WrongProposalAction),
     };
@@ -1169,14 +1295,27 @@ pub fn execute_configuration_modification(
         cycle_duration_seconds > 0,
         ComfiError::InvalidCycleDuration
     );
+    require!(
+        spender_limit_deadline_cycles > 0
+            && withdrawal_deadline_cycles > 0
+            && config_modification_deadline_cycles > 0,
+        ComfiError::InvalidProposalDeadline
+    );
 
     pool.vote_threshold = vote_threshold;
     pool.cycle_duration_seconds = cycle_duration_seconds;
     pool.member_obligation_amount = member_obligation_amount;
+    pool.spender_limit_deadline_cycles = spender_limit_deadline_cycles;
+    pool.withdrawal_deadline_cycles = withdrawal_deadline_cycles;
+    pool.config_modification_deadline_cycles = config_modification_deadline_cycles;
+    pool.spender_limit_execution_mode = spender_limit_execution_mode;
+    pool.withdrawal_execution_mode = withdrawal_execution_mode;
+    pool.config_modification_execution_mode = config_modification_execution_mode;
     pool.has_pending_config = false;
     proposal.state = ProposalState::Executed;
     Ok(())
 }
+
 
 pub fn spend(ctx: Context<Spend>) -> Result<()> {
     let request = &mut ctx.accounts.request;
@@ -1271,6 +1410,18 @@ mod tests {
             pending_vote_threshold: 2,
             pending_cycle_duration_seconds: 1000,
             pending_member_obligation_amount: 50,
+            spender_limit_deadline_cycles: 1,
+            withdrawal_deadline_cycles: 1,
+            config_modification_deadline_cycles: 2,
+            pending_spender_limit_deadline_cycles: 1,
+            pending_withdrawal_deadline_cycles: 1,
+            pending_config_modification_deadline_cycles: 2,
+            spender_limit_execution_mode: ExecutionMode::OnDeadline,
+            withdrawal_execution_mode: ExecutionMode::OnDeadline,
+            config_modification_execution_mode: ExecutionMode::OnDeadline,
+            pending_spender_limit_execution_mode: ExecutionMode::OnDeadline,
+            pending_withdrawal_execution_mode: ExecutionMode::OnDeadline,
+            pending_config_modification_execution_mode: ExecutionMode::OnDeadline,
         }
     }
 
@@ -1348,11 +1499,23 @@ mod tests {
         pool.pending_vote_threshold = 4;
         pool.pending_cycle_duration_seconds = 2000;
         pool.pending_member_obligation_amount = 150;
+        pool.pending_spender_limit_deadline_cycles = 3;
+        pool.pending_withdrawal_deadline_cycles = 2;
+        pool.pending_config_modification_deadline_cycles = 4;
+        pool.pending_spender_limit_execution_mode = ExecutionMode::ThresholdMet;
+        pool.pending_withdrawal_execution_mode = ExecutionMode::ThresholdMet;
+        pool.pending_config_modification_execution_mode = ExecutionMode::ThresholdMet;
 
         // Current active config has NOT changed yet
         assert_eq!(pool.vote_threshold, 2);
         assert_eq!(pool.cycle_duration_seconds, 1000);
         assert_eq!(pool.member_obligation_amount, 50);
+        assert_eq!(pool.spender_limit_deadline_cycles, 1);
+        assert_eq!(pool.withdrawal_deadline_cycles, 1);
+        assert_eq!(pool.config_modification_deadline_cycles, 2);
+        assert_eq!(pool.spender_limit_execution_mode, ExecutionMode::OnDeadline);
+        assert_eq!(pool.withdrawal_execution_mode, ExecutionMode::OnDeadline);
+        assert_eq!(pool.config_modification_execution_mode, ExecutionMode::OnDeadline);
 
         // Advance cycle
         pool.current_cycle += 1;
@@ -1362,6 +1525,12 @@ mod tests {
         assert_eq!(pool.vote_threshold, 4);
         assert_eq!(pool.cycle_duration_seconds, 2000);
         assert_eq!(pool.member_obligation_amount, 150);
+        assert_eq!(pool.spender_limit_deadline_cycles, 3);
+        assert_eq!(pool.withdrawal_deadline_cycles, 2);
+        assert_eq!(pool.config_modification_deadline_cycles, 4);
+        assert_eq!(pool.spender_limit_execution_mode, ExecutionMode::ThresholdMet);
+        assert_eq!(pool.withdrawal_execution_mode, ExecutionMode::ThresholdMet);
+        assert_eq!(pool.config_modification_execution_mode, ExecutionMode::ThresholdMet);
         assert!(!pool.has_pending_config);
     }
 
@@ -1379,7 +1548,7 @@ mod tests {
 
     #[test]
     fn test_account_space_constants() {
-        assert_eq!(Pool::SPACE, 8 + 227);
+        assert_eq!(Pool::SPACE, 8 + 281);
         assert_eq!(
             Member::SPACE,
             8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1
@@ -1391,7 +1560,7 @@ mod tests {
         );
         assert_eq!(
             Proposal::SPACE,
-            8 + 32 + 8 + 32 + 41 + 4 + 4 + 8 + 8 + 8 + 1 + 1
+            8 + 32 + 8 + 32 + 48 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4
         );
         assert_eq!(VoteReceipt::SPACE, 8 + 32 + 32 + 1 + 1);
         assert_eq!(SponsorQuoteReceipt::SPACE, 8 + 32 + 32 + 32 + 1);
@@ -1410,24 +1579,27 @@ mod tests {
             yes_votes: 1,
             no_votes: 0,
             voting_cycle: 1,
+            deadline_cycle: 1,
             deadline: 100,
             executable_after: 0,
             state: ProposalState::Open,
             bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
         };
 
         // 1 yes vote is below threshold of 2: should be rejected
-        let is_passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let is_passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
         assert!(!is_passed);
 
         // 2 yes votes and 0 no votes: reaches threshold of 2 and majority
         proposal.yes_votes = 2;
-        let is_passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let is_passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
         assert!(is_passed);
 
         // 2 yes votes and 2 no votes: tied, should not pass
         proposal.no_votes = 2;
-        let is_passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let is_passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
         assert!(!is_passed);
     }
 
@@ -1442,19 +1614,29 @@ mod tests {
                 vote_threshold: 3,
                 cycle_duration_seconds: 500,
                 member_obligation_amount: 100,
+                spender_limit_deadline_cycles: 1,
+                withdrawal_deadline_cycles: 1,
+                config_modification_deadline_cycles: 2,
+                spender_limit_execution_mode: ExecutionMode::OnDeadline,
+                withdrawal_execution_mode: ExecutionMode::OnDeadline,
+                config_modification_execution_mode: ExecutionMode::OnDeadline,
             },
             yes_votes: 0,
             no_votes: 0,
             voting_cycle: 1, // Enqueued for cycle 1
+            deadline_cycle: 2, // 2-cycle voting window: cycles 1 and 2
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Queued,
             bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: pool_cycle_0.vote_threshold,
         };
 
         // Initial state is Queued
         assert_eq!(proposal.state, ProposalState::Queued);
         assert_eq!(proposal.voting_cycle, 1);
+        assert_eq!(proposal.deadline_cycle, 2);
 
         // In Cycle 0: voting has not started yet
         assert!(pool_cycle_0.current_cycle < proposal.voting_cycle);
@@ -1462,17 +1644,22 @@ mod tests {
         // In Cycle 1: voting cycle is active
         let mut pool_cycle_1 = pool_cycle_0.clone();
         pool_cycle_1.current_cycle = 1;
-        assert_eq!(pool_cycle_1.current_cycle, proposal.voting_cycle);
+        assert!(pool_cycle_1.current_cycle >= proposal.voting_cycle && pool_cycle_1.current_cycle <= proposal.deadline_cycle);
 
         // When voting in cycle 1, state transitions to Open
         proposal.state = ProposalState::Open;
         proposal.yes_votes += 2;
         assert_eq!(proposal.state, ProposalState::Open);
 
-        // In Cycle 2: voting cycle has ended
+        // In Cycle 2: voting is still active because deadline_cycle is 2
         let mut pool_cycle_2 = pool_cycle_1.clone();
         pool_cycle_2.current_cycle = 2;
-        assert!(pool_cycle_2.current_cycle > proposal.voting_cycle);
+        assert!(pool_cycle_2.current_cycle >= proposal.voting_cycle && pool_cycle_2.current_cycle <= proposal.deadline_cycle);
+
+        // In Cycle 3: voting cycle has ended
+        let mut pool_cycle_3 = pool_cycle_2.clone();
+        pool_cycle_3.current_cycle = 3;
+        assert!(pool_cycle_3.current_cycle > proposal.deadline_cycle);
     }
 
     #[test]
@@ -1488,14 +1675,23 @@ mod tests {
                 vote_threshold: 4,
                 cycle_duration_seconds: 2500,
                 member_obligation_amount: 120,
+                spender_limit_deadline_cycles: 2,
+                withdrawal_deadline_cycles: 3,
+                config_modification_deadline_cycles: 4,
+                spender_limit_execution_mode: ExecutionMode::OnDeadline,
+                withdrawal_execution_mode: ExecutionMode::OnDeadline,
+                config_modification_execution_mode: ExecutionMode::OnDeadline,
             },
             yes_votes: 2,
             no_votes: 0,
             voting_cycle: 1,
+            deadline_cycle: 1,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
             bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
         };
 
         // Cycle 1 ends, rolling into Cycle 2
@@ -1503,8 +1699,8 @@ mod tests {
         pool.current_cycle += 1;
 
         // Evaluate conditions for the proposal of ending_cycle
-        assert_eq!(proposal.voting_cycle, ending_cycle);
-        let passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        assert_eq!(proposal.deadline_cycle, ending_cycle);
+        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
         assert!(passed);
 
         // Execution updates config and transitions directly to Executed (NOT Executable)
@@ -1513,11 +1709,23 @@ mod tests {
                 vote_threshold,
                 cycle_duration_seconds,
                 member_obligation_amount,
+                spender_limit_deadline_cycles,
+                withdrawal_deadline_cycles,
+                config_modification_deadline_cycles,
+                spender_limit_execution_mode,
+                withdrawal_execution_mode,
+                config_modification_execution_mode,
             } = proposal.action
             {
                 pool.vote_threshold = vote_threshold;
                 pool.cycle_duration_seconds = cycle_duration_seconds;
                 pool.member_obligation_amount = member_obligation_amount;
+                pool.spender_limit_deadline_cycles = spender_limit_deadline_cycles;
+                pool.withdrawal_deadline_cycles = withdrawal_deadline_cycles;
+                pool.config_modification_deadline_cycles = config_modification_deadline_cycles;
+                pool.spender_limit_execution_mode = spender_limit_execution_mode;
+                pool.withdrawal_execution_mode = withdrawal_execution_mode;
+                pool.config_modification_execution_mode = config_modification_execution_mode;
                 proposal.state = ProposalState::Executed;
             }
         }
@@ -1526,6 +1734,9 @@ mod tests {
         assert_eq!(pool.vote_threshold, 4);
         assert_eq!(pool.cycle_duration_seconds, 2500);
         assert_eq!(pool.member_obligation_amount, 120);
+        assert_eq!(pool.spender_limit_deadline_cycles, 2);
+        assert_eq!(pool.withdrawal_deadline_cycles, 3);
+        assert_eq!(pool.config_modification_deadline_cycles, 4);
     }
 
     #[test]
@@ -1539,17 +1750,26 @@ mod tests {
                 vote_threshold: 4,
                 cycle_duration_seconds: 2500,
                 member_obligation_amount: 120,
+                spender_limit_deadline_cycles: 1,
+                withdrawal_deadline_cycles: 1,
+                config_modification_deadline_cycles: 1,
+                spender_limit_execution_mode: ExecutionMode::OnDeadline,
+                withdrawal_execution_mode: ExecutionMode::OnDeadline,
+                config_modification_execution_mode: ExecutionMode::OnDeadline,
             },
             yes_votes: 1, // Below threshold of 2
             no_votes: 1,
             voting_cycle: 1,
+            deadline_cycle: 1,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
             bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
         };
 
-        let passed = proposal.yes_votes >= pool.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
         assert!(!passed);
 
         if !passed {
@@ -1558,4 +1778,237 @@ mod tests {
 
         assert_eq!(proposal.state, ProposalState::Rejected);
     }
+
+    #[test]
+    fn test_proposal_deadlines_per_proposal_type() {
+        let mut pool = create_test_pool();
+        pool.spender_limit_deadline_cycles = 1;
+        pool.withdrawal_deadline_cycles = 3;
+        pool.config_modification_deadline_cycles = 5;
+
+        let spender_action = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 500,
+        };
+        let withdrawal_action = ProposalAction::ApproveWithdrawal {
+            request: Pubkey::new_unique(),
+        };
+        let config_action = ProposalAction::ConfigurationModification {
+            vote_threshold: 3,
+            cycle_duration_seconds: 1000,
+            member_obligation_amount: 100,
+            spender_limit_deadline_cycles: 2,
+            withdrawal_deadline_cycles: 2,
+            config_modification_deadline_cycles: 2,
+            spender_limit_execution_mode: ExecutionMode::OnDeadline,
+            withdrawal_execution_mode: ExecutionMode::OnDeadline,
+            config_modification_execution_mode: ExecutionMode::OnDeadline,
+        };
+
+        assert_eq!(pool.get_proposal_deadline_cycles(&spender_action), 1);
+        assert_eq!(pool.get_proposal_deadline_cycles(&withdrawal_action), 3);
+        assert_eq!(pool.get_proposal_deadline_cycles(&config_action), 5);
+
+        // Created at current_cycle = 2:
+        // Spender action deadline: start = 3, duration = 1 -> deadline_cycle = 3 + 1 - 1 = 3
+        let start_cycle = 3;
+        let spender_deadline_cycle = start_cycle + pool.get_proposal_deadline_cycles(&spender_action) - 1;
+        assert_eq!(spender_deadline_cycle, 3);
+
+        // Withdrawal action deadline: start = 3, duration = 3 -> deadline_cycle = 3 + 3 - 1 = 5
+        let withdrawal_deadline_cycle = start_cycle + pool.get_proposal_deadline_cycles(&withdrawal_action) - 1;
+        assert_eq!(withdrawal_deadline_cycle, 5);
+
+        // Config action deadline: start = 3, duration = 5 -> deadline_cycle = 3 + 5 - 1 = 7
+        let config_deadline_cycle = start_cycle + pool.get_proposal_deadline_cycles(&config_action) - 1;
+        assert_eq!(config_deadline_cycle, 7);
+    }
+
+    #[test]
+    fn test_execution_mode_threshold_met_runs_on_next_available_cycle() {
+        let pool = create_test_pool(); // vote_threshold = 2
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 5, // Deadline is cycle 5
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 2,
+        };
+
+        // When rolling cycle 1 (next available cycle after voting opened):
+        let ending_cycle = 1;
+        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        let is_deadline = ending_cycle >= proposal.deadline_cycle;
+        assert!(!is_deadline); // It is NOT deadline cycle yet
+
+        let should_resolve = match proposal.execution_mode {
+            ExecutionMode::OnDeadline => is_deadline,
+            ExecutionMode::ThresholdMet => passed || is_deadline,
+        };
+        // Threshold is met, so it resolves immediately on cycle 1!
+        assert!(should_resolve);
+        proposal.state = ProposalState::Executed;
+        assert_eq!(proposal.state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn test_execution_mode_on_deadline_waits_for_deadline_cycle() {
+        let pool = create_test_pool(); // vote_threshold = 2
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 2, // Threshold met already!
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 4, // Deadline is cycle 4
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        // Cycle 1 rolls: threshold is met, but execution_mode is OnDeadline and not at deadline yet
+        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        assert!(passed);
+
+        let ending_cycle_1 = 1;
+        let is_deadline_1 = ending_cycle_1 >= proposal.deadline_cycle;
+        let should_resolve_1 = match proposal.execution_mode {
+            ExecutionMode::OnDeadline => is_deadline_1,
+            ExecutionMode::ThresholdMet => passed || is_deadline_1,
+        };
+        assert!(!should_resolve_1); // Does NOT resolve on cycle 1
+        assert_eq!(proposal.state, ProposalState::Open);
+
+        // Cycle 4 rolls: this is the deadline cycle!
+        let ending_cycle_4 = 4;
+        let is_deadline_4 = ending_cycle_4 >= proposal.deadline_cycle;
+        let should_resolve_4 = match proposal.execution_mode {
+            ExecutionMode::OnDeadline => is_deadline_4,
+            ExecutionMode::ThresholdMet => passed || is_deadline_4,
+        };
+        assert!(should_resolve_4); // Resolves on deadline cycle!
+        proposal.state = ProposalState::Executed;
+        assert_eq!(proposal.state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn test_proposal_execution_mode_per_proposal_type() {
+        let mut pool = create_test_pool();
+        pool.spender_limit_execution_mode = ExecutionMode::ThresholdMet;
+        pool.withdrawal_execution_mode = ExecutionMode::OnDeadline;
+        pool.config_modification_execution_mode = ExecutionMode::ThresholdMet;
+
+        let spender_action = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 500,
+        };
+        let withdrawal_action = ProposalAction::ApproveWithdrawal {
+            request: Pubkey::new_unique(),
+        };
+        let config_action = ProposalAction::ConfigurationModification {
+            vote_threshold: 3,
+            cycle_duration_seconds: 1000,
+            member_obligation_amount: 100,
+            spender_limit_deadline_cycles: 2,
+            withdrawal_deadline_cycles: 2,
+            config_modification_deadline_cycles: 2,
+            spender_limit_execution_mode: ExecutionMode::ThresholdMet,
+            withdrawal_execution_mode: ExecutionMode::ThresholdMet,
+            config_modification_execution_mode: ExecutionMode::ThresholdMet,
+        };
+
+        assert_eq!(pool.get_proposal_execution_mode(&spender_action), ExecutionMode::ThresholdMet);
+        assert_eq!(pool.get_proposal_execution_mode(&withdrawal_action), ExecutionMode::OnDeadline);
+        assert_eq!(pool.get_proposal_execution_mode(&config_action), ExecutionMode::ThresholdMet);
+    }
+
+    #[test]
+    fn test_config_change_does_not_affect_existing_proposals_except_cycle_timing() {
+        let mut pool = create_test_pool();
+        pool.vote_threshold = 2;
+        pool.spender_limit_deadline_cycles = 1;
+        pool.spender_limit_execution_mode = ExecutionMode::OnDeadline;
+        pool.cycle_duration_seconds = 100;
+
+        // Proposal 1 is submitted when pool.vote_threshold is 2
+        let spender_action = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 500,
+        };
+        let deadline_cycles = pool.get_proposal_deadline_cycles(&spender_action);
+        let execution_mode = pool.get_proposal_execution_mode(&spender_action);
+        let next_voting_cycle = pool.current_cycle + 1;
+        let deadline_cycle = next_voting_cycle + deadline_cycles - 1;
+
+        let mut existing_proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: spender_action,
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: next_voting_cycle,
+            deadline_cycle,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode,
+            vote_threshold: pool.vote_threshold,
+        };
+
+        pool.vote_threshold = 5; // Increased to 5
+        pool.spender_limit_deadline_cycles = 4; // Increased to 4 cycles
+        pool.spender_limit_execution_mode = ExecutionMode::ThresholdMet; // Changed to ThresholdMet
+        pool.cycle_duration_seconds = 5000; // Cycle timing lengthened
+
+        // Verify pool's own active config was updated
+        assert_eq!(pool.vote_threshold, 5);
+        assert_eq!(pool.spender_limit_deadline_cycles, 4);
+        assert_eq!(pool.spender_limit_execution_mode, ExecutionMode::ThresholdMet);
+        assert_eq!(pool.cycle_duration_seconds, 5000);
+
+        // Existing proposal retains its snapshotted configuration:
+        assert_eq!(existing_proposal.vote_threshold, 2);
+        assert_eq!(existing_proposal.deadline_cycle, 1);
+        assert_eq!(existing_proposal.execution_mode, ExecutionMode::OnDeadline);
+
+        // When cycle 1 rolls (under the new 5000s cycle timing):
+        let ending_cycle = 1;
+        let passed = existing_proposal.yes_votes >= existing_proposal.vote_threshold
+            && existing_proposal.yes_votes > existing_proposal.no_votes;
+        // Even though pool.vote_threshold is 5, proposal passes because its snapshotted threshold is 2:
+        assert!(passed);
+
+        let is_deadline = ending_cycle >= existing_proposal.deadline_cycle;
+        assert!(is_deadline);
+
+        let should_resolve = match existing_proposal.execution_mode {
+            ExecutionMode::OnDeadline => is_deadline,
+            ExecutionMode::ThresholdMet => passed || is_deadline,
+        };
+        assert!(should_resolve);
+        existing_proposal.state = ProposalState::Executed;
+        assert_eq!(existing_proposal.state, ProposalState::Executed);
+    }
 }
+
+
