@@ -94,4 +94,78 @@ charge cap, member allowance, treasury, and quote signer before its CPI charge.
 Key architectural decisions, economic mechanisms, and security invariants are recorded under [`adrs/`](adrs/README.md):
 - [ADR 0001: Fair Closure Algorithm](adrs/0001-fair-closure-algorithm.md) — Multi-cycle liquidation waterfall, $O(1)$ cumulative spend-benefit streaming accumulator, and anti-cartel settlement.
 
+## Security Vulnerability & Audit Tracker
+
+> [!WARNING]
+> This program has identified security vulnerabilities that allow unauthorized control or extraction of vault funds. The following tracker logs active findings from the adversarial security audit for systematic remediation.
+
+### Vulnerability Status Matrix
+
+| ID | Severity | Status | Title | Affected Area |
+| :--- | :--- | :--- | :--- | :--- |
+| **VULN-01** | `CRITICAL` | `[ ] Open` | Disproportionate Benefit Socialization via `requires_proposal: false` in `spend` | [`src/pool.rs:L1706-L1730`](src/pool.rs#L1706-L1730) |
+| **VULN-02** | `CRITICAL` | `[ ] Open` | Vote Threshold Scale / Basis Point Confusion Enabling Single-Vote DAO Takeover | [`src/pool.rs:L712-L728`](src/pool.rs#L712-L728) |
+| **VULN-03** | `CRITICAL` | `[ ] Open` | Timelock Bypass in Cycle Rollover (`process_cycle_proposals`) | [`src/pool.rs:L1149-L1237`](src/pool.rs#L1149-L1237) |
+| **VULN-04** | `CRITICAL` | `[ ] Open` | `sync_surplus` Lockout on Closure Enabling Senior Tier Drainage | [`src/pool.rs:L630-L640`](src/pool.rs#L630-L640), [`L1746`](src/pool.rs#L1746) |
+| **VULN-05** | `HIGH` | `[ ] Open` | Governance `ApproveWithdrawal` Permanent Deadlock | [`src/pool.rs:L1641-L1667`](src/pool.rs#L1641-L1667) |
+| **VULN-06** | `HIGH` | `[ ] Open` | Inline Spender Cycle PDA Derivation Mismatch Bricking Limits | [`src/pool.rs:L1190-L1208`](src/pool.rs#L1190-L1208) |
+| **VULN-07** | `HIGH` | `[ ] Open` | Production `testing_enabled` State Tampering & Permissionless Handlers | [`src/deployer.rs:L238`](src/deployer.rs#L238), [`src/pool.rs:L1308-L1340`](src/pool.rs#L1308-L1340) |
+| **VULN-08** | `HIGH` | `[ ] Open` | Recurring Member Deposits Diverted to Non-Conferred Surplus | [`src/pool.rs:L941-L953`](src/pool.rs#L941-L953) |
+
+---
+
+### Detailed Findings & Remediation Plan
+
+#### [ ] VULN-01: Disproportionate Benefit Socialization in `spend` (CRITICAL)
+- **Location**: [`src/pool.rs:L1706-L1730`](src/pool.rs#L1706-L1730)
+- **Impact**: Spender extracts 100% of cash withdrawal into their own wallet, but the protocol assumes it is a "shared operating spend" whenever `requires_proposal == false`. The spender's personal `cumulative_benefit_received` is debited only by their $1/N$ share, while $(N-1)/N$ is socialized to innocent members. On pool closure, the spender claims almost their entire original deposit back, stealing other members' capital.
+- **Remediation**:
+  1. Forbid unvoted member withdrawals to arbitrary recipient addresses; require that unvoted spends route only to verified vendors or require dedicated governance approval.
+  2. If withdrawals are directed to a member's own account, debit 100% of the withdrawal directly from `requester.cumulative_benefit_received`.
+
+#### [ ] VULN-02: Vote Threshold Basis Point Confusion (CRITICAL)
+- **Location**: [`src/pool.rs:L712-L728`](src/pool.rs#L712-L728)
+- **Impact**: `required_votes_for_pool` treats any `vote_threshold <= 100` as percentage basis points (`threshold * 100`). Setting `vote_threshold = 2` (intended as 2 members) evaluates to 200 bps (2%). In pools with $\le 50$ members, `(50 * 200 + 9999) / 10000 = 1`. A single attacker can pass any proposal alone and drain the vault.
+- **Remediation**:
+  1. Eliminate ambiguous threshold interpretation. Enforce that vote threshold is strictly an explicit basis point range ($> 100$ and $\le 10{,}000$) or an absolute count enum.
+  2. Add validation requiring at least a strict majority ($> 5{,}000$ bps) for critical actions like `SetSpenderLimit` and `ClosePool`.
+
+#### [ ] VULN-03: Timelock Bypass in `process_cycle_proposals` (CRITICAL)
+- **Location**: [`src/pool.rs:L1149-L1237`](src/pool.rs#L1149-L1237)
+- **Impact**: Proposals processed during `roll_cycle` transition directly to `ProposalState::Executed`, executing configuration changes, spender limits, and pool closures instantly without observing `pool.timelock_seconds`.
+- **Remediation**:
+  1. Ensure all proposals passing in `process_cycle_proposals` transition to `ProposalState::Executable` with `executable_after = clock.unix_timestamp + pool.timelock_seconds`.
+  2. Enforce explicit execution via `execute_*` after timelock expiration.
+
+#### [ ] VULN-04: `sync_surplus` Lockout on Closure (CRITICAL)
+- **Location**: [`src/pool.rs:L630-L640`](src/pool.rs#L630-L640), [`src/pool.rs:L1746`](src/pool.rs#L1746)
+- **Impact**: `Member::sync_surplus` guards with `!pool.is_closing`. When `claim_closure_refund` runs, `pool.is_closing` is already true, making `sync_surplus` a no-op. Members who paid advance surplus for future cycles can participate in those cycles, consume pool funds, and still withdraw their surplus as senior Priority 1 debt on closure.
+- **Remediation**:
+  1. Decouple cycle consumption from `!pool.is_closing` so that prepaid cycles elapsed prior to closure are properly recognized as conferred capital.
+
+#### [ ] VULN-05: Governance `ApproveWithdrawal` Deadlock (HIGH)
+- **Location**: [`src/pool.rs:L1641-L1667`](src/pool.rs#L1641-L1667)
+- **Impact**: `spend` unconditionally requires `ctx.accounts.spender_cycle` where `next_spent <= cycle.cap`. A one-off withdrawal passed and approved by governance fails with `SpendLimitExceeded` or uninitialized account error if the member does not have an active spender limit for that cycle.
+- **Remediation**:
+  1. Make `spender_cycle` optional or bypass recurring spender cap checks when a valid `ProposalAction::ApproveWithdrawal` is executed.
+
+#### [ ] VULN-06: Inline Spender Cycle PDA Derivation Mismatch (HIGH)
+- **Location**: [`src/pool.rs:L1190-L1208`](src/pool.rs#L1190-L1208)
+- **Impact**: Passing an existing `SpenderCycle` from an old cycle in `remaining_accounts` mutates `sc.cycle = pool.current_cycle` and sets the proposal to `Executed`, but the PDA address remains tied to the old cycle seed. Subsequent `spend` calls look for the new cycle seed, which does not exist, permanently bricking the limit.
+- **Remediation**:
+  1. Remove inline mutation of `SpenderCycle` in `process_cycle_proposals`. Require initialization through `execute_spender_limit`.
+
+#### [ ] VULN-07: Production `testing_enabled` State Tampering (HIGH)
+- **Location**: [`src/deployer.rs:L238`](src/deployer.rs#L238), [`src/pool.rs:L1308-L1340`](src/pool.rs#L1308-L1340)
+- **Impact**: `testing_enabled` can be enabled in production. Test instructions (`test_set_cycle`, `test_advance_cycles`, `test_finalize_proposal`) lack signer checks, allowing any third party to tamper with cycles and proposal states.
+- **Remediation**:
+  1. Compile-gate all `test_*` instructions behind `#[cfg(feature = "testing")]` so they are not included in release binaries.
+
+#### [ ] VULN-08: Recurring Member Deposits Diverted to Non-Conferred Surplus (HIGH)
+- **Location**: [`src/pool.rs:L941-L953`](src/pool.rs#L941-L953)
+- **Impact**: For already-funded members, all additional deposits in `deposit` are routed to `surplus_amount` with `delta_conferred = 0`. The pool's `total_conferred_capital` is starved and not updated until a subsequent cycle's `sync_surplus` runs, preventing legitimate operations.
+- **Remediation**:
+  1. Correctly recognize recurring cycle obligation deposits into `total_conferred_capital` when depositing for current obligations.
+
+
 

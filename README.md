@@ -20,7 +20,8 @@ The first implementation slice is organized as a small workspace:
 
 - `apps/web` — responsive member workspace for viewing live on-chain pools, vault balances, activity, proposals, and payment requests.
 - `services/sponsor-api` — bounded, short-lived sponsorship and enrollment quote service.
-- `programs/comfi` — Anchor program that guards the pool USDC vault and governance flows.
+- `programs/comfi` — Anchor program that guards the pool USDC vault and governance flows. See the [Security Vulnerability & Audit Tracker](programs/comfi/README.md#security-vulnerability--audit-tracker) for actively tracked findings and remediation roadmap.
+
 
 ---
 

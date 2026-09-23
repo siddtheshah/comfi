@@ -532,6 +532,12 @@ impl Pool {
         Ok(())
     }
 
+    pub fn enter_closure(&mut self) {
+        self.is_closing = true;
+        self.closing_non_conferred_basis = self.total_non_conferred_capital;
+        self.closing_conferred_pool_capital = self.total_conferred_capital;
+    }
+
     pub fn get_proposal_deadline_cycles(&self, action: &ProposalAction) -> u64 {
         match action {
             ProposalAction::SetSpenderLimit { .. } => self.spender_limit_deadline_cycles,
@@ -622,7 +628,7 @@ impl Member {
     }
 
     pub fn sync_surplus(&mut self, pool: &mut Pool) {
-        if pool.current_cycle > self.surplus_cycle {
+        if !pool.is_closing && pool.current_cycle > self.surplus_cycle {
             if self.surplus_amount > 0 {
                 let consumed = self.surplus_amount;
                 self.surplus_amount = 0;
@@ -1216,7 +1222,16 @@ pub fn process_cycle_proposals<'info>(
                         .ok_or(ComfiError::MathOverflow)?;
                 }
                 ProposalAction::ClosePool => {
-                    pool.is_closing = true;
+                    pool.enter_closure();
+                    for acc in remaining_accounts.iter() {
+                        if acc.key() == pool.vault && acc.data_len() >= 8 {
+                            let mut data: &[u8] = &acc.try_borrow_data()?[..];
+                            if let Ok(vault_acc) = TokenAccount::try_deserialize(&mut data) {
+                                pool.closing_vault_basis = vault_acc.amount;
+                                pool.has_snapshotted_closure = true;
+                            }
+                        }
+                    }
                     proposal.state = ProposalState::Executed;
                 }
             }
@@ -1311,7 +1326,7 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
     let passed = proposal.is_passed_for_pool(&ctx.accounts.pool)?;
     if passed {
         if proposal.action == ProposalAction::ClosePool {
-            ctx.accounts.pool.is_closing = true;
+            ctx.accounts.pool.enter_closure();
             proposal.state = ProposalState::Executed;
             proposal.executable_after = clock.unix_timestamp;
         } else {
@@ -1485,7 +1500,16 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
     );
     if passed {
         if proposal.action == ProposalAction::ClosePool {
-            ctx.accounts.pool.is_closing = true;
+            ctx.accounts.pool.enter_closure();
+            for acc in ctx.remaining_accounts.iter() {
+                if acc.key() == ctx.accounts.pool.vault && acc.data_len() >= 8 {
+                    let mut data: &[u8] = &acc.try_borrow_data()?[..];
+                    if let Ok(vault_acc) = TokenAccount::try_deserialize(&mut data) {
+                        ctx.accounts.pool.closing_vault_basis = vault_acc.amount;
+                        ctx.accounts.pool.has_snapshotted_closure = true;
+                    }
+                }
+            }
             proposal.state = ProposalState::Executed;
             proposal.executable_after = clock.unix_timestamp;
         } else {
@@ -1727,8 +1751,10 @@ pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
     // Snapshot pro-rata basis on the initial closure claim
     if !pool.has_snapshotted_closure {
         pool.closing_vault_basis = ctx.accounts.vault.amount;
-        pool.closing_non_conferred_basis = pool.total_non_conferred_capital;
-        pool.closing_conferred_pool_capital = pool.total_conferred_capital;
+        if pool.closing_non_conferred_basis == 0 && pool.closing_conferred_pool_capital == 0 {
+            pool.closing_non_conferred_basis = pool.total_non_conferred_capital;
+            pool.closing_conferred_pool_capital = pool.total_conferred_capital;
+        }
         pool.has_snapshotted_closure = true;
     }
 
@@ -2608,13 +2634,15 @@ mod tests {
 
         if passed {
             if proposal.action == ProposalAction::ClosePool {
-                pool.is_closing = true;
+                pool.enter_closure();
                 proposal.state = ProposalState::Executed;
             }
         }
 
         assert_eq!(proposal.state, ProposalState::Executed);
         assert!(pool.is_closing);
+        assert_eq!(pool.closing_non_conferred_basis, pool.total_non_conferred_capital);
+        assert_eq!(pool.closing_conferred_pool_capital, pool.total_conferred_capital);
     }
 
     #[test]
@@ -4045,6 +4073,78 @@ mod tests {
         voter.sync_benefit(&pool).unwrap();
         assert_eq!(voter.cumulative_benefit_received, 70);
         assert_eq!(voter.last_benefit_index, 70 * BENEFIT_SCALE);
+    }
+
+    #[test]
+    fn test_closure_basis_decided_in_closure_transaction() {
+        let mut pool = create_test_pool();
+        pool.total_non_conferred_capital = 80; // e.g. 50 surplus + 30 unfunded deposit
+        pool.total_conferred_capital = 200;
+        pool.funded_member_count = 2;
+
+        // Verify bases start at 0 before closure
+        assert!(!pool.is_closing);
+        assert_eq!(pool.closing_non_conferred_basis, 0);
+        assert_eq!(pool.closing_conferred_pool_capital, 0);
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 2,
+        };
+
+        // When ClosePool proposal is executed in that transaction:
+        let passed = proposal.is_passed_for_pool(&pool).unwrap();
+        assert!(passed);
+        if proposal.action == ProposalAction::ClosePool {
+            pool.enter_closure();
+            proposal.state = ProposalState::Executed;
+        }
+        assert_eq!(proposal.state, ProposalState::Executed);
+
+        // Invariant: Conferred and non-conferred bases MUST be locked in that transaction!
+        assert!(pool.is_closing);
+        assert_eq!(pool.closing_non_conferred_basis, 80);
+        assert_eq!(pool.closing_conferred_pool_capital, 200);
+
+        // Member A with surplus attempts sync_surplus after pool closure (e.g. cycle was rolled prior to closure)
+        let mut member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 1,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0, // Lower than pool.current_cycle
+        };
+
+        // sync_surplus must NOT consume surplus into closed pool
+        member_a.sync_surplus(&mut pool);
+        assert_eq!(member_a.surplus_amount, 50); // Surplus preserved for refund!
+        assert_eq!(pool.closing_non_conferred_basis, 80); // Bases remain invariant!
+        assert_eq!(pool.closing_conferred_pool_capital, 200);
     }
 }
 

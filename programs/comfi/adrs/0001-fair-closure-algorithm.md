@@ -138,10 +138,10 @@ flowchart TD
     B -- No --> B_Err[Error: PoolNotClosing]
     B -- Yes --> C{!member.closure_claimed?}
     C -- No --> C_Err[Error: ClosureRefundAlreadyClaimed]
-    C -- Yes --> D[member.sync_surplus: advance surplus if cycle rolled]
+    C -- Yes --> D[member.sync_surplus: sync surplus if active]
     D --> E[member.sync_benefit: accrue uncollected spend benefits]
     E --> F{!pool.has_snapshotted_closure?}
-    F -- Yes --> G[Snapshot Basis:<br/>closing_vault_basis = vault.amount<br/>closing_non_conferred_basis = total_non_conferred_capital<br/>closing_conferred_pool_capital = total_conferred_capital<br/>has_snapshotted_closure = true]
+    F -- Yes --> G[Snapshot Vault Basis:<br/>closing_vault_basis = vault.amount<br/>has_snapshotted_closure = true]
     F -- No --> H[Use Existing Snapshot Basis]
     G --> I[Priority 1: Senior Non-Conferred Refund]
     H --> I
@@ -167,16 +167,21 @@ flowchart TD
 #### Step 1: Guard Checks & State Synchronization
 1. `require!(pool.is_closing, ComfiError::PoolNotClosing)`
 2. `require!(!member.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed)`
-3. `member.sync_surplus(pool)` (advances any rolled cycle surplus transitions)
+3. `member.sync_surplus(pool)` (surplus remains unconsumed once `pool.is_closing` is set)
 4. `member.sync_benefit(pool)` (accrues any outstanding delegated spend benefits)
 
-#### Step 2: Atomic Pro-Rata Basis Snapshot
-On the very first claim transaction after pool closure:
+#### Step 2: Basis Determination at Closure & Vault Snapshot
+When the pool is closed via proposal execution (`ProposalAction::ClosePool`), the conferred and non-conferred bases are decided immediately in that transaction:
+```rust
+pool.enter_closure();
+// self.is_closing = true;
+// self.closing_non_conferred_basis = self.total_non_conferred_capital;
+// self.closing_conferred_pool_capital = self.total_conferred_capital;
+```
+If the vault account is passed during closure or on the very first claim transaction after pool closure:
 ```rust
 if !pool.has_snapshotted_closure {
     pool.closing_vault_basis = ctx.accounts.vault.amount;
-    pool.closing_non_conferred_basis = pool.total_non_conferred_capital;
-    pool.closing_conferred_pool_capital = pool.total_conferred_capital;
     pool.has_snapshotted_closure = true;
 }
 ```
