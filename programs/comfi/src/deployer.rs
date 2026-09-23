@@ -72,6 +72,15 @@ pub fn validate_create_pool(paused_new_pools: bool, args: &CreatePoolArgs) -> Re
         args.config_modification_deadline_cycles > 0,
         ComfiError::InvalidProposalDeadline
     );
+    if args.initial_deposit >= args.member_obligation_amount {
+        let excess = args.initial_deposit
+            .checked_sub(args.member_obligation_amount)
+            .ok_or(ComfiError::MathOverflow)?;
+        require!(
+            excess <= args.member_obligation_amount,
+            ComfiError::OverfundingCapExceeded
+        );
+    }
     Ok(())
 }
 
@@ -181,6 +190,15 @@ pub mod deployer_handlers {
     pub fn create_pool(ctx: Context<CreatePool>, args: CreatePoolArgs) -> Result<()> {
         validate_create_pool(ctx.accounts.global.paused_new_pools, &args)?;
 
+        let (is_funded, surplus) = if args.initial_deposit >= args.member_obligation_amount {
+            let excess = args.initial_deposit
+                .checked_sub(args.member_obligation_amount)
+                .ok_or(ComfiError::MathOverflow)?;
+            (true, excess)
+        } else {
+            (false, 0)
+        };
+
         transfer_user_tokens(
             &ctx.accounts.token_program,
             &ctx.accounts.creator_usdc,
@@ -233,6 +251,16 @@ pub mod deployer_handlers {
         pool.pending_spender_limit_execution_mode = args.spender_limit_execution_mode;
         pool.pending_withdrawal_execution_mode = args.withdrawal_execution_mode;
         pool.pending_config_modification_execution_mode = args.config_modification_execution_mode;
+        pool.is_closing = false;
+        pool.total_surplus = surplus;
+        pool.close_deadline_cycles = args.withdrawal_deadline_cycles;
+        pool.close_execution_mode = ExecutionMode::OnDeadline;
+        pool.total_settled_capital = 0;
+        pool.funded_member_count = if is_funded { 1 } else { 0 };
+        pool.cumulative_benefit_per_member = 0;
+        pool.total_conferred_capital = args.initial_deposit.saturating_sub(surplus);
+        pool.closing_conferred_vault = 0;
+        pool.closing_conferred_pool_capital = 0;
         ctx.accounts.global.next_pool_id = ctx
             .accounts
             .global
@@ -244,14 +272,21 @@ pub mod deployer_handlers {
         member.pool = pool.key();
         member.wallet = ctx.accounts.creator.key();
         member.role = MemberRole::Admin;
-        member.is_funded = args.initial_deposit >= args.member_obligation_amount;
+        member.is_funded = is_funded;
         member.deposited_total = args.initial_deposit;
+        member.surplus_amount = surplus;
+        member.total_withdrawn = 0;
+        member.closure_claimed = false;
+        member.last_benefit_index = 0;
+        member.cumulative_benefit_received = 0;
+        member.total_contributions = args.initial_deposit;
         member.alias_hash = args.creator_alias_hash;
         member.encryption_public_key = args.creator_encryption_public_key;
         member.alias_version = 1;
         member.allowance_cycle = 0;
         member.action_allowance_used = 0;
         member.bump = ctx.bumps.creator_member;
+        member.surplus_cycle = 0;
         Ok(())
     }
 }
@@ -320,6 +355,15 @@ mod tests {
         args.initial_deposit = 100;
         let err = validate_create_pool(false, &args).unwrap_err();
         assert_eq!(err, ComfiError::DepositBelowMinimum.into());
+    }
+
+    #[test]
+    fn test_validate_create_pool_overfunding_cap_exceeded() {
+        let mut args = valid_args();
+        // obligation is 50, maximum surplus is 50, so max allowed initial_deposit is 100
+        args.initial_deposit = 101;
+        let err = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err, ComfiError::OverfundingCapExceeded.into());
     }
 
     #[test]

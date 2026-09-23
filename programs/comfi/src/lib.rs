@@ -114,6 +114,10 @@ pub mod comfi {
     pub fn spend(ctx: Context<Spend>) -> Result<()> {
         pool::pool_handlers::spend(ctx)
     }
+
+    pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
+        pool::pool_handlers::claim_closure_refund(ctx)
+    }
 }
 
 #[error_code]
@@ -196,5 +200,17 @@ pub enum ComfiError {
     TestingNotEnabled,
     #[msg("Proposal deadline cycles must be greater than zero.")]
     InvalidProposalDeadline,
+    #[msg("Overfunding cap exceeded.")]
+    OverfundingCapExceeded,
+    #[msg("Pool is in the process of closing.")]
+    PoolIsClosing,
+    #[msg("Pool is not closing.")]
+    PoolNotClosing,
+    #[msg("Insufficient vault balance to satisfy priority surplus.")]
+    InsufficientVaultForSurplus,
+    #[msg("Closure refund has already been claimed.")]
+    ClosureRefundAlreadyClaimed,
+    #[msg("No refund is owed to this member.")]
+    NoRefundOwed,
 }
 

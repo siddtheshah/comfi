@@ -88,3 +88,9 @@ This gives the frontend/API a stable construction order:
 
 The program independently checks the signed pool, member, action, expiry,
 charge cap, member allowance, treasury, and quote signer before its CPI charge.
+
+## Architecture Decision Records (ADRs)
+
+Key architectural decisions, economic mechanisms, and security invariants are recorded under [`adr/`](adr/README.md):
+- [ADR 0001: Fair Closure Algorithm](adr/0001-fair-closure-algorithm.md) — Multi-cycle liquidation waterfall, $O(1)$ cumulative spend-benefit streaming accumulator, and anti-cartel settlement.
+

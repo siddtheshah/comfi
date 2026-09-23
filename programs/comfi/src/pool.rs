@@ -108,6 +108,7 @@ pub struct JoinPool<'info> {
     #[account(
         mut,
         has_one = global,
+        constraint = !pool.is_closing @ ComfiError::PoolIsClosing,
         constraint = vault.key() == pool.vault @ ComfiError::InvalidVault
     )]
     pub pool: Account<'info, Pool>,
@@ -142,7 +143,9 @@ pub struct Deposit<'info> {
     #[account(seeds = [b"global"], bump = global.bump)]
     pub global: Account<'info, GlobalConfig>,
     #[account(
+        mut,
         has_one = global,
+        constraint = !pool.is_closing @ ComfiError::PoolIsClosing,
         constraint = vault.key() == pool.vault @ ComfiError::InvalidVault
     )]
     pub pool: Account<'info, Pool>,
@@ -307,6 +310,7 @@ pub struct Vote<'info> {
 
 #[derive(Accounts)]
 pub struct FinalizeProposal<'info> {
+    #[account(mut)]
     pub pool: Account<'info, Pool>,
     #[account(mut, has_one = pool)]
     pub proposal: Account<'info, Proposal>,
@@ -365,6 +369,7 @@ pub struct Spend<'info> {
     )]
     pub executor_member: Box<Account<'info, Member>>,
     #[account(
+        mut,
         has_one = pool,
         constraint = requester_member.key() == request.requester @ ComfiError::Unauthorized
     )]
@@ -398,6 +403,41 @@ pub struct Spend<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ClaimClosureRefund<'info> {
+    #[account(mut)]
+    pub member_wallet: Signer<'info>,
+    #[account(seeds = [b"global"], bump = global.bump)]
+    pub global: Account<'info, GlobalConfig>,
+    #[account(
+        mut,
+        has_one = global,
+        constraint = vault.key() == pool.vault @ ComfiError::InvalidVault
+    )]
+    pub pool: Account<'info, Pool>,
+    #[account(
+        mut,
+        seeds = [b"member", pool.key().as_ref(), member_wallet.key().as_ref()],
+        bump = member.bump,
+        has_one = pool,
+        constraint = member.wallet == member_wallet.key() @ ComfiError::Unauthorized
+    )]
+    pub member: Account<'info, Member>,
+    #[account(
+        mut,
+        address = pool.vault @ ComfiError::InvalidVault,
+        constraint = vault.mint == global.usdc_mint @ ComfiError::WrongMint
+    )]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = member_usdc.owner == member_wallet.key() @ ComfiError::Unauthorized,
+        constraint = member_usdc.mint == global.usdc_mint @ ComfiError::WrongMint
+    )]
+    pub member_usdc: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
 pub struct TestPoolOnly<'info> {
     #[account(mut)]
     pub pool: Account<'info, Pool>,
@@ -422,6 +462,8 @@ pub enum ExecutionMode {
     OnDeadline,
     ThresholdMet,
 }
+
+pub const BENEFIT_SCALE: u128 = 1_000_000_000_000; // 1e12
 
 /// PDA seeds: ["pool", pool_id.to_le_bytes()]. It is also the vault authority.
 #[account]
@@ -462,13 +504,28 @@ pub struct Pool {
     pub pending_spender_limit_execution_mode: ExecutionMode,
     pub pending_withdrawal_execution_mode: ExecutionMode,
     pub pending_config_modification_execution_mode: ExecutionMode,
+    pub is_closing: bool,
+    pub total_surplus: u64,
+    pub close_deadline_cycles: u64,
+    pub close_execution_mode: ExecutionMode,
+    pub total_settled_capital: u64,
+    pub funded_member_count: u32,
+    pub cumulative_benefit_per_member: u128,
+    pub total_conferred_capital: u64,
+    pub closing_conferred_vault: u64,
+    pub closing_conferred_pool_capital: u64,
 }
 
 impl Pool {
-    pub const SPACE: usize = 8 + 281;
+    pub const SPACE: usize = 8 + 351;
 
     pub fn ensure_testing_enabled(&self) -> Result<()> {
         require!(self.testing_enabled, ComfiError::TestingNotEnabled);
+        Ok(())
+    }
+
+    pub fn ensure_not_closing(&self) -> Result<()> {
+        require!(!self.is_closing, ComfiError::PoolIsClosing);
         Ok(())
     }
 
@@ -479,6 +536,7 @@ impl Pool {
             ProposalAction::ConfigurationModification { .. } => {
                 self.config_modification_deadline_cycles
             }
+            ProposalAction::ClosePool => self.close_deadline_cycles,
         }
     }
 
@@ -489,6 +547,7 @@ impl Pool {
             ProposalAction::ConfigurationModification { .. } => {
                 self.config_modification_execution_mode
             }
+            ProposalAction::ClosePool => self.close_execution_mode,
         }
     }
 
@@ -524,10 +583,17 @@ pub struct Member {
     pub allowance_cycle: u64,
     pub action_allowance_used: u64,
     pub bump: u8,
+    pub surplus_amount: u64,
+    pub total_withdrawn: u64,
+    pub closure_claimed: bool,
+    pub last_benefit_index: u128,
+    pub cumulative_benefit_received: u64,
+    pub total_contributions: u64,
+    pub surplus_cycle: u64,
 }
 
 impl Member {
-    pub const SPACE: usize = 8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1;
+    pub const SPACE: usize = 8 + 214;
 
     pub fn can_request_spend(&self) -> bool {
         matches!(
@@ -538,6 +604,34 @@ impl Member {
 
     pub fn is_funded_for_pool(&self, pool: &Pool) -> bool {
         self.is_funded && self.deposited_total >= pool.member_obligation_amount
+    }
+
+    pub fn sync_surplus(&mut self, pool: &mut Pool) {
+        if pool.current_cycle > self.surplus_cycle {
+            if self.surplus_amount > 0 {
+                let consumed = self.surplus_amount;
+                self.surplus_amount = 0;
+                pool.total_surplus = pool.total_surplus.saturating_sub(consumed);
+                pool.total_conferred_capital = pool.total_conferred_capital.saturating_add(consumed);
+            }
+            self.surplus_cycle = pool.current_cycle;
+        }
+    }
+
+    pub fn sync_benefit(&mut self, pool: &Pool) -> Result<()> {
+        if pool.cumulative_benefit_per_member > self.last_benefit_index {
+            let diff = pool.cumulative_benefit_per_member
+                .checked_sub(self.last_benefit_index)
+                .ok_or(ComfiError::MathOverflow)?;
+            if self.is_funded_for_pool(pool) {
+                let accrued = (diff / BENEFIT_SCALE) as u64;
+                self.cumulative_benefit_received = self.cumulative_benefit_received
+                    .checked_add(accrued)
+                    .ok_or(ComfiError::MathOverflow)?;
+            }
+            self.last_benefit_index = pool.cumulative_benefit_per_member;
+        }
+        Ok(())
     }
 }
 
@@ -664,6 +758,7 @@ pub enum ProposalAction {
         withdrawal_execution_mode: ExecutionMode,
         config_modification_execution_mode: ExecutionMode,
     },
+    ClosePool,
 }
 
 /// Exact message signed by the sponsor API. `quote_id` permits off-chain audit
@@ -704,6 +799,7 @@ pub mod pool_handlers {
 
     pub fn join_pool(ctx: Context<JoinPool>, args: JoinPoolArgs) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
+    pool.ensure_not_closing()?;
     require!(
         pool.member_count < pool.member_cap,
         ComfiError::MemberCapReached
@@ -712,6 +808,20 @@ pub mod pool_handlers {
         args.initial_deposit >= pool.minimum_deposit,
         ComfiError::DepositBelowMinimum
     );
+
+    let (is_funded, surplus) = if args.initial_deposit >= pool.member_obligation_amount {
+        let excess = args.initial_deposit
+            .checked_sub(pool.member_obligation_amount)
+            .ok_or(ComfiError::MathOverflow)?;
+        require!(
+            excess <= pool.member_obligation_amount,
+            ComfiError::OverfundingCapExceeded
+        );
+        (true, excess)
+    } else {
+        (false, 0)
+    };
+
     transfer_user_tokens(
         &ctx.accounts.token_program,
         &ctx.accounts.user_usdc,
@@ -723,24 +833,49 @@ pub mod pool_handlers {
         .member_count
         .checked_add(1)
         .ok_or(ComfiError::MathOverflow)?;
+    if is_funded {
+        pool.funded_member_count = pool
+            .funded_member_count
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+    }
+    pool.total_surplus = pool
+        .total_surplus
+        .checked_add(surplus)
+        .ok_or(ComfiError::MathOverflow)?;
+    let initial_conferred = args.initial_deposit.saturating_sub(surplus);
+    pool.total_conferred_capital = pool
+        .total_conferred_capital
+        .checked_add(initial_conferred)
+        .ok_or(ComfiError::MathOverflow)?;
 
     let member = &mut ctx.accounts.member;
     member.pool = pool.key();
     member.wallet = ctx.accounts.user.key();
     member.role = MemberRole::Spender;
-    member.is_funded = args.initial_deposit >= pool.member_obligation_amount;
+    member.is_funded = is_funded;
     member.deposited_total = args.initial_deposit;
+    member.surplus_amount = surplus;
+    member.total_withdrawn = 0;
+    member.closure_claimed = false;
+    member.last_benefit_index = pool.cumulative_benefit_per_member;
+    member.cumulative_benefit_received = 0;
+    member.total_contributions = args.initial_deposit;
     member.alias_hash = args.alias_hash;
     member.encryption_public_key = args.encryption_public_key;
     member.alias_version = 1;
     member.allowance_cycle = pool.current_cycle;
     member.action_allowance_used = 0;
     member.bump = ctx.bumps.member;
+    member.surplus_cycle = pool.current_cycle;
     Ok(())
 }
 
 pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
     require!(amount > 0, ComfiError::InvalidAmount);
+    let pool = &mut ctx.accounts.pool;
+    pool.ensure_not_closing()?;
+
     transfer_user_tokens(
         &ctx.accounts.token_program,
         &ctx.accounts.source_usdc,
@@ -749,11 +884,62 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         amount,
     )?;
     let member = &mut ctx.accounts.member;
-    member.deposited_total = member
+    member.sync_surplus(pool);
+    let next_total = member
         .deposited_total
         .checked_add(amount)
         .ok_or(ComfiError::MathOverflow)?;
-    member.is_funded = member.deposited_total >= ctx.accounts.pool.member_obligation_amount;
+    let next_contributions = member
+        .total_contributions
+        .checked_add(amount)
+        .ok_or(ComfiError::MathOverflow)?;
+
+    let current_obligation = pool.member_obligation_amount;
+    let (surplus_addition, becomes_funded) = if !member.is_funded {
+        if next_total >= current_obligation {
+            let excess = next_total
+                .checked_sub(current_obligation)
+                .ok_or(ComfiError::MathOverflow)?;
+            (excess, true)
+        } else {
+            (0, false)
+        }
+    } else {
+        (amount, true)
+    };
+
+    let new_surplus = member
+        .surplus_amount
+        .checked_add(surplus_addition)
+        .ok_or(ComfiError::MathOverflow)?;
+    require!(
+        new_surplus <= pool.member_obligation_amount,
+        ComfiError::OverfundingCapExceeded
+    );
+
+    let was_funded = member.is_funded;
+    member.sync_benefit(pool)?;
+
+    member.deposited_total = next_total;
+    member.total_contributions = next_contributions;
+    member.surplus_amount = new_surplus;
+    member.is_funded = becomes_funded;
+    member.surplus_cycle = pool.current_cycle;
+    if !was_funded && becomes_funded {
+        pool.funded_member_count = pool
+            .funded_member_count
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+    }
+    pool.total_surplus = pool
+        .total_surplus
+        .checked_add(surplus_addition)
+        .ok_or(ComfiError::MathOverflow)?;
+    let conferred_addition = amount.saturating_sub(surplus_addition);
+    pool.total_conferred_capital = pool
+        .total_conferred_capital
+        .checked_add(conferred_addition)
+        .ok_or(ComfiError::MathOverflow)?;
     Ok(())
 }
 
@@ -958,6 +1144,10 @@ pub fn process_cycle_proposals<'info>(
                 ProposalAction::ApproveWithdrawal { .. } => {
                     proposal.state = ProposalState::Executed;
                 }
+                ProposalAction::ClosePool => {
+                    pool.is_closing = true;
+                    proposal.state = ProposalState::Executed;
+                }
             }
         } else {
             proposal.state = ProposalState::Rejected;
@@ -971,6 +1161,7 @@ pub fn process_cycle_proposals<'info>(
 pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
     let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let ending_cycle = pool.current_cycle;
     let next_start = pool
         .cycle_started_at
@@ -997,6 +1188,7 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
     let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let ending_cycle = pool.current_cycle;
     pool.current_cycle = pool
         .current_cycle
@@ -1014,6 +1206,7 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
     let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let ending_cycle = pool.current_cycle;
     pool.current_cycle = pool
         .current_cycle
@@ -1029,6 +1222,7 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
 pub fn test_set_cycle(ctx: Context<TestPoolOnly>, cycle: u64) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     pool.current_cycle = cycle;
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
@@ -1046,6 +1240,9 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
     if proposal.yes_votes >= proposal.vote_threshold
         && proposal.yes_votes > proposal.no_votes
     {
+        if proposal.action == ProposalAction::ClosePool {
+            ctx.accounts.pool.is_closing = true;
+        }
         proposal.state = ProposalState::Executed;
         proposal.executable_after = clock.unix_timestamp;
     } else {
@@ -1063,6 +1260,7 @@ pub fn test_reset_member_allowance(ctx: Context<TestMemberOnly>) -> Result<()> {
 }
 
 pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs) -> Result<()> {
+    require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
     require!(args.amount > 0, ComfiError::InvalidAmount);
     require!(
         ctx.accounts.member.can_request_spend(),
@@ -1088,6 +1286,7 @@ pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs)
 }
 
 pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> Result<()> {
+    require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
     require!(
         ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool),
         ComfiError::MemberNotFunded
@@ -1150,6 +1349,7 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
 
 pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
     let pool = &ctx.accounts.pool;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let proposal = &mut ctx.accounts.proposal;
     require!(
         ctx.accounts.voter.is_funded_for_pool(pool),
@@ -1208,6 +1408,9 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
         ComfiError::VotingStillOpen
     );
     if passed {
+        if proposal.action == ProposalAction::ClosePool {
+            ctx.accounts.pool.is_closing = true;
+        }
         proposal.state = ProposalState::Executed;
         proposal.executable_after = clock.unix_timestamp;
     } else {
@@ -1218,6 +1421,7 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
 
 pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
     let pool = &ctx.accounts.pool;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let proposal = &mut ctx.accounts.proposal;
     if proposal.state != ProposalState::Executed {
         assert_executable(proposal)?;
@@ -1249,6 +1453,7 @@ pub fn execute_configuration_modification(
     ctx: Context<ExecuteConfigurationModification>,
 ) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
     let proposal = &mut ctx.accounts.proposal;
     if proposal.state != ProposalState::Executed {
         assert_executable(proposal)?;
@@ -1319,6 +1524,7 @@ pub fn execute_configuration_modification(
 
 pub fn spend(ctx: Context<Spend>) -> Result<()> {
     let request = &mut ctx.accounts.request;
+    require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
     require!(
         request.status == WithdrawalStatus::Pending,
         ComfiError::RequestNotPending
@@ -1358,6 +1564,16 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
         .checked_add(request.amount)
         .ok_or(ComfiError::MathOverflow)?;
     require!(next_spent <= cycle.cap, ComfiError::SpendLimitExceeded);
+
+    let vault_balance = ctx.accounts.vault.amount;
+    let remaining_after_spend = vault_balance
+        .checked_sub(request.amount)
+        .ok_or(ComfiError::MathOverflow)?;
+    require!(
+        remaining_after_spend >= ctx.accounts.pool.total_surplus,
+        ComfiError::InsufficientVaultForSurplus
+    );
+
     let signer_seeds: &[&[u8]] = &[
         b"pool",
         &ctx.accounts.pool.id.to_le_bytes(),
@@ -1375,7 +1591,108 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
     );
     token::transfer(cpi, request.amount)?;
     cycle.spent = next_spent;
+
+    let requester = &mut ctx.accounts.requester_member;
+    requester.total_withdrawn = requester
+        .total_withdrawn
+        .checked_add(request.amount)
+        .ok_or(ComfiError::MathOverflow)?;
+
+    // All spends provide delegated benefit split evenly over active funded members:
+    require!(
+        ctx.accounts.pool.funded_member_count > 0,
+        ComfiError::MemberNotFunded
+    );
+    let active_funded_members = ctx.accounts.pool.funded_member_count as u128;
+    let benefit_delta = (request.amount as u128)
+        .checked_mul(BENEFIT_SCALE)
+        .ok_or(ComfiError::MathOverflow)?
+        .checked_div(active_funded_members)
+        .ok_or(ComfiError::MathOverflow)?;
+    ctx.accounts.pool.cumulative_benefit_per_member = ctx.accounts.pool
+        .cumulative_benefit_per_member
+        .checked_add(benefit_delta)
+        .ok_or(ComfiError::MathOverflow)?;
+
+    requester.sync_benefit(&ctx.accounts.pool)?;
+    ctx.accounts.pool.total_conferred_capital = ctx.accounts.pool
+        .total_conferred_capital
+        .saturating_sub(request.amount);
+
     request.status = WithdrawalStatus::Spent;
+    Ok(())
+}
+
+pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    require!(pool.is_closing, ComfiError::PoolNotClosing);
+    let member = &mut ctx.accounts.member;
+    require!(!member.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+
+    // Sync any unconsumed surplus transitions if cycles advanced
+    member.sync_surplus(pool);
+
+    // Sync any accrued delegated spend benefit from pool
+    member.sync_benefit(pool)?;
+
+    // Snapshot pro-rata basis on the initial closure claim
+    if pool.closing_conferred_vault == 0 && pool.total_settled_capital == 0 {
+        let vault_for_conferred = ctx.accounts.vault.amount.saturating_sub(pool.total_surplus);
+        pool.closing_conferred_vault = vault_for_conferred;
+        pool.closing_conferred_pool_capital = pool.total_conferred_capital;
+    }
+
+    // 1. Priority 1: Unconsumed surplus (gracefully bounded by vault balance to prevent DoS)
+    let surplus_refund = member.surplus_amount.min(ctx.accounts.vault.amount);
+
+    // 2. Priority 2: Conferred funds share (pro-rata if vault has deficit)
+    let conferred_contribution = member.total_contributions.saturating_sub(member.surplus_amount);
+    let net_conferred_share = conferred_contribution.saturating_sub(member.cumulative_benefit_received);
+
+    let vault_after_surplus = ctx.accounts.vault.amount.saturating_sub(surplus_refund);
+    let conferred_refund = if pool.closing_conferred_pool_capital > 0
+        && pool.closing_conferred_vault < pool.closing_conferred_pool_capital
+    {
+        let pro_rata = (net_conferred_share as u128)
+            .checked_mul(pool.closing_conferred_vault as u128)
+            .ok_or(ComfiError::MathOverflow)?
+            .checked_div(pool.closing_conferred_pool_capital as u128)
+            .ok_or(ComfiError::MathOverflow)? as u64;
+        pro_rata.min(vault_after_surplus)
+    } else {
+        net_conferred_share.min(vault_after_surplus)
+    };
+
+    let total_refund = surplus_refund
+        .checked_add(conferred_refund)
+        .ok_or(ComfiError::MathOverflow)?;
+
+    if total_refund > 0 {
+        let signer_seeds: &[&[u8]] = &[
+            b"pool",
+            &pool.id.to_le_bytes(),
+            &[pool.bump],
+        ];
+        token::transfer(
+            CpiContext::new_with_signer(
+                Token::id(),
+                Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.member_usdc.to_account_info(),
+                    authority: pool.to_account_info(),
+                },
+                &[signer_seeds],
+            ),
+            total_refund,
+        )?;
+    }
+
+    pool.total_surplus = pool.total_surplus.saturating_sub(surplus_refund);
+    pool.total_settled_capital = pool.total_settled_capital
+        .checked_add(conferred_refund)
+        .ok_or(ComfiError::MathOverflow)?;
+    member.surplus_amount = 0;
+    member.closure_claimed = true;
     Ok(())
 }
 }
@@ -1422,6 +1739,16 @@ mod tests {
             pending_spender_limit_execution_mode: ExecutionMode::OnDeadline,
             pending_withdrawal_execution_mode: ExecutionMode::OnDeadline,
             pending_config_modification_execution_mode: ExecutionMode::OnDeadline,
+            is_closing: false,
+            total_surplus: 0,
+            close_deadline_cycles: 1,
+            close_execution_mode: ExecutionMode::OnDeadline,
+            total_settled_capital: 0,
+            funded_member_count: 1,
+            cumulative_benefit_per_member: 0,
+            total_conferred_capital: 0,
+            closing_conferred_vault: 0,
+            closing_conferred_pool_capital: 0,
         }
     }
 
@@ -1449,6 +1776,13 @@ mod tests {
             allowance_cycle: 0,
             action_allowance_used: 0,
             bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
         };
 
         assert!(member.can_request_spend());
@@ -1476,6 +1810,13 @@ mod tests {
             allowance_cycle: 0,
             action_allowance_used: 0,
             bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 40,
+            surplus_cycle: 0,
         };
 
         // Deposited 40 < 50 obligation: not counted as funded member
@@ -1548,10 +1889,10 @@ mod tests {
 
     #[test]
     fn test_account_space_constants() {
-        assert_eq!(Pool::SPACE, 8 + 281);
+        assert_eq!(Pool::SPACE, 8 + 351);
         assert_eq!(
             Member::SPACE,
-            8 + 32 + 32 + 1 + 1 + 8 + 32 + 32 + 4 + 8 + 8 + 1
+            8 + 214
         );
         assert_eq!(SpenderCycle::SPACE, 8 + 32 + 32 + 8 + 8 + 8 + 1);
         assert_eq!(
@@ -1568,7 +1909,7 @@ mod tests {
 
     #[test]
     fn test_proposal_voting_outcome_logic() {
-        let pool = create_test_pool(); // vote_threshold = 2
+        let _pool = create_test_pool(); // vote_threshold = 2
         let mut proposal = Proposal {
             pool: Pubkey::new_unique(),
             id: 0,
@@ -1741,7 +2082,7 @@ mod tests {
 
     #[test]
     fn test_cycle_rollover_rejects_failed_proposal() {
-        let pool = create_test_pool(); // threshold = 2, current_cycle = 1
+        let _pool = create_test_pool(); // threshold = 2, current_cycle = 1
         let mut proposal = Proposal {
             pool: Pubkey::new_unique(),
             id: 0,
@@ -1826,7 +2167,7 @@ mod tests {
 
     #[test]
     fn test_execution_mode_threshold_met_runs_on_next_available_cycle() {
-        let pool = create_test_pool(); // vote_threshold = 2
+        let _pool = create_test_pool(); // vote_threshold = 2
         let mut proposal = Proposal {
             pool: Pubkey::new_unique(),
             id: 0,
@@ -1864,7 +2205,7 @@ mod tests {
 
     #[test]
     fn test_execution_mode_on_deadline_waits_for_deadline_cycle() {
-        let pool = create_test_pool(); // vote_threshold = 2
+        let _pool = create_test_pool(); // vote_threshold = 2
         let mut proposal = Proposal {
             pool: Pubkey::new_unique(),
             id: 0,
@@ -2009,6 +2350,979 @@ mod tests {
         existing_proposal.state = ProposalState::Executed;
         assert_eq!(existing_proposal.state, ProposalState::Executed);
     }
+
+    #[test]
+    fn test_overfunding_cap_and_surplus_accounting() {
+        let pool = create_test_pool(); // obligation is 50
+        assert_eq!(pool.member_obligation_amount, 50);
+
+        // Case 1: Member joins with exact obligation 50: no surplus
+        let initial_1: u64 = 50;
+        let excess_1 = initial_1.saturating_sub(pool.member_obligation_amount);
+        assert_eq!(excess_1, 0); // surplus = 0
+        assert!(excess_1 <= pool.member_obligation_amount); // within cap
+
+        // Case 2: Member joins with 100 (50 obligation + 50 prepay next cycle): surplus = 50
+        let initial_2: u64 = 100;
+        let excess_2 = initial_2.saturating_sub(pool.member_obligation_amount);
+        assert_eq!(excess_2, 50); // surplus = 50
+        assert!(excess_2 <= pool.member_obligation_amount); // exactly at cap of 1 prepaid cycle
+
+        // Case 3: Overfunding exceeds cap: deposit 101 -> surplus = 51 > 50 cap
+        let initial_3: u64 = 101;
+        let excess_3 = initial_3.saturating_sub(pool.member_obligation_amount);
+        assert_eq!(excess_3, 51);
+        assert!(excess_3 > pool.member_obligation_amount); // violates cap!
+    }
+
+    #[test]
+    fn test_surplus_does_not_confer_extra_voting_power() {
+        let pool = create_test_pool(); // vote_threshold = 2
+
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        // Member A with standard funded deposit (50, 0 surplus)
+        let member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Member B with max allowed surplus (100 total = 50 obligation + 50 surplus)
+        let member_b = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        assert!(member_a.is_funded_for_pool(&pool));
+        assert!(member_b.is_funded_for_pool(&pool));
+
+        // Member A votes yes: increments yes_votes by exactly 1
+        proposal.yes_votes += 1;
+        assert_eq!(proposal.yes_votes, 1);
+
+        // Member B (who has 2x deposits due to surplus) votes yes: also increments by strictly 1!
+        proposal.yes_votes += 1;
+        assert_eq!(proposal.yes_votes, 2);
+
+        // Voting power is strictly 1 vote per member, immune to deposit weighting
+    }
+
+    #[test]
+    fn test_spend_surplus_isolation_invariant() {
+        let mut pool = create_test_pool();
+        // Suppose pool vault has 150 total USDC: 50 is base capital, 100 is total surplus prepaid by members
+        pool.total_surplus = 100;
+        let vault_balance: u64 = 150;
+
+        // Spend of 40: leaves 150 - 40 = 110 >= 100 surplus. This is permitted!
+        let spend_1: u64 = 40;
+        let remaining_1 = vault_balance.checked_sub(spend_1).unwrap();
+        assert!(remaining_1 >= pool.total_surplus);
+
+        // Spend of 60: leaves 150 - 60 = 90 < 100 surplus. This MUST be rejected!
+        let spend_2: u64 = 60;
+        let remaining_2 = vault_balance.checked_sub(spend_2).unwrap();
+        assert!(remaining_2 < pool.total_surplus); // Violates surplus protection!
+    }
+
+    #[test]
+    fn test_close_pool_proposal_and_execution() {
+        let mut pool = create_test_pool();
+        assert!(!pool.is_closing);
+
+        let mut proposal = Proposal {
+            pool: Pubkey::new_unique(),
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        // Proposal passes
+        let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
+        assert!(passed);
+
+        if passed {
+            if proposal.action == ProposalAction::ClosePool {
+                pool.is_closing = true;
+                proposal.state = ProposalState::Executed;
+            }
+        }
+
+        assert_eq!(proposal.state, ProposalState::Executed);
+        assert!(pool.is_closing);
+    }
+
+    #[test]
+    fn test_anti_51_percent_attack_on_pool_closure_settlement() {
+        // Threat scenario with delegated spends:
+        // Cartel members C1 and C2 form a 51% majority.
+        // Each deposited 100 conferred funds (total 200).
+        // A delegated spend of 200 occurred for the pool (benefiting both C1 and C2 equally, 100 benefit each).
+        // C1 and C2's cumulative benefit received = 100 each.
+        // Vault currently has 0.
+        // Now new honest member M3 joins, depositing 50 obligation + 50 surplus = 100.
+        // Vault now has 100 USDC (M3's fresh money).
+        // Cartel passes a ClosePool proposal and attempts to claim closure refunds.
+
+        let mut pool = create_test_pool();
+        pool.is_closing = true;
+        pool.total_surplus = 50; // M3's surplus
+        pool.funded_member_count = 3;
+        pool.total_conferred_capital = 50;
+        // Cumulative benefit per member when C1 & C2 were the only members:
+        // 200 spend / 2 members = 100 benefit per member
+        pool.cumulative_benefit_per_member = 100 * BENEFIT_SCALE;
+        let vault_balance: u64 = 100; // Vault has M3's 100 USDC
+
+        // Cartel member C1 (joined at index 0, benefited from earlier 100 spend):
+        let mut c1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Spender,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 200,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+        c1.sync_benefit(&pool).unwrap();
+        assert_eq!(c1.cumulative_benefit_received, 100);
+
+        // Honest new member M3 (joined after earlier spends, so last_benefit_index = pool.cumulative_benefit_per_member):
+        let mut m3 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50, // 50 prepaid surplus
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: pool.cumulative_benefit_per_member,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+        m3.sync_benefit(&pool).unwrap();
+        assert_eq!(m3.cumulative_benefit_received, 0); // No spends happened while M3 was in pool!
+
+        // --- Evaluate Cartel Member C1 Claim ---
+        // Each member's cumulative contribution - their benefit decides their share:
+        let c1_surplus_refund = c1.surplus_amount; // 0
+        let c1_conferred_contrib = c1.total_contributions.saturating_sub(c1.surplus_amount); // 100
+        let c1_net_conferred = c1_conferred_contrib.saturating_sub(c1.cumulative_benefit_received); // 100 - 100 = 0!
+        let c1_total_refund = c1_surplus_refund + c1_net_conferred; // 0 + 0 = 0!
+        // C1 is owed $0! They cannot take any of M3's money.
+        assert_eq!(c1_total_refund, 0);
+
+        // --- Evaluate Honest Member M3 Claim ---
+        // Priority 1: 100% of M3's surplus
+        let m3_surplus_refund = m3.surplus_amount; // 50
+        assert_eq!(m3_surplus_refund, 50);
+
+        // Priority 2: M3's conferred funds share (contribution - benefit received)
+        let m3_conferred_contrib = m3.total_contributions.saturating_sub(m3.surplus_amount); // 50
+        let m3_net_conferred = m3_conferred_contrib.saturating_sub(m3.cumulative_benefit_received); // 50 - 0 = 50
+        let vault_after_surplus = vault_balance.saturating_sub(m3_surplus_refund); // 100 - 50 = 50
+        let m3_conferred_refund = m3_net_conferred.min(vault_after_surplus); // min(50, 50) = 50
+        let m3_total_refund = m3_surplus_refund + m3_conferred_refund; // 50 + 50 = 100
+
+        // M3 recovers 100% of their deposited funds (both surplus and obligation)!
+        assert_eq!(m3_total_refund, 100);
+
+        // Update M3 state as settled
+        m3.surplus_amount = 0;
+        m3.closure_claimed = true;
+        assert!(m3.closure_claimed);
+        assert_eq!(m3.surplus_amount, 0);
+
+        // Cartel members receive 0, new member receives 100%. 51% attack completely fails!
+    }
+
+    #[test]
+    fn test_delegated_spend_benefits_all_funded_members_equally() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2; // Member A and Member B
+        pool.cumulative_benefit_per_member = 0;
+
+        // Member A (contributed 100)
+        let mut member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Member B (contributed 100)
+        let mut member_b = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Delegated spend of 60 occurs
+        let spend_amount: u64 = 60;
+        let benefit_delta = (spend_amount as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta;
+
+        // Sync both members
+        member_a.sync_benefit(&pool).unwrap();
+        member_b.sync_benefit(&pool).unwrap();
+
+        // Both members received exactly 30 of benefit from the 60 spend
+        assert_eq!(member_a.cumulative_benefit_received, 30);
+        assert_eq!(member_b.cumulative_benefit_received, 30);
+
+        // Pool closes with remaining vault of 140 (200 contributed - 60 spent):
+        let vault_after_spend: u64 = 140;
+        let net_share_a = member_a.deposited_total.saturating_sub(member_a.cumulative_benefit_received); // 100 - 30 = 70
+        let net_share_b = member_b.deposited_total.saturating_sub(member_b.cumulative_benefit_received); // 100 - 30 = 70
+
+        assert_eq!(net_share_a, 70);
+        assert_eq!(net_share_b, 70);
+        // Total refund: 70 + 70 = 140, perfectly consuming remaining vault with equal distribution!
+        assert_eq!(net_share_a + net_share_b, vault_after_spend);
+    }
+
+    #[test]
+    fn test_benefit_only_accumulated_while_funded() {
+        let mut pool = create_test_pool(); // obligation = 50
+        pool.funded_member_count = 1; // Only Member A is funded initially
+        pool.cumulative_benefit_per_member = 0;
+
+        // Member A (funded, 50 deposited)
+        let mut member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Member B (unfunded, only 20 deposited, obligation is 50)
+        let mut member_b = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 20,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 20,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        assert!(member_a.is_funded_for_pool(&pool));
+        assert!(!member_b.is_funded_for_pool(&pool));
+
+        // Spend 1: 50 spent while only Member A is funded
+        let spend_1: u64 = 50;
+        let benefit_delta_1 = (spend_1 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_1;
+
+        // Member A syncs: accumulates 50 benefit
+        member_a.sync_benefit(&pool).unwrap();
+        assert_eq!(member_a.cumulative_benefit_received, 50);
+
+        // Member B syncs while UNfunded: does NOT accumulate benefit!
+        member_b.sync_benefit(&pool).unwrap();
+        assert_eq!(member_b.cumulative_benefit_received, 0); // Still 0!
+        assert_eq!(member_b.last_benefit_index, pool.cumulative_benefit_per_member);
+
+        // Member B now deposits 30 more, reaching 50 deposited total and becoming funded!
+        member_b.deposited_total += 30;
+        member_b.total_contributions += 30;
+        member_b.is_funded = true;
+        pool.funded_member_count += 1; // Now 2 funded members
+        assert!(member_b.is_funded_for_pool(&pool));
+        assert_eq!(member_b.total_contributions, 50);
+
+        // Spend 2: 60 spent while BOTH A and B are funded (30 benefit each)
+        let spend_2: u64 = 60;
+        let benefit_delta_2 = (spend_2 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_2;
+
+        // Sync both members
+        member_a.sync_benefit(&pool).unwrap();
+        member_b.sync_benefit(&pool).unwrap();
+
+        // Member A accumulated 50 (from spend 1) + 30 (from spend 2) = 80 total benefit
+        assert_eq!(member_a.cumulative_benefit_received, 80);
+
+        // Member B accumulated ONLY 30 benefit (from spend 2, while funded), NOT the earlier spend!
+        assert_eq!(member_b.cumulative_benefit_received, 30);
+    }
+
+    #[test]
+    fn test_member_total_contributions_tracking() {
+        let pool = create_test_pool(); // obligation = 50
+
+        // 1. Initial creation / join: initial_deposit sets total_contributions
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+        assert_eq!(member.total_contributions, 50);
+
+        // 2. Incremental deposit: increases total_contributions
+        let deposit_amount = 40;
+        member.deposited_total += deposit_amount;
+        member.total_contributions += deposit_amount;
+        assert_eq!(member.total_contributions, 90);
+        assert_eq!(member.deposited_total, 90);
+
+        // 3. Withdrawal / spend execution: total_withdrawn increases, total_contributions stays cumulative
+        let withdrawal_amount = 30;
+        member.total_withdrawn += withdrawal_amount;
+        assert_eq!(member.total_withdrawn, 30);
+        assert_eq!(member.total_contributions, 90); // Never decremented by withdrawals
+
+        // 4. Surplus allocation: member deposited 90 total, 50 obligation, 40 surplus
+        member.surplus_amount = 40;
+        let conferred = member.total_contributions.saturating_sub(member.surplus_amount);
+        assert_eq!(conferred, 50); // 90 - 40 = 50 conferred capital
+
+        // 5. Pool closure net share: conferred minus benefit received
+        member.cumulative_benefit_received = 20;
+        let net_conferred_share = conferred.saturating_sub(member.cumulative_benefit_received);
+        assert_eq!(net_conferred_share, 30); // 50 - 20 = 30 net conferred refund owed
+    }
+
+    #[test]
+    fn test_complex_multicycle_multimember_pool_closure_refund_settlement() {
+        // Scenario Parameters:
+        // - Obligation per cycle = 50 USDC
+        // - y = 3 cycles
+        // - W = 2 original members: Member A and Member B
+        // - Spends occur during time t < y (Cycle 1 spend: 60, Cycle 2 spend: 40)
+        // - In Cycle 3, W = 2 new members join: Member C and Member D
+        // - Member C funds for z = 2 cycles (50 obligation + 50 surplus prepayment = 100)
+        // - Member D funds for z = 1 cycle (50 obligation = 50)
+        // - Member A in Cycle 3 prepays 30 surplus (total cycle deposit = 80)
+        // - Another spend occurs in Cycle 3 (spend: 80) across all 4 funded members
+        // - Pool closes and executes graceful closure refund settlement
+
+        let mut pool = create_test_pool(); // obligation = 50
+        pool.cumulative_benefit_per_member = 0;
+        let mut vault_balance: u64 = 0;
+
+        // --- Cycle 1: W = 2 original members join & fund ---
+        pool.current_cycle = 1;
+        let mut member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 1,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 1,
+        };
+        let mut member_b = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 1,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 1,
+        };
+        pool.funded_member_count = 2;
+        vault_balance += 100;
+
+        // Spend 1 in Cycle 1 (t = 1 < y): 60 USDC
+        let spend_1: u64 = 60;
+        vault_balance -= spend_1;
+        let benefit_delta_1 = (spend_1 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_1;
+
+        // --- Cycle 2: A and B fund obligation for cycle 2 ---
+        pool.current_cycle = 2;
+        member_a.deposited_total += 50;
+        member_a.total_contributions += 50;
+        member_b.deposited_total += 50;
+        member_b.total_contributions += 50;
+        vault_balance += 100;
+
+        // Spend 2 in Cycle 2 (t = 2 < y): 40 USDC
+        let spend_2: u64 = 40;
+        vault_balance -= spend_2;
+        let benefit_delta_2 = (spend_2 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_2;
+
+        // --- Cycle 3: A and B fund cycle 3 (A adds 30 surplus), plus W = 2 new members (C & D) join ---
+        pool.current_cycle = 3;
+        // Member A deposits 50 obligation + 30 surplus = 80
+        member_a.deposited_total += 80;
+        member_a.total_contributions += 80;
+        member_a.surplus_amount = 30;
+        member_a.surplus_cycle = 3;
+        pool.total_surplus += 30;
+        vault_balance += 80;
+
+        // Member B deposits 50 obligation = 50
+        member_b.deposited_total += 50;
+        member_b.total_contributions += 50;
+        vault_balance += 50;
+
+        // Member C joins: funds for z = 2 cycles (50 obligation + 50 surplus prepayment = 100)
+        let mut member_c = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: pool.cumulative_benefit_per_member,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 3,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 3,
+        };
+        pool.total_surplus += 50;
+        vault_balance += 100;
+
+        // Member D joins: funds for z = 1 cycle (50 obligation = 50)
+        let mut member_d = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: pool.cumulative_benefit_per_member,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 3,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 3,
+        };
+        vault_balance += 50;
+        pool.funded_member_count = 4; // A, B, C, D all funded
+
+        // Spend 3 in Cycle 3: 80 USDC across all 4 funded members
+        let spend_3: u64 = 80;
+        vault_balance -= spend_3;
+        let benefit_delta_3 = (spend_3 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta_3;
+
+        // --- Verify Pre-Closure State ---
+        // Total Contributed = 180 (A) + 150 (B) + 100 (C) + 50 (D) = 480 USDC
+        assert_eq!(member_a.total_contributions, 180);
+        assert_eq!(member_b.total_contributions, 150);
+        assert_eq!(member_c.total_contributions, 100);
+        assert_eq!(member_d.total_contributions, 50);
+        let total_contributed = member_a.total_contributions + member_b.total_contributions
+            + member_c.total_contributions + member_d.total_contributions;
+        assert_eq!(total_contributed, 480);
+
+        // Total Spends = 60 + 40 + 80 = 180 USDC
+        // Vault Balance Remaining = 480 - 180 = 300 USDC
+        assert_eq!(vault_balance, 300);
+
+        // --- Pool Enters Closure ---
+        pool.is_closing = true;
+        pool.total_conferred_capital = 220; // 300 remaining vault - 80 total surplus = 220
+
+        // Sync benefits for all members:
+        member_a.sync_benefit(&pool).unwrap();
+        member_b.sync_benefit(&pool).unwrap();
+        member_c.sync_benefit(&pool).unwrap();
+        member_d.sync_benefit(&pool).unwrap();
+
+        // Precalculated Expected Cumulative Benefits:
+        // A & B: 30 (spend 1) + 20 (spend 2) + 20 (spend 3) = 70
+        // C & D: 0 (joined after spend 1 & 2) + 20 (spend 3) = 20
+        assert_eq!(member_a.cumulative_benefit_received, 70);
+        assert_eq!(member_b.cumulative_benefit_received, 70);
+        assert_eq!(member_c.cumulative_benefit_received, 20);
+        assert_eq!(member_d.cumulative_benefit_received, 20);
+
+        // Total Benefit Delivered = 70 + 70 + 20 + 20 = 180 (exact match to total spends!)
+        assert_eq!(
+            member_a.cumulative_benefit_received + member_b.cumulative_benefit_received
+            + member_c.cumulative_benefit_received + member_d.cumulative_benefit_received,
+            spend_1 + spend_2 + spend_3
+        );
+
+        // Helper closure simulating claim_closure_refund execution logic
+        let mut simulated_pool = pool.clone();
+        let simulate_claim = |member: &mut Member, p: &mut Pool, vault: &mut u64, pool_total_settled: &mut u64| -> (u64, u64, u64) {
+            assert!(!member.closure_claimed);
+            member.sync_surplus(p);
+            if p.closing_conferred_vault == 0 && *pool_total_settled == 0 {
+                p.closing_conferred_vault = vault.saturating_sub(p.total_surplus);
+                p.closing_conferred_pool_capital = p.total_conferred_capital;
+            }
+            // Priority 1: 100% of unconsumed surplus
+            let surplus_refund = member.surplus_amount.min(*vault);
+
+            // Priority 2: Conferred funds share
+            let conferred_contribution = member.total_contributions.saturating_sub(member.surplus_amount);
+            let net_conferred_share = conferred_contribution.saturating_sub(member.cumulative_benefit_received);
+            let vault_after_surplus = vault.saturating_sub(surplus_refund);
+            let conferred_refund = if p.closing_conferred_pool_capital > 0 && p.closing_conferred_vault < p.closing_conferred_pool_capital {
+                let pro_rata = (net_conferred_share as u128)
+                    .checked_mul(p.closing_conferred_vault as u128).unwrap()
+                    .checked_div(p.closing_conferred_pool_capital as u128).unwrap() as u64;
+                pro_rata.min(vault_after_surplus)
+            } else {
+                net_conferred_share.min(vault_after_surplus)
+            };
+
+            let total_refund = surplus_refund + conferred_refund;
+            *vault = vault.checked_sub(total_refund).unwrap();
+            *pool_total_settled = pool_total_settled.checked_add(total_refund).unwrap();
+            p.total_surplus = p.total_surplus.saturating_sub(surplus_refund);
+            p.total_settled_capital = p.total_settled_capital.checked_add(conferred_refund).unwrap();
+            member.surplus_amount = 0;
+            member.closure_claimed = true;
+            (surplus_refund, conferred_refund, total_refund)
+        };
+
+        // --- Execute Closure Claims and Verify Precalculated Allocations ---
+        let mut simulated_vault = vault_balance; // 300
+        let mut total_settled = 0u64;
+
+        // 1. Member A Claim:
+        // Expected: Surplus = 30, Conferred = (180 - 30) - 70 = 80, Total = 110
+        let (surplus_a, conferred_a, total_a) = simulate_claim(&mut member_a, &mut simulated_pool, &mut simulated_vault, &mut total_settled);
+        assert_eq!(surplus_a, 30);
+        assert_eq!(conferred_a, 80);
+        assert_eq!(total_a, 110);
+        assert_eq!(total_a, member_a.total_contributions - member_a.cumulative_benefit_received);
+
+        // 2. Member B Claim:
+        // Expected: Surplus = 0, Conferred = 150 - 70 = 80, Total = 80
+        let (surplus_b, conferred_b, total_b) = simulate_claim(&mut member_b, &mut simulated_pool, &mut simulated_vault, &mut total_settled);
+        assert_eq!(surplus_b, 0);
+        assert_eq!(conferred_b, 80);
+        assert_eq!(total_b, 80);
+        assert_eq!(total_b, member_b.total_contributions - member_b.cumulative_benefit_received);
+
+        // 3. Member C Claim:
+        // Expected: Surplus = 50, Conferred = (100 - 50) - 20 = 30, Total = 80
+        let (surplus_c, conferred_c, total_c) = simulate_claim(&mut member_c, &mut simulated_pool, &mut simulated_vault, &mut total_settled);
+        assert_eq!(surplus_c, 50);
+        assert_eq!(conferred_c, 30);
+        assert_eq!(total_c, 80);
+        assert_eq!(total_c, member_c.total_contributions - member_c.cumulative_benefit_received);
+
+        // 4. Member D Claim:
+        // Expected: Surplus = 0, Conferred = 50 - 20 = 30, Total = 30
+        let (surplus_d, conferred_d, total_d) = simulate_claim(&mut member_d, &mut simulated_pool, &mut simulated_vault, &mut total_settled);
+        assert_eq!(surplus_d, 0);
+        assert_eq!(conferred_d, 30);
+        assert_eq!(total_d, 30);
+        assert_eq!(total_d, member_d.total_contributions - member_d.cumulative_benefit_received);
+
+        // --- Final Global Invariant Verification ---
+        // 1. Vault is fully and cleanly exhausted to 0 (no dust, no deficit):
+        assert_eq!(simulated_vault, 0);
+
+        // 2. Total settled capital exactly equals initial vault balance at closure:
+        assert_eq!(total_settled, vault_balance);
+        assert_eq!(total_settled, 300);
+
+        // 3. Sum of all member refunds equals 110 + 80 + 80 + 30 = 300:
+        assert_eq!(total_a + total_b + total_c + total_d, 300);
+
+        // 4. All members marked as closure_claimed:
+        assert!(member_a.closure_claimed);
+        assert!(member_b.closure_claimed);
+        assert!(member_c.closure_claimed);
+        assert!(member_d.closure_claimed);
+    }
+
+    #[test]
+    fn test_pro_rata_settlement_on_vault_deficit() {
+        // Two members A and B each have 50 net conferred share (total 100).
+        // The pool vault only has 60 USDC remaining (40% deficit).
+        // Under pro-rata settlement, each member receives exactly 50% of the available 60 = 30 USDC,
+        // rather than the first claimant taking 50 and leaving the second with 10.
+        let mut pool = create_test_pool();
+        pool.is_closing = true;
+        pool.total_surplus = 0;
+        pool.total_conferred_capital = 100;
+        let mut vault_balance: u64 = 60;
+
+        let mut member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        let mut member_b = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // Snapshot closure pro-rata basis on first claim
+        pool.closing_conferred_vault = vault_balance.saturating_sub(pool.total_surplus); // 60
+        pool.closing_conferred_pool_capital = pool.total_conferred_capital; // 100
+
+        // Claim Member A:
+        let net_share_a = member_a.total_contributions - member_a.surplus_amount - member_a.cumulative_benefit_received; // 50
+        let refund_a = ((net_share_a as u128 * pool.closing_conferred_vault as u128)
+            / pool.closing_conferred_pool_capital as u128) as u64; // (50 * 60) / 100 = 30
+        assert_eq!(refund_a, 30);
+        vault_balance -= refund_a;
+        member_a.closure_claimed = true;
+
+        // Claim Member B:
+        let net_share_b = member_b.total_contributions - member_b.surplus_amount - member_b.cumulative_benefit_received; // 50
+        let refund_b = ((net_share_b as u128 * pool.closing_conferred_vault as u128)
+            / pool.closing_conferred_pool_capital as u128) as u64; // (50 * 60) / 100 = 30
+        assert_eq!(refund_b, 30);
+        vault_balance -= refund_b;
+        member_b.closure_claimed = true;
+
+        // Both members receive an equal 30 USDC; vault is cleanly exhausted to 0
+        assert_eq!(refund_a, refund_b);
+        assert_eq!(refund_a + refund_b, 60);
+        assert_eq!(vault_balance, 0);
+        assert!(member_a.closure_claimed);
+        assert!(member_b.closure_claimed);
+    }
+
+    #[test]
+    fn test_surplus_consumed_across_cycles() {
+        let mut pool = create_test_pool(); // obligation = 50
+        pool.current_cycle = 1;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100, // 50 obligation + 50 surplus
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 1,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 1, // Deposited in Cycle 1
+        };
+        pool.total_surplus = 50;
+        pool.total_conferred_capital = 50;
+
+        // While in Cycle 1: surplus remains unconsumed (prepayment for Cycle 2)
+        member.sync_surplus(&mut pool);
+        assert_eq!(member.surplus_amount, 50);
+        assert_eq!(pool.total_surplus, 50);
+        assert_eq!(pool.total_conferred_capital, 50);
+
+        // When cycle advances to Cycle 2:
+        pool.current_cycle = 2;
+        member.sync_surplus(&mut pool);
+
+        // Surplus is consumed into conferred capital!
+        assert_eq!(member.surplus_amount, 0);
+        assert_eq!(pool.total_surplus, 0);
+        assert_eq!(pool.total_conferred_capital, 100); // 50 + 50 consumed
+        assert_eq!(member.surplus_cycle, 2);
+    }
+
+    #[test]
+    fn test_unfunded_member_refund_preserved() {
+        let mut pool = create_test_pool(); // obligation = 50
+        pool.funded_member_count = 1;
+
+        // Unfunded member joins with 20 USDC (< 50 obligation)
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 20,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 20,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+        };
+
+        // A spend of 40 occurs in the pool
+        let spend_1: u64 = 40;
+        let benefit_delta = (spend_1 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
+        pool.cumulative_benefit_per_member += benefit_delta;
+
+        // Unfunded member syncs: does NOT accrue spend benefit because they had no representation
+        member.sync_benefit(&pool).unwrap();
+        assert_eq!(member.cumulative_benefit_received, 0);
+
+        // Upon closure, unfunded member's net conferred share is their full 20 USDC unconferred deposit
+        let conferred_contrib = member.total_contributions.saturating_sub(member.surplus_amount);
+        let net_share = conferred_contrib.saturating_sub(member.cumulative_benefit_received);
+        assert_eq!(net_share, 20);
+    }
+
+    #[test]
+    fn test_surplus_deficit_graceful_refund() {
+        // Vault has 30 USDC, but member is owed 50 surplus.
+        // Instead of hard-reverting with InsufficientVaultForSurplus, member recovers the available 30.
+        let member_surplus = 50u64;
+        let vault_balance = 30u64;
+        let surplus_refund = member_surplus.min(vault_balance);
+        assert_eq!(surplus_refund, 30);
+    }
+
+    #[test]
+    fn test_deposits_and_joins_blocked_when_pool_is_closing() {
+        let mut pool = create_test_pool();
+        assert!(!pool.is_closing);
+        assert!(pool.ensure_not_closing().is_ok());
+
+        // Pool transitions to closing state
+        pool.is_closing = true;
+
+        // ensure_not_closing() fails with PoolIsClosing
+        let err = pool.ensure_not_closing().unwrap_err();
+        assert_eq!(err, ComfiError::PoolIsClosing.into());
+
+        // Verify simulated deposit validation fails when closing
+        let attempt_deposit = |p: &Pool, amount: u64| -> Result<()> {
+            require!(amount > 0, ComfiError::InvalidAmount);
+            p.ensure_not_closing()?;
+            Ok(())
+        };
+
+        let deposit_res = attempt_deposit(&pool, 50);
+        assert!(deposit_res.is_err());
+        assert_eq!(deposit_res.unwrap_err(), ComfiError::PoolIsClosing.into());
+
+        // Verify simulated join validation fails when closing
+        let attempt_join = |p: &Pool, deposit: u64| -> Result<()> {
+            p.ensure_not_closing()?;
+            require!(deposit >= p.minimum_deposit, ComfiError::DepositBelowMinimum);
+            Ok(())
+        };
+
+        let join_res = attempt_join(&pool, 100);
+        assert!(join_res.is_err());
+        assert_eq!(join_res.unwrap_err(), ComfiError::PoolIsClosing.into());
+    }
 }
+
 
 

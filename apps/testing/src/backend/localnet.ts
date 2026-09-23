@@ -499,6 +499,9 @@ export async function executeAction(action: string, payload: any): Promise<any> 
 
       const poolPubkey = new PublicKey(poolAddress)
       const poolAccount = await program.account.pool.fetch(poolPubkey)
+      if (poolAccount.isClosing) {
+        throw new Error('Pool is closing; new members cannot join')
+      }
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
 
@@ -546,6 +549,9 @@ export async function executeAction(action: string, payload: any): Promise<any> 
 
       const poolPubkey = new PublicKey(poolAddress)
       const poolAccount = await program.account.pool.fetch(poolPubkey)
+      if (poolAccount.isClosing) {
+        throw new Error('Pool is closing; deposits are blocked')
+      }
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
 
