@@ -65,22 +65,27 @@ pub mod comfi {
         pool::pool_handlers::roll_cycle(ctx)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
         pool::pool_handlers::test_roll_cycle(ctx)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()> {
         pool::pool_handlers::test_advance_cycles(ctx, count)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn test_set_cycle(ctx: Context<TestPoolOnly>, cycle: u64) -> Result<()> {
         pool::pool_handlers::test_set_cycle(ctx, cycle)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> {
         pool::pool_handlers::test_finalize_proposal(ctx)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn test_reset_member_allowance(ctx: Context<TestMemberOnly>) -> Result<()> {
         pool::pool_handlers::test_reset_member_allowance(ctx)
     }
@@ -109,6 +114,10 @@ pub mod comfi {
         ctx: Context<ExecuteConfigurationModification>,
     ) -> Result<()> {
         pool::pool_handlers::execute_configuration_modification(ctx)
+    }
+
+    pub fn execute_close_pool(ctx: Context<ExecuteClosePool>) -> Result<()> {
+        pool::pool_handlers::execute_close_pool(ctx)
     }
 
     pub fn spend(ctx: Context<Spend>) -> Result<()> {

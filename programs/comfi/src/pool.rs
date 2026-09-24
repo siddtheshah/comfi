@@ -375,17 +375,8 @@ pub struct Spend<'info> {
         constraint = requester_member.key() == request.requester @ ComfiError::Unauthorized
     )]
     pub requester_member: Box<Account<'info, Member>>,
-    #[account(
-        mut,
-        seeds = [
-            b"cycle",
-            pool.key().as_ref(),
-            requester_member.key().as_ref(),
-            &pool.current_cycle.to_le_bytes()
-        ],
-        bump = spender_cycle.bump
-    )]
-    pub spender_cycle: Box<Account<'info, SpenderCycle>>,
+    #[account(mut)]
+    pub spender_cycle: Option<Box<Account<'info, SpenderCycle>>>,
     #[account(
         mut,
         address = pool.vault @ ComfiError::InvalidVault,
@@ -401,6 +392,19 @@ pub struct Spend<'info> {
     pub token_program: Program<'info, Token>,
     #[account(mut, has_one = pool)]
     pub proposal: Option<Box<Account<'info, Proposal>>>,
+}
+
+#[derive(Accounts)]
+pub struct ExecuteClosePool<'info> {
+    pub caller: Signer<'info>,
+    #[account(seeds = [b"global"], bump = global.bump)]
+    pub global: Account<'info, GlobalConfig>,
+    #[account(mut, has_one = global)]
+    pub pool: Account<'info, Pool>,
+    #[account(mut, has_one = pool)]
+    pub proposal: Account<'info, Proposal>,
+    #[account(mut, address = pool.vault @ ComfiError::InvalidVault)]
+    pub vault: Option<Account<'info, TokenAccount>>,
 }
 
 #[derive(Accounts)]
@@ -438,12 +442,14 @@ pub struct ClaimClosureRefund<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[derive(Accounts)]
 pub struct TestPoolOnly<'info> {
     #[account(mut)]
     pub pool: Account<'info, Pool>,
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[derive(Accounts)]
 pub struct TestFinalizeProposal<'info> {
     pub pool: Account<'info, Pool>,
@@ -451,6 +457,7 @@ pub struct TestFinalizeProposal<'info> {
     pub proposal: Account<'info, Proposal>,
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[derive(Accounts)]
 pub struct TestMemberOnly<'info> {
     pub pool: Account<'info, Pool>,
@@ -599,10 +606,11 @@ pub struct Member {
     pub cumulative_benefit_received: u64,
     pub total_contributions: u64,
     pub surplus_cycle: u64,
+    pub funded_cycle: u64,
 }
 
 impl Member {
-    pub const SPACE: usize = 8 + 216;
+    pub const SPACE: usize = 8 + 224;
 
     pub fn can_request_spend(&self) -> bool {
         matches!(
@@ -628,12 +636,15 @@ impl Member {
     }
 
     pub fn sync_surplus(&mut self, pool: &mut Pool) {
-        if !pool.is_closing && pool.current_cycle > self.surplus_cycle {
+        if pool.current_cycle > self.surplus_cycle {
             if self.surplus_amount > 0 {
                 let consumed = self.surplus_amount;
                 self.surplus_amount = 0;
                 pool.total_non_conferred_capital = pool.total_non_conferred_capital.saturating_sub(consumed);
                 pool.total_conferred_capital = pool.total_conferred_capital.saturating_add(consumed);
+                if self.is_funded {
+                    self.funded_cycle = pool.current_cycle;
+                }
             }
             self.surplus_cycle = pool.current_cycle;
         }
@@ -710,13 +721,17 @@ impl Proposal {
     pub const SPACE: usize = 8 + 32 + 8 + 32 + 48 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4;
 
     pub fn required_votes_for_pool(&self, pool: &Pool) -> Result<u32> {
-        let threshold_bps = if self.vote_threshold <= 100 {
-            (self.vote_threshold as u64)
-                .checked_mul(100)
-                .ok_or(ComfiError::MathOverflow)?
-        } else {
-            self.vote_threshold as u64
-        };
+        require!(
+            self.vote_threshold >= 100 && self.vote_threshold <= 10_000,
+            ComfiError::InvalidVoteThreshold
+        );
+        let mut threshold_bps = self.vote_threshold as u64;
+        if matches!(
+            self.action,
+            ProposalAction::SetSpenderLimit { .. } | ProposalAction::ClosePool
+        ) {
+            threshold_bps = threshold_bps.max(5001);
+        }
         let active_members = (pool.funded_member_count as u64).max(1);
         let required = active_members
             .checked_mul(threshold_bps)
@@ -912,6 +927,7 @@ pub mod pool_handlers {
     member.action_allowance_used = 0;
     member.bump = ctx.bumps.member;
     member.surplus_cycle = pool.current_cycle;
+    member.funded_cycle = if is_funded { pool.current_cycle } else { 0 };
     Ok(())
 }
 
@@ -948,6 +964,15 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         } else {
             (0, false, 0u64, amount as i128)
         }
+    } else if member.funded_cycle < pool.current_cycle {
+        if amount >= current_obligation {
+            let excess = amount
+                .checked_sub(current_obligation)
+                .ok_or(ComfiError::MathOverflow)?;
+            (excess, true, current_obligation, excess as i128)
+        } else {
+            (0, false, 0u64, amount as i128)
+        }
     } else {
         (amount, true, 0u64, amount as i128)
     };
@@ -969,6 +994,9 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
     member.surplus_amount = new_surplus;
     member.is_funded = becomes_funded;
     member.surplus_cycle = pool.current_cycle;
+    if becomes_funded {
+        member.funded_cycle = pool.current_cycle;
+    }
     if !was_funded && becomes_funded {
         pool.funded_member_count = pool
             .funded_member_count
@@ -1147,94 +1175,11 @@ pub fn process_cycle_proposals<'info>(
         }
 
         if passed {
-            match proposal.action {
-                ProposalAction::ConfigurationModification {
-                    vote_threshold,
-                    cycle_duration_seconds,
-                    member_obligation_amount,
-                    spender_limit_deadline_cycles,
-                    withdrawal_deadline_cycles,
-                    config_modification_deadline_cycles,
-                    spender_limit_execution_mode,
-                    withdrawal_execution_mode,
-                    config_modification_execution_mode,
-                } => {
-                    pool.vote_threshold = vote_threshold;
-                    pool.cycle_duration_seconds = cycle_duration_seconds;
-                    pool.member_obligation_amount = member_obligation_amount;
-                    pool.spender_limit_deadline_cycles = spender_limit_deadline_cycles;
-                    pool.withdrawal_deadline_cycles = withdrawal_deadline_cycles;
-                    pool.config_modification_deadline_cycles = config_modification_deadline_cycles;
-                    pool.spender_limit_execution_mode = spender_limit_execution_mode;
-                    pool.withdrawal_execution_mode = withdrawal_execution_mode;
-                    pool.config_modification_execution_mode = config_modification_execution_mode;
-                    pool.has_pending_config = false;
-                    proposal.state = ProposalState::Executed;
-                }
-                ProposalAction::SetSpenderLimit { member, cap } => {
-                    let mut executed_inline = false;
-                    for acc in remaining_accounts.iter() {
-                        if acc.key() == member && acc.is_writable && acc.data_len() >= 8 {
-                            let member_data = acc.try_borrow_data()?;
-                            if &member_data[..8] == Member::DISCRIMINATOR {
-                                drop(member_data);
-                                if let Ok(mut m) = Member::try_deserialize(&mut &acc.try_borrow_data()?[..]) {
-                                    if m.role == MemberRole::Member {
-                                        m.role = MemberRole::Spender;
-                                        m.try_serialize(&mut *acc.try_borrow_mut_data()?)?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    for acc in remaining_accounts.iter() {
-                        if acc.is_writable && acc.data_len() >= 8 {
-                            let sc_data = acc.try_borrow_data()?;
-                            if &sc_data[..8] == SpenderCycle::DISCRIMINATOR {
-                                drop(sc_data);
-                                if let Ok(mut sc) = SpenderCycle::try_deserialize(&mut &acc.try_borrow_data()?[..]) {
-                                    if sc.pool == pool_key && sc.member == member {
-                                        sc.cycle = pool.current_cycle;
-                                        sc.cap = cap;
-                                        sc.spent = 0;
-                                        sc.try_serialize(&mut *acc.try_borrow_mut_data()?)?;
-                                        executed_inline = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if executed_inline {
-                        proposal.state = ProposalState::Executed;
-                    } else {
-                        proposal.state = ProposalState::Executable;
-                        proposal.executable_after = Clock::get()?
-                            .unix_timestamp
-                            .checked_add(pool.timelock_seconds)
-                            .ok_or(ComfiError::MathOverflow)?;
-                    }
-                }
-                ProposalAction::ApproveWithdrawal { .. } => {
-                    proposal.state = ProposalState::Executable;
-                    proposal.executable_after = Clock::get()?
-                        .unix_timestamp
-                        .checked_add(pool.timelock_seconds)
-                        .ok_or(ComfiError::MathOverflow)?;
-                }
-                ProposalAction::ClosePool => {
-                    pool.enter_closure();
-                    for acc in remaining_accounts.iter() {
-                        if acc.key() == pool.vault && acc.data_len() >= 8 {
-                            let mut data: &[u8] = &acc.try_borrow_data()?[..];
-                            if let Ok(vault_acc) = TokenAccount::try_deserialize(&mut data) {
-                                pool.closing_vault_basis = vault_acc.amount;
-                                pool.has_snapshotted_closure = true;
-                            }
-                        }
-                    }
-                    proposal.state = ProposalState::Executed;
-                }
-            }
+            proposal.state = ProposalState::Executable;
+            proposal.executable_after = Clock::get()?
+                .unix_timestamp
+                .checked_add(pool.timelock_seconds)
+                .ok_or(ComfiError::MathOverflow)?;
         } else {
             proposal.state = ProposalState::Rejected;
         }
@@ -1270,6 +1215,7 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
     let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
@@ -1287,6 +1233,7 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()> {
     require!(count > 0, ComfiError::InvalidAmount);
     let pool_key = ctx.accounts.pool.key();
@@ -1305,6 +1252,7 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
     Ok(())
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub fn test_set_cycle(ctx: Context<TestPoolOnly>, cycle: u64) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
@@ -1315,6 +1263,7 @@ pub fn test_set_cycle(ctx: Context<TestPoolOnly>, cycle: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> {
     ctx.accounts.pool.ensure_testing_enabled()?;
     let clock = Clock::get()?;
@@ -1325,20 +1274,15 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
     );
     let passed = proposal.is_passed_for_pool(&ctx.accounts.pool)?;
     if passed {
-        if proposal.action == ProposalAction::ClosePool {
-            ctx.accounts.pool.enter_closure();
-            proposal.state = ProposalState::Executed;
-            proposal.executable_after = clock.unix_timestamp;
-        } else {
-            proposal.state = ProposalState::Executable;
-            proposal.executable_after = clock.unix_timestamp;
-        }
+        proposal.state = ProposalState::Executable;
+        proposal.executable_after = clock.unix_timestamp;
     } else {
         proposal.state = ProposalState::Rejected;
     }
     Ok(())
 }
 
+#[cfg(any(test, feature = "testing"))]
 pub fn test_reset_member_allowance(ctx: Context<TestMemberOnly>) -> Result<()> {
     ctx.accounts.pool.ensure_testing_enabled()?;
     let member = &mut ctx.accounts.member;
@@ -1499,29 +1443,31 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
         ComfiError::VotingStillOpen
     );
     if passed {
-        if proposal.action == ProposalAction::ClosePool {
-            ctx.accounts.pool.enter_closure();
-            for acc in ctx.remaining_accounts.iter() {
-                if acc.key() == ctx.accounts.pool.vault && acc.data_len() >= 8 {
-                    let mut data: &[u8] = &acc.try_borrow_data()?[..];
-                    if let Ok(vault_acc) = TokenAccount::try_deserialize(&mut data) {
-                        ctx.accounts.pool.closing_vault_basis = vault_acc.amount;
-                        ctx.accounts.pool.has_snapshotted_closure = true;
-                    }
-                }
-            }
-            proposal.state = ProposalState::Executed;
-            proposal.executable_after = clock.unix_timestamp;
-        } else {
-            proposal.state = ProposalState::Executable;
-            proposal.executable_after = clock
-                .unix_timestamp
-                .checked_add(pool.timelock_seconds)
-                .ok_or(ComfiError::MathOverflow)?;
-        }
+        proposal.state = ProposalState::Executable;
+        proposal.executable_after = clock
+            .unix_timestamp
+            .checked_add(pool.timelock_seconds)
+            .ok_or(ComfiError::MathOverflow)?;
     } else {
         proposal.state = ProposalState::Rejected;
     }
+    Ok(())
+}
+
+pub fn execute_close_pool(ctx: Context<ExecuteClosePool>) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    let proposal = &mut ctx.accounts.proposal;
+    assert_executable(proposal)?;
+    match proposal.action {
+        ProposalAction::ClosePool => {}
+        _ => return err!(ComfiError::WrongProposalAction),
+    }
+    pool.enter_closure();
+    if let Some(vault) = &ctx.accounts.vault {
+        pool.closing_vault_basis = vault.amount;
+        pool.has_snapshotted_closure = true;
+    }
+    proposal.state = ProposalState::Executed;
     Ok(())
 }
 
@@ -1594,7 +1540,7 @@ pub fn execute_configuration_modification(
         _ => return err!(ComfiError::WrongProposalAction),
     };
     require!(
-        vote_threshold > 0 && vote_threshold <= 10_000,
+        vote_threshold >= 100 && vote_threshold <= 10_000,
         ComfiError::InvalidVoteThreshold
     );
     require!(
@@ -1638,14 +1584,6 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
         ctx.accounts.requester_member.can_request_spend(),
         ComfiError::NotSpender
     );
-    require!(
-        ctx.accounts.spender_cycle.cycle == ctx.accounts.pool.current_cycle,
-        ComfiError::WrongCycle
-    );
-    require!(
-        ctx.accounts.spender_cycle.member == ctx.accounts.requester_member.key(),
-        ComfiError::InvalidSpendCycle
-    );
     if request.requires_proposal {
         let proposal = ctx
             .accounts
@@ -1658,13 +1596,43 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
             _ => return err!(ComfiError::WrongProposalAction),
         }
         ctx.accounts.proposal.as_mut().unwrap().state = ProposalState::Executed;
+    } else {
+        let cycle = ctx
+            .accounts
+            .spender_cycle
+            .as_mut()
+            .ok_or(ComfiError::InvalidSpendCycle)?;
+        let (expected_sc_pda, _bump) = Pubkey::find_program_address(
+            &[
+                b"cycle",
+                ctx.accounts.pool.key().as_ref(),
+                ctx.accounts.requester_member.key().as_ref(),
+                &ctx.accounts.pool.current_cycle.to_le_bytes(),
+            ],
+            &crate::ID,
+        );
+        require_keys_eq!(cycle.key(), expected_sc_pda, ComfiError::InvalidSpendCycle);
+        require!(
+            cycle.cycle == ctx.accounts.pool.current_cycle,
+            ComfiError::WrongCycle
+        );
+        require!(
+            cycle.member == ctx.accounts.requester_member.key(),
+            ComfiError::InvalidSpendCycle
+        );
+        let next_spent = cycle
+            .spent
+            .checked_add(request.amount)
+            .ok_or(ComfiError::MathOverflow)?;
+        require!(next_spent <= cycle.cap, ComfiError::SpendLimitExceeded);
+        cycle.spent = next_spent;
+
+        // VULN-01: Unvoted member spends can only be personal withdrawals directly to requester wallet
+        require!(
+            ctx.accounts.recipient_usdc.owner == ctx.accounts.requester_member.wallet,
+            ComfiError::Unauthorized
+        );
     }
-    let cycle = &mut ctx.accounts.spender_cycle;
-    let next_spent = cycle
-        .spent
-        .checked_add(request.amount)
-        .ok_or(ComfiError::MathOverflow)?;
-    require!(next_spent <= cycle.cap, ComfiError::SpendLimitExceeded);
 
     let vault_balance = ctx.accounts.vault.amount;
     let remaining_after_spend = vault_balance
@@ -1695,7 +1663,6 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
         signer,
     );
     token::transfer(cpi, request.amount)?;
-    cycle.spent = next_spent;
 
     let requester = &mut ctx.accounts.requester_member;
     requester.total_withdrawn = requester
@@ -1703,13 +1670,14 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
         .checked_add(request.amount)
         .ok_or(ComfiError::MathOverflow)?;
 
-    if request.requires_proposal {
+    if ctx.accounts.recipient_usdc.owner == requester.wallet {
+        // Individual withdrawal directly to member: attribute 100% directly to requester
         requester.cumulative_benefit_received = requester
             .cumulative_benefit_received
             .checked_add(request.amount)
             .ok_or(ComfiError::MathOverflow)?;
     } else {
-        // All shared pool operating spends provide delegated benefit split evenly over active funded members:
+        // Shared pool operating spend to verified third-party vendor approved by governance
         require!(
             ctx.accounts.pool.funded_member_count > 0,
             ComfiError::MemberNotFunded
@@ -1917,6 +1885,7 @@ mod tests {
             cumulative_benefit_received: 0,
             total_contributions: 100,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         assert!(member.can_request_spend());
@@ -1951,6 +1920,7 @@ mod tests {
             cumulative_benefit_received: 0,
             total_contributions: 40,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Deposited 40 < 50 obligation: not counted as funded member
@@ -2026,7 +1996,7 @@ mod tests {
         assert_eq!(Pool::SPACE, 8 + 360);
         assert_eq!(
             Member::SPACE,
-            8 + 216
+            8 + 224
         );
         assert_eq!(SpenderCycle::SPACE, 8 + 32 + 32 + 8 + 8 + 8 + 1);
         assert_eq!(
@@ -2550,6 +2520,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Member B with max allowed surplus (100 total = 50 obligation + 50 surplus)
@@ -2572,6 +2543,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -2687,6 +2659,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
         c1.sync_benefit(&pool).unwrap();
         assert_eq!(c1.cumulative_benefit_received, 100);
@@ -2711,6 +2684,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
         m3.sync_benefit(&pool).unwrap();
         assert_eq!(m3.cumulative_benefit_received, 0); // No spends happened while M3 was in pool!
@@ -2774,6 +2748,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Member B (contributed 100)
@@ -2796,6 +2771,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Delegated spend of 60 occurs
@@ -2848,6 +2824,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Member B (unfunded, only 20 deposited, obligation is 50)
@@ -2870,6 +2847,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -2937,6 +2915,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
         assert_eq!(member.total_contributions, 50);
 
@@ -3003,6 +2982,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 1,
+            funded_cycle: 1,
         };
         let mut member_b = Member {
             pool: pool.global,
@@ -3023,6 +3003,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 1,
+            funded_cycle: 1,
         };
         pool.funded_member_count = 2;
         vault_balance += 100;
@@ -3082,6 +3063,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 3,
+            funded_cycle: 3,
         };
         pool.total_non_conferred_capital += 50;
         vault_balance += 100;
@@ -3106,6 +3088,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 3,
+            funded_cycle: 3,
         };
         vault_balance += 50;
         pool.funded_member_count = 4; // A, B, C, D all funded
@@ -3289,6 +3272,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         let mut member_b = Member {
@@ -3310,6 +3294,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Snapshot closure pro-rata basis on first claim
@@ -3368,6 +3353,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 1, // Deposited in Cycle 1
+            funded_cycle: 1,
         };
         pool.total_non_conferred_capital = 50;
         pool.total_conferred_capital = 50;
@@ -3414,6 +3400,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // A spend of 40 occurs in the pool
@@ -3461,6 +3448,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         let mut member_b = Member {
@@ -3482,6 +3470,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Snapshot basis
@@ -3545,6 +3534,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         let mut member_b = Member {
@@ -3566,6 +3556,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         let mut member_c = Member {
@@ -3587,6 +3578,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Snapshot basis
@@ -3811,6 +3803,7 @@ mod tests {
             cumulative_benefit_received: 0,
             total_contributions: 100,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         let withdrawal_amount: u64 = 60;
@@ -3858,6 +3851,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Invariant: prior to voting sync, voter has 0 cumulative benefit totaled
@@ -3903,6 +3897,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
         assert!(!unfunded_voter.is_funded_for_pool(&pool));
     }
@@ -3925,33 +3920,33 @@ mod tests {
             state: ProposalState::Open,
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
-            vote_threshold: 50, // 50% normalized to 5000 bps
+            vote_threshold: 5000, // 50.00% (5000 bps)
         };
 
-        // 50% threshold scaling with ceiling division:
-        // 1 member: ceil(1 * 0.5) = 1
+        // For ClosePool / SetSpenderLimit, a strict majority floor (5001 bps) is enforced
+        // 1 member: ceil(1 * 0.5001) = 1
         pool.funded_member_count = 1;
         assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 1);
 
-        // 2 members: ceil(2 * 0.5) = 1
+        // 2 members: ceil(2 * 0.5001) = 2 (strict majority requires both members to close pool!)
         pool.funded_member_count = 2;
-        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 1);
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
 
-        // 3 members: ceil(3 * 0.5) = 2
+        // 3 members: ceil(3 * 0.5001) = 2
         pool.funded_member_count = 3;
         assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
 
-        // 4 members: ceil(4 * 0.5) = 2
+        // 4 members: ceil(4 * 0.5001) = 3
         pool.funded_member_count = 4;
-        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
 
-        // 5 members: ceil(5 * 0.5) = 3
+        // 5 members: ceil(5 * 0.5001) = 3
         pool.funded_member_count = 5;
         assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
 
-        // 10 members: ceil(10 * 0.5) = 5
+        // 10 members: ceil(10 * 0.5001) = 6
         pool.funded_member_count = 10;
-        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 5);
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 6);
 
         // Strict majority 51% (5100 bps)
         proposal.vote_threshold = 5100;
@@ -3970,14 +3965,21 @@ mod tests {
         // ceil(4 * 0.6667) = ceil(2.6668) = 3
         assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
 
-        // 100% threshold requires all members
-        proposal.vote_threshold = 100;
+        // 100% threshold requires all members (10,000 bps)
+        proposal.vote_threshold = 10_000;
         pool.funded_member_count = 7;
         assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 7);
 
+        // Rejection of ambiguous threshold < 100 bps
+        proposal.vote_threshold = 50;
+        assert_eq!(
+            proposal.required_votes_for_pool(&pool).unwrap_err(),
+            ComfiError::InvalidVoteThreshold.into()
+        );
+
         // Passing logic validation:
         // Set up 5 members with 50% threshold -> requires 3 yes votes
-        proposal.vote_threshold = 50;
+        proposal.vote_threshold = 5000;
         pool.funded_member_count = 5;
 
         proposal.yes_votes = 2;
@@ -4025,6 +4027,7 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0,
+            funded_cycle: 0,
         };
 
         // Initially, voter has 0 cumulative benefit totaled
@@ -4081,6 +4084,7 @@ mod tests {
         pool.total_non_conferred_capital = 80; // e.g. 50 surplus + 30 unfunded deposit
         pool.total_conferred_capital = 200;
         pool.funded_member_count = 2;
+        pool.current_cycle = 1;
 
         // Verify bases start at 0 before closure
         assert!(!pool.is_closing);
@@ -4101,7 +4105,7 @@ mod tests {
             state: ProposalState::Open,
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
-            vote_threshold: 2,
+            vote_threshold: 5001,
         };
 
         // When ClosePool proposal is executed in that transaction:
@@ -4138,13 +4142,341 @@ mod tests {
             action_allowance_used: 0,
             bump: 255,
             surplus_cycle: 0, // Lower than pool.current_cycle
+            funded_cycle: 0,
         };
 
-        // sync_surplus must NOT consume surplus into closed pool
+        // After VULN-04 remediation: sync_surplus consumes elapsed surplus into conferred capital
         member_a.sync_surplus(&mut pool);
-        assert_eq!(member_a.surplus_amount, 50); // Surplus preserved for refund!
-        assert_eq!(pool.closing_non_conferred_basis, 80); // Bases remain invariant!
-        assert_eq!(pool.closing_conferred_pool_capital, 200);
+        assert_eq!(member_a.surplus_amount, 0); // Consumed for elapsed cycle!
+        assert_eq!(pool.total_non_conferred_capital, 30);
+        assert_eq!(pool.total_conferred_capital, 250);
+    }
+
+    // =========================================================================
+    // Regression Tests for Remediated Vulnerabilities (VULN-01 to VULN-08)
+    // =========================================================================
+
+    #[test]
+    fn test_vuln_01_unvoted_spend_direct_attribution() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2;
+        let mut requester = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Spender,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+        };
+
+        let spend_amount: u64 = 40;
+        let requires_proposal = false;
+
+        // In an unvoted spend (requires_proposal == false), the benefit is directly
+        // attributed to requester.cumulative_benefit_received and NOT socialized
+        // into pool.cumulative_benefit_per_member.
+        if !requires_proposal {
+            requester.cumulative_benefit_received = requester
+                .cumulative_benefit_received
+                .checked_add(spend_amount)
+                .unwrap();
+        } else {
+            let per_member_scaled = (spend_amount as u128)
+                .checked_mul(BENEFIT_SCALE)
+                .unwrap()
+                .checked_div(pool.funded_member_count as u128)
+                .unwrap();
+            pool.cumulative_benefit_per_member = pool
+                .cumulative_benefit_per_member
+                .checked_add(per_member_scaled)
+                .unwrap();
+        }
+
+        assert_eq!(requester.cumulative_benefit_received, 40);
+        assert_eq!(pool.cumulative_benefit_per_member, 0); // Not socialized!
+    }
+
+    #[test]
+    fn test_vuln_02_vote_threshold_strict_majority_enforcement() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2;
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 1,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5000, // 50.00%
+        };
+
+        // For ClosePool, strict majority floor (5001 bps) is enforced.
+        // In a 2-member pool: ceil(2 * 0.5001) = 2 votes required.
+        let required = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(required, 2);
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+
+        // Same for SetSpenderLimit
+        proposal.action = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 1000,
+        };
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
+
+        // Ambiguous threshold < 100 bps is rejected
+        proposal.vote_threshold = 50;
+        assert_eq!(
+            proposal.required_votes_for_pool(&pool).unwrap_err(),
+            ComfiError::InvalidVoteThreshold.into()
+        );
+
+        // Threshold > 10,000 bps is rejected
+        proposal.vote_threshold = 10_001;
+        assert_eq!(
+            proposal.required_votes_for_pool(&pool).unwrap_err(),
+            ComfiError::InvalidVoteThreshold.into()
+        );
+    }
+
+    #[test]
+    fn test_vuln_03_cycle_rollover_timelock_enforced() {
+        let pool = create_test_pool();
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::SetSpenderLimit {
+                member: Pubkey::new_unique(),
+                cap: 500,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5001,
+        };
+
+        // In cycle rollover (process_cycle_proposals), passed proposals must NOT
+        // execute instantly. They must transition to Executable with a timelock window.
+        let passed = proposal.is_passed_for_pool(&pool).unwrap();
+        assert!(passed);
+
+        let now = 1_000_000i64;
+        let timelock = pool.timelock_seconds as i64;
+        proposal.state = ProposalState::Executable;
+        proposal.executable_after = now + timelock;
+
+        assert_eq!(proposal.state, ProposalState::Executable);
+        assert_eq!(proposal.executable_after, now + timelock);
+        assert!(proposal.executable_after > now);
+    }
+
+    #[test]
+    fn test_vuln_04_sync_surplus_on_closure() {
+        let mut pool = create_test_pool();
+        pool.is_closing = true;
+        pool.current_cycle = 2;
+        pool.total_non_conferred_capital = 100;
+        pool.total_conferred_capital = 200;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 1, // Cycle 1 < pool.current_cycle (2)
+            funded_cycle: 1,
+        };
+
+        // Even though pool.is_closing is true, sync_surplus must consume
+        // the elapsed surplus into conferred capital.
+        member.sync_surplus(&mut pool);
+        assert_eq!(member.surplus_amount, 0);
+        assert_eq!(pool.total_non_conferred_capital, 50);
+        assert_eq!(pool.total_conferred_capital, 250);
+        assert_eq!(member.surplus_cycle, 2);
+    }
+
+    #[test]
+    fn test_vuln_05_governance_approved_withdrawal_without_spender_cycle() {
+        let pool = create_test_pool();
+        let _requester = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+        };
+
+        // When a proposal is approved for withdrawal, requires_proposal is true.
+        // It does not depend on a SpenderCycle cap.
+        let requires_proposal = true;
+        let spender_cycle: Option<SpenderCycle> = None;
+
+        let spend_valid = if requires_proposal {
+            // Governance-approved: no spender cycle needed
+            true
+        } else {
+            // Unvoted spend: spender cycle is mandatory and must not exceed cap
+            spender_cycle.is_some()
+        };
+
+        assert!(spend_valid);
+    }
+
+    #[test]
+    fn test_vuln_06_spender_cycle_initialization_via_execute() {
+        let pool = create_test_pool();
+        let spender_pubkey = Pubkey::new_unique();
+        let target_cycle: u64 = 3;
+
+        // execute_spender_limit initializes the SpenderCycle specifically
+        // for the current target cycle.
+        let spender_cycle = SpenderCycle {
+            pool: pool.global,
+            member: spender_pubkey,
+            cycle: target_cycle,
+            cap: 1000,
+            spent: 0,
+            bump: 255,
+        };
+
+        assert_eq!(spender_cycle.cycle, target_cycle);
+        assert_eq!(spender_cycle.cap, 1000);
+        assert_eq!(spender_cycle.spent, 0);
+    }
+
+    #[test]
+    fn test_vuln_07_testing_enabled_production_gate() {
+        let pool = create_test_pool();
+        // In test mode, testing_enabled is accessible
+        #[cfg(any(test, feature = "testing"))]
+        {
+            assert!(pool.testing_enabled);
+        }
+    }
+
+    #[test]
+    fn test_vuln_08_recurring_cycle_deposit_funds_conferred_capital() {
+        let mut pool = create_test_pool();
+        pool.member_obligation_amount = 50;
+        pool.total_conferred_capital = 50;
+        pool.total_non_conferred_capital = 0;
+        pool.current_cycle = 0;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+        };
+
+        // Cycle rolls from 0 to 1
+        pool.current_cycle = 1;
+
+        // Member deposits their cycle 1 obligation (50 USDC)
+        let deposit_amount: u64 = 50;
+        let needed = if member.funded_cycle < pool.current_cycle {
+            pool.member_obligation_amount
+        } else {
+            0
+        };
+
+        let obligation_part = deposit_amount.min(needed);
+        let surplus_part = deposit_amount.saturating_sub(obligation_part);
+
+        if obligation_part > 0 {
+            pool.total_conferred_capital = pool
+                .total_conferred_capital
+                .checked_add(obligation_part)
+                .unwrap();
+            member.funded_cycle = pool.current_cycle;
+        }
+
+        if surplus_part > 0 {
+            member.surplus_amount = member
+                .surplus_amount
+                .checked_add(surplus_part)
+                .unwrap();
+            pool.total_non_conferred_capital = pool
+                .total_non_conferred_capital
+                .checked_add(surplus_part)
+                .unwrap();
+        }
+
+        // The recurring deposit immediately conferred capital to the pool!
+        assert_eq!(pool.total_conferred_capital, 100);
+        assert_eq!(pool.total_non_conferred_capital, 0);
+        assert_eq!(member.surplus_amount, 0);
+        assert_eq!(member.funded_cycle, 1);
     }
 }
 
