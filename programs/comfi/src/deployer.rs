@@ -273,6 +273,8 @@ pub mod deployer_handlers {
         pool.closing_vault_basis = 0;
         pool.closing_non_conferred_basis = 0;
         pool.closing_conferred_pool_capital = 0;
+        pool.head_member = Some(ctx.accounts.creator_member.key());
+        pool.rollover_cursor = None;
         ctx.accounts.global.next_pool_id = ctx
             .accounts
             .global
@@ -301,6 +303,7 @@ pub mod deployer_handlers {
         member.surplus_cycle = 0;
         member.funded_cycle = if is_funded { 0 } else { 0 };
         member.is_paused = false;
+        member.next_member = None;
         Ok(())
     }
 }

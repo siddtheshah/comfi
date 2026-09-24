@@ -86,9 +86,18 @@ export async function processPoolCycleRoll(program, poolItem, cranker) {
 
   const remainingAccounts = [];
 
-  // 1. Members: must be writable so roll_cycle updates funded status and moves surplus
+  // 1. Members: traverse singly-linked list pointer chain starting at rolloverCursor or headMember
+  const memberMap = new Map();
   for (const item of poolMembers) {
-    remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false });
+    memberMap.set(item.publicKey.toBase58(), item);
+  }
+
+  let currentMemberKey = pool.rolloverCursor ?? pool.headMember;
+  while (currentMemberKey) {
+    const keyStr = currentMemberKey.toBase58 ? currentMemberKey.toBase58() : new PublicKey(currentMemberKey).toBase58();
+    remainingAccounts.push({ pubkey: new PublicKey(keyStr), isWritable: true, isSigner: false });
+    const memberItem = memberMap.get(keyStr);
+    currentMemberKey = memberItem?.account?.nextMember ?? null;
   }
 
   // 2. Proposals: ready for resolution

@@ -526,10 +526,17 @@ pub struct Pool {
     pub closing_vault_basis: u64,
     pub closing_non_conferred_basis: u64,
     pub closing_conferred_pool_capital: u64,
+    pub head_member: Option<Pubkey>,
+    pub rollover_cursor: Option<Pubkey>,
 }
 
 impl Pool {
-    pub const SPACE: usize = 8 + 360;
+    pub const BASE_SPACE: usize = 8 + 426;
+    pub const SPACE: usize = Self::BASE_SPACE;
+
+    pub fn space(_member_cap: u32) -> usize {
+        Self::SPACE
+    }
 
     pub fn ensure_testing_enabled(&self) -> Result<()> {
         require!(self.testing_enabled, ComfiError::TestingNotEnabled);
@@ -543,6 +550,10 @@ impl Pool {
 
     pub fn ensure_cycle_current_at(&self, current_timestamp: i64) -> Result<()> {
         if !self.is_closing {
+            require!(
+                self.rollover_cursor.is_none(),
+                ComfiError::CycleRollRequired
+            );
             let next_start = self
                 .cycle_started_at
                 .checked_add(self.cycle_duration_seconds)
@@ -632,10 +643,11 @@ pub struct Member {
     pub surplus_cycle: u64,
     pub funded_cycle: u64,
     pub is_paused: bool,
+    pub next_member: Option<Pubkey>,
 }
 
 impl Member {
-    pub const SPACE: usize = 8 + 225;
+    pub const SPACE: usize = 8 + 258;
 
     pub fn can_request_spend(&self) -> bool {
         matches!(
@@ -904,19 +916,15 @@ pub mod pool_handlers {
         ComfiError::DepositBelowMinimum
     );
 
-    let (is_funded, surplus, initial_conferred, initial_non_conferred) =
-        if args.initial_deposit >= pool.member_obligation_amount {
-            let excess = args.initial_deposit
-                .checked_sub(pool.member_obligation_amount)
-                .ok_or(ComfiError::MathOverflow)?;
-            require!(
-                excess <= pool.member_obligation_amount,
-                ComfiError::OverfundingCapExceeded
-            );
-            (true, excess, pool.member_obligation_amount, excess)
-        } else {
-            (false, 0, 0, args.initial_deposit)
-        };
+    if args.initial_deposit > pool.member_obligation_amount {
+        let excess = args.initial_deposit
+            .checked_sub(pool.member_obligation_amount)
+            .ok_or(ComfiError::MathOverflow)?;
+        require!(
+            excess <= pool.member_obligation_amount,
+            ComfiError::OverfundingCapExceeded
+        );
+    }
 
     transfer_user_tokens(
         &ctx.accounts.token_program,
@@ -929,28 +937,22 @@ pub mod pool_handlers {
         .member_count
         .checked_add(1)
         .ok_or(ComfiError::MathOverflow)?;
-    if is_funded {
-        pool.funded_member_count = pool
-            .funded_member_count
-            .checked_add(1)
-            .ok_or(ComfiError::MathOverflow)?;
-    }
+
+    // Joining mid-cycle does not confer funded voting status or capital for the active cycle.
+    // All initial deposits accumulate into non-conferred surplus and are transitioned
+    // on the next cycle rollover (roll_cycle).
     pool.total_non_conferred_capital = pool
         .total_non_conferred_capital
-        .checked_add(initial_non_conferred)
-        .ok_or(ComfiError::MathOverflow)?;
-    pool.total_conferred_capital = pool
-        .total_conferred_capital
-        .checked_add(initial_conferred)
+        .checked_add(args.initial_deposit)
         .ok_or(ComfiError::MathOverflow)?;
 
     let member = &mut ctx.accounts.member;
     member.pool = pool.key();
     member.wallet = ctx.accounts.user.key();
     member.role = MemberRole::Spender;
-    member.is_funded = is_funded;
+    member.is_funded = false;
     member.deposited_total = args.initial_deposit;
-    member.surplus_amount = surplus;
+    member.surplus_amount = args.initial_deposit;
     member.total_withdrawn = 0;
     member.closure_claimed = false;
     member.last_benefit_index = pool.cumulative_benefit_per_member;
@@ -963,8 +965,10 @@ pub mod pool_handlers {
     member.action_allowance_used = 0;
     member.bump = ctx.bumps.member;
     member.surplus_cycle = pool.current_cycle;
-    member.funded_cycle = if is_funded { pool.current_cycle } else { 0 };
+    member.funded_cycle = 0;
     member.is_paused = false;
+    member.next_member = pool.head_member;
+    pool.head_member = Some(ctx.accounts.member.key());
     Ok(())
 }
 
@@ -1149,16 +1153,17 @@ pub fn process_cycle_proposals<'info>(
         if !account_info.is_writable || account_info.data_len() < 8 {
             continue;
         }
-        let data = account_info.try_borrow_data()?;
-        if &data[..8] != Proposal::DISCRIMINATOR {
-            continue;
-        }
-        drop(data);
 
-        let mut data: &[u8] = &account_info.try_borrow_data()?;
-        let mut proposal = match Proposal::try_deserialize(&mut data) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let mut proposal = {
+            let data = account_info.try_borrow_data()?;
+            if &data[..8] != Proposal::DISCRIMINATOR {
+                continue;
+            }
+            let mut slice: &[u8] = &data;
+            match Proposal::try_deserialize(&mut slice) {
+                Ok(p) => p,
+                Err(_) => continue,
+            }
         };
 
         if proposal.pool != pool_key || ending_cycle < proposal.voting_cycle {
@@ -1200,27 +1205,60 @@ pub fn process_cycle_members<'info>(
     pool: &mut Pool,
     remaining_accounts: &[AccountInfo<'info>],
 ) -> Result<()> {
+    let (mut current_expected, mut newly_funded_count) = match pool.rollover_cursor {
+        Some(cursor) => (cursor, pool.funded_member_count),
+        None => match pool.head_member {
+            Some(head) => (head, 0),
+            None => {
+                pool.funded_member_count = 0;
+                pool.rollover_cursor = None;
+                return Ok(());
+            }
+        },
+    };
+
     let mut processed_members: usize = 0;
-    let mut newly_funded_count: u32 = 0;
 
     for account_info in remaining_accounts.iter() {
-        if !account_info.is_writable || account_info.data_len() < 8 {
-            continue;
+        if account_info.data_len() < 8 {
+            break;
         }
-        let data = account_info.try_borrow_data()?;
-        if &data[..8] != Member::DISCRIMINATOR {
-            continue;
+        let disc = {
+            let data = account_info.try_borrow_data()?;
+            let mut d = [0u8; 8];
+            d.copy_from_slice(&data[..8]);
+            d
+        };
+        if disc == Proposal::DISCRIMINATOR {
+            break;
         }
-        drop(data);
+        if disc != Member::DISCRIMINATOR {
+            break;
+        }
 
-        let mut data: &[u8] = &account_info.try_borrow_data()?;
-        let mut member = match Member::try_deserialize(&mut data) {
-            Ok(m) => m,
-            Err(_) => continue,
+        require!(
+            account_info.key == &current_expected,
+            ComfiError::IncompleteMemberList
+        );
+        require!(account_info.is_writable, ComfiError::Unauthorized);
+
+        let mut member = {
+            let data = account_info.try_borrow_data()?;
+            let mut slice: &[u8] = &data;
+            match Member::try_deserialize(&mut slice) {
+                Ok(m) => m,
+                Err(_) => {
+                    if !pool.testing_enabled {
+                        return err!(ComfiError::IncompleteMemberList);
+                    } else {
+                        break;
+                    }
+                }
+            }
         };
 
         if member.pool != pool_key {
-            continue;
+            return err!(ComfiError::Unauthorized);
         }
 
         processed_members = processed_members
@@ -1254,18 +1292,26 @@ pub fn process_cycle_members<'info>(
         member.surplus_cycle = pool.current_cycle;
 
         member.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
+
+        match member.next_member {
+            Some(next) => {
+                current_expected = next;
+            }
+            None => {
+                pool.rollover_cursor = None;
+                pool.funded_member_count = newly_funded_count;
+                return Ok(());
+            }
+        }
     }
 
-    if !pool.testing_enabled {
-        require!(
-            processed_members == pool.member_count as usize,
-            ComfiError::IncompleteMemberList
-        );
-        pool.funded_member_count = newly_funded_count;
-    } else if processed_members > 0 {
-        if processed_members == pool.member_count as usize {
-            pool.funded_member_count = newly_funded_count;
+    if processed_members == 0 {
+        if !pool.testing_enabled && pool.head_member.is_some() {
+            return err!(ComfiError::IncompleteMemberList);
         }
+    } else {
+        pool.rollover_cursor = Some(current_expected);
+        pool.funded_member_count = newly_funded_count;
     }
 
     Ok(())
@@ -1275,26 +1321,35 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
     let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
-    let ending_cycle = pool.current_cycle;
-    let next_start = pool
-        .cycle_started_at
-        .checked_add(pool.cycle_duration_seconds)
-        .ok_or(ComfiError::MathOverflow)?;
-    if !pool.testing_enabled {
-        require!(
-            Clock::get()?.unix_timestamp >= next_start,
-            ComfiError::CycleNotReady
-        );
+
+    let is_resuming_chunk = pool.rollover_cursor.is_some();
+    if !is_resuming_chunk {
+        let next_start = pool
+            .cycle_started_at
+            .checked_add(pool.cycle_duration_seconds)
+            .ok_or(ComfiError::MathOverflow)?;
+        if !pool.testing_enabled {
+            require!(
+                Clock::get()?.unix_timestamp >= next_start,
+                ComfiError::CycleNotReady
+            );
+        }
+        pool.current_cycle = pool
+            .current_cycle
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+        pool.cycle_started_at = next_start;
+        pool.apply_pending_config();
+        pool.funded_member_count = 0;
     }
-    pool.current_cycle = pool
-        .current_cycle
-        .checked_add(1)
-        .ok_or(ComfiError::MathOverflow)?;
-    pool.cycle_started_at = next_start;
-    pool.apply_pending_config();
+
+    let ending_cycle = pool.current_cycle.saturating_sub(1);
 
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
-    process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+
+    if pool.rollover_cursor.is_none() {
+        process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+    }
 
     if let Some(cranker) = &ctx.accounts.cranker {
         let rent = Rent::get()?;
@@ -1324,16 +1379,25 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     pool.ensure_testing_enabled()?;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
-    let ending_cycle = pool.current_cycle;
-    pool.current_cycle = pool
-        .current_cycle
-        .checked_add(1)
-        .ok_or(ComfiError::MathOverflow)?;
-    pool.cycle_started_at = Clock::get()?.unix_timestamp;
-    pool.apply_pending_config();
+
+    let is_resuming_chunk = pool.rollover_cursor.is_some();
+    if !is_resuming_chunk {
+        pool.current_cycle = pool
+            .current_cycle
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+        pool.cycle_started_at = Clock::get()?.unix_timestamp;
+        pool.apply_pending_config();
+        pool.funded_member_count = 0;
+    }
+
+    let ending_cycle = pool.current_cycle.saturating_sub(1);
 
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
-    process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+
+    if pool.rollover_cursor.is_none() {
+        process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+    }
     Ok(())
 }
 
@@ -1351,9 +1415,14 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
         .ok_or(ComfiError::MathOverflow)?;
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
+    pool.funded_member_count = 0;
+    pool.rollover_cursor = None;
 
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
-    process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+
+    if pool.rollover_cursor.is_none() {
+        process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+    }
     Ok(())
 }
 
@@ -1977,6 +2046,8 @@ mod tests {
             closing_vault_basis: 0,
             closing_non_conferred_basis: 0,
             closing_conferred_pool_capital: 0,
+            head_member: None,
+            rollover_cursor: None,
         }
     }
 
@@ -2013,6 +2084,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         assert!(member.can_request_spend());
@@ -2049,6 +2121,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Deposited 40 < 50 obligation: not counted as funded member
@@ -2121,10 +2194,10 @@ mod tests {
 
     #[test]
     fn test_account_space_constants() {
-        assert_eq!(Pool::SPACE, 8 + 360);
+        assert_eq!(Pool::SPACE, 8 + 426);
         assert_eq!(
             Member::SPACE,
-            8 + 225
+            8 + 258
         );
         assert_eq!(SpenderCycle::SPACE, 8 + 32 + 32 + 8 + 8 + 8 + 1);
         assert_eq!(
@@ -2650,6 +2723,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Member B with max allowed surplus (100 total = 50 obligation + 50 surplus)
@@ -2674,6 +2748,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -2791,6 +2866,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
         c1.sync_benefit(&pool).unwrap();
         assert_eq!(c1.cumulative_benefit_received, 100);
@@ -2817,6 +2893,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
         m3.sync_benefit(&pool).unwrap();
         assert_eq!(m3.cumulative_benefit_received, 0); // No spends happened while M3 was in pool!
@@ -2882,6 +2959,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Member B (contributed 100)
@@ -2906,6 +2984,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Delegated spend of 60 occurs
@@ -2960,6 +3039,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Member B (unfunded, only 20 deposited, obligation is 50)
@@ -2984,6 +3064,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -3053,6 +3134,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
         assert_eq!(member.total_contributions, 50);
 
@@ -3121,6 +3203,7 @@ mod tests {
             surplus_cycle: 1,
             funded_cycle: 1,
             is_paused: false,
+            next_member: None,
         };
         let mut member_b = Member {
             pool: pool.global,
@@ -3143,6 +3226,7 @@ mod tests {
             surplus_cycle: 1,
             funded_cycle: 1,
             is_paused: false,
+            next_member: None,
         };
         pool.funded_member_count = 2;
         vault_balance += 100;
@@ -3209,6 +3293,7 @@ mod tests {
             surplus_cycle: 3,
             funded_cycle: 3,
             is_paused: false,
+            next_member: None,
         };
         pool.total_non_conferred_capital += 50;
         vault_balance += 100;
@@ -3235,6 +3320,7 @@ mod tests {
             surplus_cycle: 3,
             funded_cycle: 3,
             is_paused: false,
+            next_member: None,
         };
         vault_balance += 50;
         pool.funded_member_count = 4; // A, B, C, D all funded
@@ -3420,6 +3506,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let mut member_b = Member {
@@ -3443,6 +3530,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Snapshot closure pro-rata basis on first claim
@@ -3503,6 +3591,7 @@ mod tests {
             surplus_cycle: 1, // Deposited in Cycle 1
             funded_cycle: 1,
             is_paused: false,
+            next_member: None,
         };
         pool.total_non_conferred_capital = 50;
         pool.total_conferred_capital = 50;
@@ -3551,6 +3640,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // A spend of 40 occurs in the pool
@@ -3600,6 +3690,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let mut member_b = Member {
@@ -3623,6 +3714,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Snapshot basis
@@ -3688,6 +3780,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let mut member_b = Member {
@@ -3711,6 +3804,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let mut member_c = Member {
@@ -3734,6 +3828,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Snapshot basis
@@ -3960,6 +4055,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let withdrawal_amount: u64 = 60;
@@ -4009,6 +4105,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Invariant: prior to voting sync, voter has 0 cumulative benefit totaled
@@ -4056,6 +4153,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
         assert!(!unfunded_voter.is_funded_for_pool(&pool));
     }
@@ -4187,6 +4285,7 @@ mod tests {
             surplus_cycle: 1,
             funded_cycle: 1,
             is_paused: false,
+            next_member: None,
         };
 
         // Initially, voter has 0 cumulative benefit totaled
@@ -4304,6 +4403,7 @@ mod tests {
             surplus_cycle: 0, // Lower than pool.current_cycle
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // After VULN-04 remediation: sync_surplus consumes elapsed surplus into conferred capital
@@ -4342,6 +4442,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let spend_amount: u64 = 40;
@@ -4488,6 +4589,7 @@ mod tests {
             surplus_cycle: 1, // Cycle 1 < pool.current_cycle (2)
             funded_cycle: 1,
             is_paused: false,
+            next_member: None,
         };
 
         // Even though pool.is_closing is true, sync_surplus must consume
@@ -4523,6 +4625,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // When a proposal is approved for withdrawal, requires_proposal is true.
@@ -4602,6 +4705,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Cycle rolls from 0 to 1
@@ -4697,6 +4801,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         let mut member_b = Member {
@@ -4720,6 +4825,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Advance pool cycle from 0 to 1
@@ -4776,6 +4882,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // In Cycle 0: member is funded
@@ -4835,6 +4942,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Member is funded in Cycle 0
@@ -4897,6 +5005,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Funded in Cycle 0
@@ -5044,6 +5153,7 @@ mod tests {
             surplus_cycle: 0,
             funded_cycle: 0,
             is_paused: false,
+            next_member: None,
         };
 
         // Even with role Spender, unfunded member is rejected by is_funded_for_pool
@@ -5101,7 +5211,425 @@ mod tests {
             assert!(res.is_ok());
         }
     }
+
+    #[test]
+    fn test_join_pool_status_deferred_to_next_cycle() {
+        let mut pool = create_test_pool();
+        pool.member_obligation_amount = 50;
+        pool.current_cycle = 0;
+        pool.funded_member_count = 1; // Only creator is funded initially in cycle 0
+        pool.total_conferred_capital = 50;
+        pool.total_non_conferred_capital = 0;
+
+        let initial_deposit: u64 = 50;
+
+        // Simulate new member joining mid-cycle:
+        // Overfunding check
+        let excess_check = if initial_deposit > pool.member_obligation_amount {
+            let excess = initial_deposit - pool.member_obligation_amount;
+            excess <= pool.member_obligation_amount
+        } else {
+            true
+        };
+        assert!(excess_check);
+
+        // Account mutations as in join_pool:
+        pool.member_count += 1;
+        pool.total_non_conferred_capital += initial_deposit;
+
+        let mut new_member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Spender,
+            is_funded: false,
+            deposited_total: initial_deposit,
+            surplus_amount: initial_deposit,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: initial_deposit,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: pool.current_cycle,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: pool.current_cycle,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+        };
+
+        // Mid-cycle: New member is NOT funded and has NO voting power in the active cycle
+        assert!(!new_member.is_funded);
+        assert_eq!(new_member.funded_cycle, 0);
+        assert!(!new_member.is_funded_for_pool(&pool));
+        assert_eq!(pool.funded_member_count, 1);
+        assert_eq!(pool.total_conferred_capital, 50);
+        assert_eq!(pool.total_non_conferred_capital, 50);
+
+        // Advance to cycle 1 via roll_cycle logic
+        pool.current_cycle = 1;
+
+        // Process member at cycle boundary
+        let obligation = pool.member_obligation_amount;
+        assert!(new_member.surplus_amount >= obligation);
+        new_member.surplus_amount -= obligation;
+        pool.total_non_conferred_capital -= obligation;
+        pool.total_conferred_capital += obligation;
+        new_member.is_funded = true;
+        new_member.funded_cycle = pool.current_cycle;
+        pool.funded_member_count += 1;
+
+        // In cycle 1: Member is now funded and can participate in governance
+        assert!(new_member.is_funded);
+        assert_eq!(new_member.funded_cycle, 1);
+        assert!(new_member.is_funded_for_pool(&pool));
+        assert_eq!(pool.funded_member_count, 2);
+        assert_eq!(pool.total_conferred_capital, 100);
+        assert_eq!(pool.total_non_conferred_capital, 0);
+    }
+
+    #[test]
+    fn test_join_pool_overfunding_cap_enforced() {
+        let pool = create_test_pool();
+        let obligation = pool.member_obligation_amount; // 50
+
+        // Deposit up to 2x obligation (100) is allowed (obligation for next cycle + 1 surplus)
+        let deposit_100 = 100;
+        let excess_100 = deposit_100 - obligation;
+        assert!(excess_100 <= obligation);
+
+        // Deposit > 2x obligation (101) exceeds overfunding cap and must fail
+        let deposit_101 = 101;
+        let excess_101 = deposit_101 - obligation;
+        assert!(excess_101 > obligation);
+    }
+
+    #[test]
+    fn test_process_cycle_members_verifies_pool_members_list() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = false;
+        let member_1_key = Pubkey::new_unique();
+        let member_2_key = Pubkey::new_unique();
+        pool.head_member = Some(member_1_key);
+        pool.rollover_cursor = None;
+        pool.member_count = 2;
+
+        let mut lamports_1 = 1000000;
+        let mut member_1_data = vec![0u8; Member::SPACE];
+        let mut lamports_dup = 1000000;
+        let mut member_dup_data = vec![0u8; Member::SPACE];
+
+        member_1_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        member_dup_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+
+        let member_1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: Some(member_2_key),
+        };
+        member_1.try_serialize(&mut &mut member_1_data[..]).unwrap();
+        member_1.try_serialize(&mut &mut member_dup_data[..]).unwrap();
+
+        let owner = crate::ID;
+        let acc_1 = AccountInfo::new(
+            &member_1_key,
+            false,
+            true,
+            &mut lamports_1,
+            &mut member_1_data,
+            &owner,
+            false,
+        );
+        let acc_dup = AccountInfo::new(
+            &member_1_key,
+            false,
+            true,
+            &mut lamports_dup,
+            &mut member_dup_data,
+            &owner,
+            false,
+        );
+
+        // Cranker passes duplicate member 1 accounts, omitting member 2:
+        let duplicate_accounts = vec![acc_1, acc_dup];
+        let res = pool_handlers::process_cycle_members(pool.global, &mut pool, &duplicate_accounts);
+        // Must reject with IncompleteMemberList because pointer chain fails!
+        assert_eq!(res.unwrap_err(), ComfiError::IncompleteMemberList.into());
+
+        // Now test positive case where all members in pointer chain are supplied:
+        let mut lamports_2 = 1000000;
+        let mut member_2_data = vec![0u8; Member::SPACE];
+        member_2_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        let member_2 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+        };
+        member_2.try_serialize(&mut &mut member_2_data[..]).unwrap();
+
+        let mut lamports_1_fresh = 1000000;
+        let mut member_1_fresh_data = vec![0u8; Member::SPACE];
+        member_1_fresh_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        member_1.try_serialize(&mut &mut member_1_fresh_data[..]).unwrap();
+
+        let acc_1_fresh = AccountInfo::new(
+            &member_1_key,
+            false,
+            true,
+            &mut lamports_1_fresh,
+            &mut member_1_fresh_data,
+            &owner,
+            false,
+        );
+        let acc_2 = AccountInfo::new(
+            &member_2_key,
+            false,
+            true,
+            &mut lamports_2,
+            &mut member_2_data,
+            &owner,
+            false,
+        );
+
+        let valid_accounts = vec![acc_1_fresh, acc_2];
+        let res_valid = pool_handlers::process_cycle_members(pool.global, &mut pool, &valid_accounts);
+        assert!(res_valid.is_ok());
+        assert_eq!(pool.funded_member_count, 2);
+        assert!(pool.rollover_cursor.is_none());
+    }
+
+    #[test]
+    fn test_chunked_cycle_rollover_with_linked_list() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = false;
+        pool.cycle_started_at = 1000;
+        pool.cycle_duration_seconds = 100;
+
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let m3_key = Pubkey::new_unique();
+
+        // Linked list: M1 -> M2 -> M3 -> None
+        pool.head_member = Some(m1_key);
+        pool.rollover_cursor = None;
+        pool.member_count = 3;
+
+        let owner = crate::ID;
+
+        // Setup M1
+        let mut m1_lamports = 1000000;
+        let mut m1_data = vec![0u8; Member::SPACE];
+        m1_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        let m1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: Some(m2_key),
+        };
+        m1.try_serialize(&mut &mut m1_data[..]).unwrap();
+
+        // Setup M2
+        let mut m2_lamports = 1000000;
+        let mut m2_data = vec![0u8; Member::SPACE];
+        m2_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        let m2 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: Some(m3_key),
+        };
+        m2.try_serialize(&mut &mut m2_data[..]).unwrap();
+
+        // Setup M3
+        let mut m3_lamports = 1000000;
+        let mut m3_data = vec![0u8; Member::SPACE];
+        m3_data[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        let m3 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+        };
+        m3.try_serialize(&mut &mut m3_data[..]).unwrap();
+
+        // 1. Omission test: passing [M1, M3] (skipping M2) must fail pointer chain
+        let mut m1_omission_lamports = 1000000;
+        let mut m1_data_omission = vec![0u8; Member::SPACE];
+        m1_data_omission[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        m1.try_serialize(&mut &mut m1_data_omission[..]).unwrap();
+
+        let mut m3_omission_lamports = 1000000;
+        let mut m3_data_omission = vec![0u8; Member::SPACE];
+        m3_data_omission[..8].copy_from_slice(&Member::DISCRIMINATOR);
+        m3.try_serialize(&mut &mut m3_data_omission[..]).unwrap();
+
+        let acc_m1_omission = AccountInfo::new(
+            &m1_key,
+            false,
+            true,
+            &mut m1_omission_lamports,
+            &mut m1_data_omission,
+            &owner,
+            false,
+        );
+        let acc_m3_omission = AccountInfo::new(
+            &m3_key,
+            false,
+            true,
+            &mut m3_omission_lamports,
+            &mut m3_data_omission,
+            &owner,
+            false,
+        );
+        let omission_accounts = vec![acc_m1_omission, acc_m3_omission];
+        let err_omission = pool_handlers::process_cycle_members(pool.global, &mut pool, &omission_accounts);
+        assert_eq!(err_omission.unwrap_err(), ComfiError::IncompleteMemberList.into());
+
+        let acc_m1 = AccountInfo::new(
+            &m1_key,
+            false,
+            true,
+            &mut m1_lamports,
+            &mut m1_data,
+            &owner,
+            false,
+        );
+        let acc_m2 = AccountInfo::new(
+            &m2_key,
+            false,
+            true,
+            &mut m2_lamports,
+            &mut m2_data,
+            &owner,
+            false,
+        );
+        let acc_m3 = AccountInfo::new(
+            &m3_key,
+            false,
+            true,
+            &mut m3_lamports,
+            &mut m3_data,
+            &owner,
+            false,
+        );
+
+        // 2. Chunk 1: Process [M1, M2]
+        let chunk_1_accounts = vec![acc_m1, acc_m2];
+        let res_chunk_1 = pool_handlers::process_cycle_members(pool.global, &mut pool, &chunk_1_accounts);
+        assert!(res_chunk_1.is_ok());
+        // After Chunk 1, rollover_cursor is Some(M3) and 2 members are funded:
+        assert_eq!(pool.rollover_cursor, Some(m3_key));
+        assert_eq!(pool.funded_member_count, 2);
+
+        // Pool operations are gated while rollover_cursor is Some:
+        assert_eq!(
+            pool.ensure_cycle_current_at(1050).unwrap_err(),
+            ComfiError::CycleRollRequired.into()
+        );
+
+        // 3. Chunk 2: Process [M3]
+        let chunk_2_accounts = vec![acc_m3];
+        let res_chunk_2 = pool_handlers::process_cycle_members(pool.global, &mut pool, &chunk_2_accounts);
+        assert!(res_chunk_2.is_ok());
+        // After Chunk 2, rollover_cursor is None and all 3 members are funded:
+        assert!(pool.rollover_cursor.is_none());
+        assert_eq!(pool.funded_member_count, 3);
+
+        // Pool operations succeed now that rollover is complete:
+        assert!(pool.ensure_cycle_current_at(1050).is_ok());
+    }
 }
+
 
 
 

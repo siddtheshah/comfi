@@ -707,9 +707,17 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       ])
       const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
 
-      // Members must be passed as writable so test_roll_cycle updates funded statuses and moves surplus
+      // Members must be passed in pointer-chain order as writable so test_roll_cycle updates funded statuses and moves surplus
+      const memberMap = new Map<string, any>()
       for (const item of poolMembers) {
-        remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
+        memberMap.set(item.publicKey.toBase58(), item)
+      }
+      let currentMemberKey = poolAccount.rolloverCursor ?? poolAccount.headMember
+      while (currentMemberKey) {
+        const keyStr = (currentMemberKey as any).toBase58 ? (currentMemberKey as any).toBase58() : new PublicKey(currentMemberKey).toBase58()
+        remainingAccounts.push({ pubkey: new PublicKey(keyStr), isWritable: true, isSigner: false })
+        const memberItem = memberMap.get(keyStr)
+        currentMemberKey = memberItem?.account?.nextMember ?? null
       }
 
       for (const item of poolProposals) {

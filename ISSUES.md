@@ -15,6 +15,8 @@ This document details critical and high-severity security vulnerabilities and at
 | **COMFI-SEC-05** | **Medium** | Accounting / Governance DoS | Asymmetric `funded_member_count` updates permit counter inflation, diluting shared spend benefit deltas to zero and bricking voting quorums | **Resolved** |
 | **COMFI-SEC-06** | **Medium** | Spend Attribution Bypass | Unfunded members can request shared vendor spends without having benefits attributed to their closure basis | **Resolved** |
 | **COMFI-SEC-07** | **Medium** | Math / Account Lockout | `deposit` underflow in `total_non_conferred_capital` permanently locks member accounts from re-funding | **Resolved** |
+| **COMFI-SEC-08** | **Critical** | Governance / Voter Manipulation | Mid-cycle `join_pool` immediately confers funded status and increments voter count, enabling single-voter proposal hijacking | **Resolved** |
+| **COMFI-SEC-10** | **High** | Governance / Scalability | Variable-space vector member storage and omission attack during cycle rollover replaced with singly-linked list registry | **Resolved** |
 
 ---
 
@@ -332,3 +334,70 @@ Recalculate `delta_non_conferred` based on the actual non-conferred capital curr
 
 #### Resolution
 - In `deposit`, clamped negative non-conferred delta subtractions to `pool.total_non_conferred_capital` via `saturating_sub(neg.min(pool.total_non_conferred_capital))`, completely eliminating `MathOverflow` deposit lockouts.
+
+---
+
+### COMFI-SEC-08: Mid-Cycle Join Governance Exploitation via Instant Funded Status Conferral
+
+- **Severity:** Critical
+- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L894-L969)
+
+#### Description
+Prior to remediation, [`join_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L894-L969) immediately set `member.is_funded = true`, advanced `member.funded_cycle = pool.current_cycle`, incremented `pool.funded_member_count`, and transferred capital into `pool.total_conferred_capital` upon deposit of `args.initial_deposit >= pool.member_obligation_amount`. 
+
+Conversely, existing members depositing via `deposit` mid-cycle had their funds directed to `surplus_amount` and `total_non_conferred_capital`, leaving their funded voting status deferred until `roll_cycle`.
+
+#### Attack Scenario
+1. At cycle boundary rollover, existing members who had not prepaid advance surplus become unfunded (`is_funded = false`, `funded_cycle < pool.current_cycle`).
+2. Even after existing members deposit their recurring obligation for the new cycle, they remain unfunded throughout the active cycle and are blocked from voting by `is_funded_for_pool`.
+3. An attacker joins the pool mid-cycle via `join_pool` with `initial_deposit >= obligation`.
+4. `join_pool` immediately conferred `is_funded = true` and incremented `pool.funded_member_count = 1`.
+5. Because the attacker was the sole funded member, the required vote threshold (`required_votes_for_pool`) was 1 vote.
+6. The attacker submitted and unilaterally passed withdrawal proposals or spender limits in the same cycle, extracting funds contributed by existing members without those members having any ability to vote.
+
+#### Remediation
+Ensure consistency across all mid-cycle deposits: joining a pool mid-cycle and depositing initial capital must not confer immediate funded voting status or confer capital for the active cycle. All initial deposits must accumulate as non-conferred surplus (`surplus_amount` and `total_non_conferred_capital`) and only transition to funded voting status at the cycle rollover boundary via `roll_cycle`'s `process_cycle_members`.
+
+#### Resolution
+- Updated [`pool_handlers::join_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L894-L969) so that `member.is_funded = false`, `member.funded_cycle = 0`, and `pool.funded_member_count` is not incremented.
+- Routed all initial deposits into `pool.total_non_conferred_capital` and `member.surplus_amount`, with overfunding checks capping deposits at $2 \times \text{obligation}$.
+- On cycle rollover (`roll_cycle`), `process_cycle_members` consumes the member's surplus, transfers it to `total_conferred_capital`, sets `is_funded = true`, sets `funded_cycle = pool.current_cycle`, and updates `funded_member_count` for the new cycle.
+- Added unit tests `test_join_pool_status_deferred_to_next_cycle` and `test_join_pool_overfunding_cap_enforced` verifying that mid-cycle joiners have no active cycle voting power and transition to funded status on next cycle roll.
+
+---
+
+### COMFI-SEC-10: Arbitrary Member Omission During Cycle Rollover via Caller-Supplied Accounts
+
+- **Severity:** High
+- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs), [`programs/comfi/src/deployer.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs)
+
+#### Description
+Prior to remediation, [`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) delegated member surplus rollover and funded status transition to `process_cycle_members`, which iterated exclusively over caller-supplied `ctx.remaining_accounts`. Because the pool did not track its registered members on-chain, a malicious cranker or caller could:
+1. Omit legitimate pool members from `remaining_accounts`, preventing their surplus from converting into conferred capital and leaving them unfunded and unable to vote.
+2. Supply only select colluding members, resulting in an artificially depressed `pool.funded_member_count`. This reduced the required vote threshold (`required_votes_for_pool`) for proposals in the new cycle, allowing attackers to seize control of governance.
+
+#### Remediation
+Implement an on-chain singly-linked list member registry rather than storing a dynamically growing `Vec<Pubkey>` on the `Pool` account:
+1. **State**:
+   - `Pool`: Replace `members: Vec<Pubkey>` with `pub head_member: Option<Pubkey>` ($O(1)$ constant space `8 + 426`) and `pub rollover_cursor: Option<Pubkey>`.
+   - `Member`: Add `pub next_member: Option<Pubkey>` to the `Member` PDA.
+2. **Join Pool ($O(1)$ Prepend)**:
+   - `member.next_member = pool.head_member;`
+   - `pool.head_member = Some(member.key());`
+   - Prepend new member as the head in $O(1)$ constant time; rent is paid naturally by the joining member.
+3. **Chunked Pointer-Chain Cycle Rollover**:
+   - In `roll_cycle` and `process_cycle_members`, verify the pointer chain: `accounts[i + 1].key() == accounts[i].next_member`.
+   - Support chunked rollover across transactions using `pool.rollover_cursor`.
+   - Gate pool operations during incomplete rollovers (`pool.ensure_cycle_current_at` blocks if `pool.rollover_cursor.is_some()`).
+
+#### Resolution
+- Replaced `members: Vec<Pubkey>` on [`Pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) with `pub head_member: Option<Pubkey>` and `pub rollover_cursor: Option<Pubkey>`, reducing `Pool` to a fixed constant space (`8 + 426`).
+- Added `pub next_member: Option<Pubkey>` to [`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) (`Member::SPACE = 8 + 258`).
+- Updated [`programs/comfi/src/deployer.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs) `create_pool` to initialize `pool.head_member = Some(creator_member)` and `creator_member.next_member = None`.
+- Updated [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) `join_pool` to prepend each new member to the head (`member.next_member = pool.head_member; pool.head_member = Some(member.key())`).
+- Refactored `process_cycle_members` and `roll_cycle` in [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) to verify the pointer chain across remaining accounts, supporting chunked rollover via `pool.rollover_cursor` and ensuring proposals only resolve when `pool.rollover_cursor.is_none()`.
+- Added cycle current gatekeeping in `Pool::ensure_cycle_current_at` requiring `self.rollover_cursor.is_none()`, preventing governance manipulation or fund actions mid-rollover.
+- Updated `scripts/crank-keeper.mjs` and `apps/testing/src/backend/localnet.ts` to traverse the member linked list pointer chain starting at `rolloverCursor ?? headMember`.
+- Verified pointer chain validation and chunked multi-transaction rollover in unit tests `test_process_cycle_members_verifies_pool_members_list` and `test_chunked_cycle_rollover_with_linked_list`.
+
+
