@@ -299,6 +299,8 @@ pub mod deployer_handlers {
         member.action_allowance_used = 0;
         member.bump = ctx.bumps.creator_member;
         member.surplus_cycle = 0;
+        member.funded_cycle = if is_funded { 0 } else { 0 };
+        member.is_paused = false;
         Ok(())
     }
 }

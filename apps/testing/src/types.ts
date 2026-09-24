@@ -72,6 +72,7 @@ export interface MemberInfo {
   actionAllowanceUsed: string
   spendLimit?: string
   spentCurrentCycle?: string
+  isPaused?: boolean
 }
 
 export interface ProposalInfo {

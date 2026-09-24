@@ -254,6 +254,7 @@ export async function getPoolDetails(poolAddress: string): Promise<{
         actionAllowanceUsed: formatUsdc(m.actionAllowanceUsed.toString()),
         spendLimit,
         spentCurrentCycle,
+        isPaused: Boolean(m.isPaused),
       }
     })
   )
@@ -602,18 +603,53 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       return { tx, pool: poolAddress, member: memberPda.toBase58(), aliasText }
     }
 
+    case 'set_paused': {
+      const { poolAddress, walletName, paused } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for set_paused')
+      if (!walletName || !(wallets as any)[walletName]) throw new Error(`Invalid wallet name: ${walletName}`)
+      if (typeof paused !== 'boolean') throw new Error('Missing or invalid paused parameter for set_paused')
+
+      const memberKp = (wallets as any)[walletName]
+      const poolPubkey = new PublicKey(poolAddress)
+      const [memberPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('member'), poolPubkey.toBuffer(), memberKp.publicKey.toBuffer()],
+        programId
+      )
+
+      const tx = await program.methods
+        .setPaused(paused)
+        .accounts({
+          memberWallet: memberKp.publicKey,
+          member: memberPda,
+          pool: poolPubkey,
+        })
+        .signers([memberKp])
+        .rpc()
+
+      return { tx, pool: poolAddress, member: memberPda.toBase58(), paused }
+    }
+
     case 'roll_cycle': {
-      const { poolAddress } = payload
+      const { poolAddress, crankerWallet } = payload
       if (!poolAddress) throw new Error('Missing poolAddress for roll_cycle')
       const poolPubkey = new PublicKey(poolAddress)
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const currentCycle = new BN(poolAccount.currentCycle.toString())
       const nextCycle = currentCycle.addn(1)
 
+      const poolMembers = await program.account.member.all([
+        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+      ])
       const poolProposals = await program.account.proposal.all([
         { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
       ])
       const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
+
+      // Members must be passed as writable so roll_cycle updates funded statuses and moves surplus
+      for (const item of poolMembers) {
+        remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
+      }
+
       for (const item of poolProposals) {
         const p = item.account
         const stateIsActive = p.state.open || p.state.queued
@@ -638,12 +674,18 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         }
       }
 
+      const crankerKp = crankerWallet && (wallets as Record<string, Keypair>)[crankerWallet]
+        ? (wallets as Record<string, Keypair>)[crankerWallet]
+        : wallets.administrator
+
       const tx = await program.methods
         .rollCycle()
         .accounts({
           pool: poolPubkey,
+          cranker: crankerKp.publicKey,
         })
         .remainingAccounts(remainingAccounts)
+        .signers([crankerKp])
         .rpc()
 
       return { tx, pool: poolAddress }
@@ -657,10 +699,19 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const currentCycle = new BN(poolAccount.currentCycle.toString())
       const nextCycle = currentCycle.addn(1)
 
+      const poolMembers = await program.account.member.all([
+        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+      ])
       const poolProposals = await program.account.proposal.all([
         { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
       ])
       const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
+
+      // Members must be passed as writable so test_roll_cycle updates funded statuses and moves surplus
+      for (const item of poolMembers) {
+        remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
+      }
+
       for (const item of poolProposals) {
         const p = item.account
         const stateIsActive = p.state.open || p.state.queued

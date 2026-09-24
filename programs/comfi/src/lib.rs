@@ -52,6 +52,10 @@ pub mod comfi {
         pool::pool_handlers::set_alias(ctx, alias_hash, encryption_public_key)
     }
 
+    pub fn set_paused(ctx: Context<MemberOnly>, paused: bool) -> Result<()> {
+        pool::pool_handlers::set_paused(ctx, paused)
+    }
+
     pub fn run_sponsored_set_alias(
         ctx: Context<RunSponsoredSetAlias>,
         quote: SponsorQuote,
@@ -221,5 +225,9 @@ pub enum ComfiError {
     ClosureRefundAlreadyClaimed,
     #[msg("No refund is owed to this member.")]
     NoRefundOwed,
+    #[msg("The cycle period has passed. A roll_cycle operation must be triggered before any other operations can be done.")]
+    CycleRollRequired,
+    #[msg("All pool members must be provided to roll_cycle to update member funded statuses.")]
+    IncompleteMemberList,
 }
 

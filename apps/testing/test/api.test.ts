@@ -49,6 +49,20 @@ test('executeAction escalates on missing required poolAddress parameter for pool
 
   await assert.rejects(
     async () => {
+      await executeAction('set_paused', { walletName: 'creator', paused: true })
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('set_paused', { poolAddress: '11111111111111111111111111111111', walletName: 'creator' })
+    },
+    { message: /Missing or invalid paused parameter/ }
+  )
+
+  await assert.rejects(
+    async () => {
       await executeAction('roll_cycle', {})
     },
     { message: /Missing poolAddress/ }
@@ -157,3 +171,21 @@ test('toExecutionModeArg converts string modes to Anchor instruction object repr
   assert.deepEqual(toExecutionModeArg(undefined), { onDeadline: {} })
 })
 
+import { processPoolCycleRoll } from '../../../scripts/crank-keeper.mjs'
+
+test('processPoolCycleRoll skips pool if cycle has not elapsed yet', async () => {
+  const futureStart = Math.floor(Date.now() / 1000) + 10000
+  const mockPoolItem = {
+    publicKey: { toBase58: () => 'MockPool111111111111111111111111111111111' },
+    account: {
+      currentCycle: 0,
+      cycleDuration: 3600,
+      startTime: futureStart,
+      voteThreshold: 2,
+    }
+  }
+
+  const result = await processPoolCycleRoll(null, mockPoolItem, null)
+  assert.equal(result.rolled, false)
+  assert.equal(result.reason, 'cycle_not_elapsed')
+})

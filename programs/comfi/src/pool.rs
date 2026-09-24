@@ -233,6 +233,8 @@ pub struct RunSponsoredSetAlias<'info> {
 pub struct RollCycle<'info> {
     #[account(mut)]
     pub pool: Account<'info, Pool>,
+    #[account(mut)]
+    pub cranker: Option<Signer<'info>>,
 }
 
 #[derive(Accounts)]
@@ -539,6 +541,28 @@ impl Pool {
         Ok(())
     }
 
+    pub fn ensure_cycle_current_at(&self, current_timestamp: i64) -> Result<()> {
+        if !self.is_closing {
+            let next_start = self
+                .cycle_started_at
+                .checked_add(self.cycle_duration_seconds)
+                .ok_or(ComfiError::MathOverflow)?;
+            require!(
+                current_timestamp < next_start,
+                ComfiError::CycleRollRequired
+            );
+        }
+        Ok(())
+    }
+
+    pub fn ensure_cycle_current(&self) -> Result<()> {
+        if !self.is_closing && !self.testing_enabled {
+            let now = Clock::get()?.unix_timestamp;
+            self.ensure_cycle_current_at(now)?;
+        }
+        Ok(())
+    }
+
     pub fn enter_closure(&mut self) {
         self.is_closing = true;
         self.closing_non_conferred_basis = self.total_non_conferred_capital;
@@ -607,10 +631,11 @@ pub struct Member {
     pub total_contributions: u64,
     pub surplus_cycle: u64,
     pub funded_cycle: u64,
+    pub is_paused: bool,
 }
 
 impl Member {
-    pub const SPACE: usize = 8 + 224;
+    pub const SPACE: usize = 8 + 225;
 
     pub fn can_request_spend(&self) -> bool {
         matches!(
@@ -620,7 +645,10 @@ impl Member {
     }
 
     pub fn is_funded_for_pool(&self, pool: &Pool) -> bool {
-        self.is_funded && self.deposited_total >= pool.member_obligation_amount
+        self.is_funded
+            && !self.is_paused
+            && self.funded_cycle == pool.current_cycle
+            && self.deposited_total >= pool.member_obligation_amount
     }
 
     pub fn non_conferred_amount(&self) -> u64 {
@@ -637,14 +665,18 @@ impl Member {
 
     pub fn sync_surplus(&mut self, pool: &mut Pool) {
         if pool.current_cycle > self.surplus_cycle {
-            if self.surplus_amount > 0 {
-                let consumed = self.surplus_amount;
-                self.surplus_amount = 0;
+            let obligation = pool.member_obligation_amount;
+            if self.is_paused {
+                self.is_funded = false;
+            } else if self.surplus_amount >= obligation && obligation > 0 {
+                let consumed = obligation;
+                self.surplus_amount = self.surplus_amount.saturating_sub(consumed);
                 pool.total_non_conferred_capital = pool.total_non_conferred_capital.saturating_sub(consumed);
                 pool.total_conferred_capital = pool.total_conferred_capital.saturating_add(consumed);
-                if self.is_funded {
-                    self.funded_cycle = pool.current_cycle;
-                }
+                self.is_funded = true;
+                self.funded_cycle = pool.current_cycle;
+            } else {
+                self.is_funded = false;
             }
             self.surplus_cycle = pool.current_cycle;
         }
@@ -859,6 +891,7 @@ pub mod pool_handlers {
     pub fn join_pool(ctx: Context<JoinPool>, args: JoinPoolArgs) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     pool.ensure_not_closing()?;
+    pool.ensure_cycle_current()?;
     require!(
         pool.member_count < pool.member_cap,
         ComfiError::MemberCapReached
@@ -928,6 +961,7 @@ pub mod pool_handlers {
     member.bump = ctx.bumps.member;
     member.surplus_cycle = pool.current_cycle;
     member.funded_cycle = if is_funded { pool.current_cycle } else { 0 };
+    member.is_paused = false;
     Ok(())
 }
 
@@ -935,6 +969,7 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
     require!(amount > 0, ComfiError::InvalidAmount);
     let pool = &mut ctx.accounts.pool;
     pool.ensure_not_closing()?;
+    pool.ensure_cycle_current()?;
 
     transfer_user_tokens(
         &ctx.accounts.token_program,
@@ -954,71 +989,27 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         .checked_add(amount)
         .ok_or(ComfiError::MathOverflow)?;
 
-    let current_obligation = pool.member_obligation_amount;
-    let (surplus_addition, becomes_funded, delta_conferred, delta_non_conferred) = if !member.is_funded {
-        if next_total >= current_obligation {
-            let excess = next_total
-                .checked_sub(current_obligation)
-                .ok_or(ComfiError::MathOverflow)?;
-            (excess, true, current_obligation, (amount as i128) - (current_obligation as i128))
-        } else {
-            (0, false, 0u64, amount as i128)
-        }
-    } else if member.funded_cycle < pool.current_cycle {
-        if amount >= current_obligation {
-            let excess = amount
-                .checked_sub(current_obligation)
-                .ok_or(ComfiError::MathOverflow)?;
-            (excess, true, current_obligation, excess as i128)
-        } else {
-            (0, false, 0u64, amount as i128)
-        }
-    } else {
-        (amount, true, 0u64, amount as i128)
-    };
-
     let new_surplus = member
         .surplus_amount
-        .checked_add(surplus_addition)
+        .checked_add(amount)
         .ok_or(ComfiError::MathOverflow)?;
     require!(
         new_surplus <= pool.member_obligation_amount,
         ComfiError::OverfundingCapExceeded
     );
 
-    let was_funded = member.is_funded;
+    pool.total_non_conferred_capital = pool
+        .total_non_conferred_capital
+        .checked_add(amount)
+        .ok_or(ComfiError::MathOverflow)?;
+
     member.sync_benefit(pool)?;
 
     member.deposited_total = next_total;
     member.total_contributions = next_contributions;
     member.surplus_amount = new_surplus;
-    member.is_funded = becomes_funded;
     member.surplus_cycle = pool.current_cycle;
-    if becomes_funded {
-        member.funded_cycle = pool.current_cycle;
-    }
-    if !was_funded && becomes_funded {
-        pool.funded_member_count = pool
-            .funded_member_count
-            .checked_add(1)
-            .ok_or(ComfiError::MathOverflow)?;
-    }
-    if delta_non_conferred >= 0 {
-        pool.total_non_conferred_capital = pool
-            .total_non_conferred_capital
-            .checked_add(delta_non_conferred as u64)
-            .ok_or(ComfiError::MathOverflow)?;
-    } else {
-        let neg = (-delta_non_conferred) as u64;
-        pool.total_non_conferred_capital = pool
-            .total_non_conferred_capital
-            .checked_sub(neg)
-            .ok_or(ComfiError::MathOverflow)?;
-    }
-    pool.total_conferred_capital = pool
-        .total_conferred_capital
-        .checked_add(delta_conferred)
-        .ok_or(ComfiError::MathOverflow)?;
+
     Ok(())
 }
 
@@ -1027,6 +1018,8 @@ pub fn set_alias(
     alias_hash: [u8; 32],
     encryption_public_key: [u8; 32],
 ) -> Result<()> {
+    ctx.accounts.pool.ensure_not_closing()?;
+    ctx.accounts.pool.ensure_cycle_current()?;
     let member = &mut ctx.accounts.member;
     member.alias_hash = alias_hash;
     member.encryption_public_key = encryption_public_key;
@@ -1037,12 +1030,22 @@ pub fn set_alias(
     Ok(())
 }
 
+pub fn set_paused(ctx: Context<MemberOnly>, paused: bool) -> Result<()> {
+    ctx.accounts.pool.ensure_not_closing()?;
+    ctx.accounts.pool.ensure_cycle_current()?;
+    let member = &mut ctx.accounts.member;
+    member.is_paused = paused;
+    Ok(())
+}
+
 pub fn run_sponsored_set_alias(
     ctx: Context<RunSponsoredSetAlias>,
     quote: SponsorQuote,
     alias_hash: [u8; 32],
     encryption_public_key: [u8; 32],
 ) -> Result<()> {
+    ctx.accounts.pool.ensure_not_closing()?;
+    ctx.accounts.pool.ensure_cycle_current()?;
     require!(
         quote.action == SponsoredAction::SetAlias,
         ComfiError::WrongSponsoredAction
@@ -1189,6 +1192,82 @@ pub fn process_cycle_proposals<'info>(
     Ok(())
 }
 
+pub fn process_cycle_members<'info>(
+    pool_key: Pubkey,
+    pool: &mut Pool,
+    remaining_accounts: &[AccountInfo<'info>],
+) -> Result<()> {
+    let mut processed_members: usize = 0;
+    let mut newly_funded_count: u32 = 0;
+
+    for account_info in remaining_accounts.iter() {
+        if !account_info.is_writable || account_info.data_len() < 8 {
+            continue;
+        }
+        let data = account_info.try_borrow_data()?;
+        if &data[..8] != Member::DISCRIMINATOR {
+            continue;
+        }
+        drop(data);
+
+        let mut data: &[u8] = &account_info.try_borrow_data()?;
+        let mut member = match Member::try_deserialize(&mut data) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if member.pool != pool_key {
+            continue;
+        }
+
+        processed_members = processed_members
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+
+        let obligation = pool.member_obligation_amount;
+        if member.is_paused {
+            member.is_funded = false;
+        } else if member.surplus_amount >= obligation && obligation > 0 {
+            let consumed = obligation;
+            member.surplus_amount = member
+                .surplus_amount
+                .checked_sub(consumed)
+                .ok_or(ComfiError::MathOverflow)?;
+            pool.total_non_conferred_capital = pool
+                .total_non_conferred_capital
+                .saturating_sub(consumed);
+            pool.total_conferred_capital = pool
+                .total_conferred_capital
+                .checked_add(consumed)
+                .ok_or(ComfiError::MathOverflow)?;
+            member.is_funded = true;
+            member.funded_cycle = pool.current_cycle;
+            newly_funded_count = newly_funded_count
+                .checked_add(1)
+                .ok_or(ComfiError::MathOverflow)?;
+        } else {
+            member.is_funded = false;
+        }
+        member.surplus_cycle = pool.current_cycle;
+
+        member.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
+    }
+
+    if !pool.testing_enabled {
+        require!(
+            processed_members == pool.member_count as usize,
+            ComfiError::IncompleteMemberList
+        );
+        pool.funded_member_count = newly_funded_count;
+    } else if processed_members > 0 {
+        if processed_members == pool.member_count as usize {
+            pool.funded_member_count = newly_funded_count;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
     let pool_key = ctx.accounts.pool.key();
     let pool = &mut ctx.accounts.pool;
@@ -1211,7 +1290,28 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
     pool.cycle_started_at = next_start;
     pool.apply_pending_config();
 
+    process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
     process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+
+    if let Some(cranker) = &ctx.accounts.cranker {
+        let rent = Rent::get()?;
+        let min_rent = rent.minimum_balance(pool.to_account_info().data_len());
+        let pool_lamports = pool.to_account_info().lamports();
+        let fee_reimbursement = 10_000u64.min(pool_lamports.saturating_sub(min_rent));
+        if fee_reimbursement > 0 {
+            **pool.to_account_info().try_borrow_mut_lamports()? = pool
+                .to_account_info()
+                .lamports()
+                .checked_sub(fee_reimbursement)
+                .ok_or(ComfiError::MathOverflow)?;
+            **cranker.to_account_info().try_borrow_mut_lamports()? = cranker
+                .to_account_info()
+                .lamports()
+                .checked_add(fee_reimbursement)
+                .ok_or(ComfiError::MathOverflow)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -1229,6 +1329,7 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
 
+    process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
     process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
     Ok(())
 }
@@ -1248,6 +1349,7 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
 
+    process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
     process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
     Ok(())
 }
@@ -1293,6 +1395,7 @@ pub fn test_reset_member_allowance(ctx: Context<TestMemberOnly>) -> Result<()> {
 
 pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs) -> Result<()> {
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
+    ctx.accounts.pool.ensure_cycle_current()?;
     require!(args.amount > 0, ComfiError::InvalidAmount);
     require!(
         ctx.accounts.member.can_request_spend(),
@@ -1319,6 +1422,7 @@ pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs)
 
 pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> Result<()> {
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
+    ctx.accounts.pool.ensure_cycle_current()?;
     require!(
         ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool),
         ComfiError::MemberNotFunded
@@ -1382,6 +1486,7 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
 pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
     let pool = &ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
+    pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     let voter = &mut ctx.accounts.voter;
     require!(
@@ -1427,6 +1532,7 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
 pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
     let clock = Clock::get()?;
     let pool = &ctx.accounts.pool;
+    pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     require!(
         proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
@@ -1456,6 +1562,7 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
 
 pub fn execute_close_pool(ctx: Context<ExecuteClosePool>) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
+    pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     assert_executable(proposal)?;
     match proposal.action {
@@ -1474,6 +1581,7 @@ pub fn execute_close_pool(ctx: Context<ExecuteClosePool>) -> Result<()> {
 pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
     let pool = &ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
+    pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     assert_executable(proposal)?;
     let (target, cap) = match proposal.action {
@@ -1503,6 +1611,7 @@ pub fn execute_configuration_modification(
 ) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
+    pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     assert_executable(proposal)?;
     let (
@@ -1572,6 +1681,7 @@ pub fn execute_configuration_modification(
 pub fn spend(ctx: Context<Spend>) -> Result<()> {
     let request = &mut ctx.accounts.request;
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
+    ctx.accounts.pool.ensure_cycle_current()?;
     require!(
         request.status == WithdrawalStatus::Pending,
         ComfiError::RequestNotPending
@@ -1886,6 +1996,7 @@ mod tests {
             total_contributions: 100,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         assert!(member.can_request_spend());
@@ -1921,6 +2032,7 @@ mod tests {
             total_contributions: 40,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Deposited 40 < 50 obligation: not counted as funded member
@@ -1996,7 +2108,7 @@ mod tests {
         assert_eq!(Pool::SPACE, 8 + 360);
         assert_eq!(
             Member::SPACE,
-            8 + 224
+            8 + 225
         );
         assert_eq!(SpenderCycle::SPACE, 8 + 32 + 32 + 8 + 8 + 8 + 1);
         assert_eq!(
@@ -2521,6 +2633,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Member B with max allowed surplus (100 total = 50 obligation + 50 surplus)
@@ -2544,6 +2657,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -2660,6 +2774,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
         c1.sync_benefit(&pool).unwrap();
         assert_eq!(c1.cumulative_benefit_received, 100);
@@ -2685,6 +2800,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
         m3.sync_benefit(&pool).unwrap();
         assert_eq!(m3.cumulative_benefit_received, 0); // No spends happened while M3 was in pool!
@@ -2749,6 +2865,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Member B (contributed 100)
@@ -2772,6 +2889,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Delegated spend of 60 occurs
@@ -2825,6 +2943,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Member B (unfunded, only 20 deposited, obligation is 50)
@@ -2848,6 +2967,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -2916,6 +3036,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
         assert_eq!(member.total_contributions, 50);
 
@@ -2983,6 +3104,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 1,
             funded_cycle: 1,
+            is_paused: false,
         };
         let mut member_b = Member {
             pool: pool.global,
@@ -3004,6 +3126,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 1,
             funded_cycle: 1,
+            is_paused: false,
         };
         pool.funded_member_count = 2;
         vault_balance += 100;
@@ -3018,8 +3141,10 @@ mod tests {
         pool.current_cycle = 2;
         member_a.deposited_total += 50;
         member_a.total_contributions += 50;
+        member_a.funded_cycle = 2;
         member_b.deposited_total += 50;
         member_b.total_contributions += 50;
+        member_b.funded_cycle = 2;
         vault_balance += 100;
 
         // Spend 2 in Cycle 2 (t = 2 < y): 40 USDC
@@ -3035,12 +3160,15 @@ mod tests {
         member_a.total_contributions += 80;
         member_a.surplus_amount = 30;
         member_a.surplus_cycle = 3;
+        member_a.funded_cycle = 3;
         pool.total_non_conferred_capital += 30;
         vault_balance += 80;
 
         // Member B deposits 50 obligation = 50
         member_b.deposited_total += 50;
         member_b.total_contributions += 50;
+        member_b.funded_cycle = 3;
+        member_b.surplus_cycle = 3;
         vault_balance += 50;
 
         // Member C joins: funds for z = 2 cycles (50 obligation + 50 surplus prepayment = 100)
@@ -3064,6 +3192,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 3,
             funded_cycle: 3,
+            is_paused: false,
         };
         pool.total_non_conferred_capital += 50;
         vault_balance += 100;
@@ -3089,6 +3218,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 3,
             funded_cycle: 3,
+            is_paused: false,
         };
         vault_balance += 50;
         pool.funded_member_count = 4; // A, B, C, D all funded
@@ -3273,6 +3403,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         let mut member_b = Member {
@@ -3295,6 +3426,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Snapshot closure pro-rata basis on first claim
@@ -3354,6 +3486,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 1, // Deposited in Cycle 1
             funded_cycle: 1,
+            is_paused: false,
         };
         pool.total_non_conferred_capital = 50;
         pool.total_conferred_capital = 50;
@@ -3401,6 +3534,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // A spend of 40 occurs in the pool
@@ -3449,6 +3583,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         let mut member_b = Member {
@@ -3471,6 +3606,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Snapshot basis
@@ -3535,6 +3671,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         let mut member_b = Member {
@@ -3557,6 +3694,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         let mut member_c = Member {
@@ -3579,6 +3717,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Snapshot basis
@@ -3804,6 +3943,7 @@ mod tests {
             total_contributions: 100,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         let withdrawal_amount: u64 = 60;
@@ -3852,6 +3992,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Invariant: prior to voting sync, voter has 0 cumulative benefit totaled
@@ -3898,6 +4039,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
         assert!(!unfunded_voter.is_funded_for_pool(&pool));
     }
@@ -4026,8 +4168,9 @@ mod tests {
             allowance_cycle: 0,
             action_allowance_used: 0,
             bump: 255,
-            surplus_cycle: 0,
-            funded_cycle: 0,
+            surplus_cycle: 1,
+            funded_cycle: 1,
+            is_paused: false,
         };
 
         // Initially, voter has 0 cumulative benefit totaled
@@ -4060,6 +4203,7 @@ mod tests {
 
         // Cycle 2: A new spend of 60 USDC occurs (20 USDC per member)
         pool.current_cycle = 2;
+        voter.funded_cycle = 2;
         let spend_cycle_2: u64 = 60;
         let benefit_delta_2 = (spend_cycle_2 as u128 * BENEFIT_SCALE) / pool.funded_member_count as u128;
         pool.cumulative_benefit_per_member += benefit_delta_2;
@@ -4143,6 +4287,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0, // Lower than pool.current_cycle
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // After VULN-04 remediation: sync_surplus consumes elapsed surplus into conferred capital
@@ -4180,6 +4325,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         let spend_amount: u64 = 40;
@@ -4325,6 +4471,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 1, // Cycle 1 < pool.current_cycle (2)
             funded_cycle: 1,
+            is_paused: false,
         };
 
         // Even though pool.is_closing is true, sync_surplus must consume
@@ -4359,6 +4506,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // When a proposal is approved for withdrawal, requires_proposal is true.
@@ -4437,6 +4585,7 @@ mod tests {
             bump: 255,
             surplus_cycle: 0,
             funded_cycle: 0,
+            is_paused: false,
         };
 
         // Cycle rolls from 0 to 1
@@ -4477,6 +4626,296 @@ mod tests {
         assert_eq!(pool.total_non_conferred_capital, 0);
         assert_eq!(member.surplus_amount, 0);
         assert_eq!(member.funded_cycle, 1);
+    }
+
+    #[test]
+    fn test_cycle_expiry_enforcement_blocks_operations() {
+        let mut pool = create_test_pool();
+        pool.cycle_started_at = 1000;
+        pool.cycle_duration_seconds = 100; // next_start = 1100
+
+        // At timestamp 1050 (< 1100), cycle is active and operations are permitted:
+        assert!(pool.ensure_cycle_current_at(1050).is_ok());
+
+        // At timestamp 1100 (>= 1100), cycle has expired and roll_cycle is required:
+        let err = pool.ensure_cycle_current_at(1100).unwrap_err();
+        assert_eq!(err, ComfiError::CycleRollRequired.into());
+
+        // At timestamp 1200 (> 1100), still requires roll_cycle:
+        let err2 = pool.ensure_cycle_current_at(1200).unwrap_err();
+        assert_eq!(err2, ComfiError::CycleRollRequired.into());
+
+        // When pool is closing, cycle expiry is not enforced:
+        pool.is_closing = true;
+        assert!(pool.ensure_cycle_current_at(1200).is_ok());
+    }
+
+    #[test]
+    fn test_roll_cycle_updates_members_and_moves_surplus() {
+        let mut pool = create_test_pool();
+        pool.member_obligation_amount = 50;
+        pool.total_non_conferred_capital = 50; // Member A's 50 surplus
+        pool.total_conferred_capital = 100;
+        pool.member_count = 2;
+        pool.funded_member_count = 2;
+        pool.current_cycle = 0;
+
+        let mut member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100, // 50 obligation + 50 surplus
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+        };
+
+        let mut member_b = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+        };
+
+        // Advance pool cycle from 0 to 1
+        pool.current_cycle = 1;
+
+        // Sync both members to the new cycle:
+        member_a.sync_surplus(&mut pool);
+        member_b.sync_surplus(&mut pool);
+
+        // Member A had 50 surplus: consumed into conferred capital, funded for Cycle 1!
+        assert_eq!(member_a.surplus_amount, 0);
+        assert!(member_a.is_funded);
+        assert_eq!(member_a.funded_cycle, 1);
+        assert_eq!(member_a.surplus_cycle, 1);
+
+        // Member B had 0 surplus: is_funded flipped to false!
+        assert_eq!(member_b.surplus_amount, 0);
+        assert!(!member_b.is_funded);
+        assert_eq!(member_b.surplus_cycle, 1);
+
+        // Pool capital updated: non-conferred reduced to 0, conferred increased to 150
+        assert_eq!(pool.total_non_conferred_capital, 0);
+        assert_eq!(pool.total_conferred_capital, 150);
+
+        // Member A is funded for pool in cycle 1, Member B is NOT:
+        assert!(member_a.is_funded_for_pool(&pool));
+        assert!(!member_b.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_inactive_members_lose_voting_status_in_new_cycle() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+
+        let member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+        };
+
+        // In Cycle 0: member is funded
+        assert!(member.is_funded_for_pool(&pool));
+
+        // When cycle rolls to Cycle 1 without member depositing:
+        pool.current_cycle = 1;
+        // Inactive member loses voting/funded status immediately:
+        assert!(!member.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_cranker_lamport_fee_reimbursement_calculation() {
+        let pool_lamports: u64 = 100_000;
+        let min_rent: u64 = 50_000;
+        let available = pool_lamports.saturating_sub(min_rent);
+        let reimbursement = 10_000u64.min(available);
+        assert_eq!(reimbursement, 10_000);
+
+        // When pool has barely enough lamports for rent:
+        let pool_lamports_low: u64 = 55_000;
+        let available_low = pool_lamports_low.saturating_sub(min_rent);
+        let reimbursement_low = 10_000u64.min(available_low);
+        assert_eq!(reimbursement_low, 5_000);
+
+        // When pool is at or below rent exemption:
+        let pool_lamports_min: u64 = 50_000;
+        let available_zero = pool_lamports_min.saturating_sub(min_rent);
+        let reimbursement_zero = 10_000u64.min(available_zero);
+        assert_eq!(reimbursement_zero, 0);
+    }
+
+    #[test]
+    fn test_funded_status_only_flips_on_cycle_rollover_not_deposit() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+        };
+
+        // Member is funded in Cycle 0
+        assert!(member.is_funded_for_pool(&pool));
+
+        // Cycle rolls from 0 to 1 without member having surplus
+        pool.current_cycle = 1;
+        member.sync_surplus(&mut pool);
+        assert!(!member.is_funded);
+        assert!(!member.is_funded_for_pool(&pool));
+
+        // In Cycle 1, member deposits 50 USDC.
+        // Funded status must NOT flip mid-cycle during deposit!
+        let deposit_amount = 50u64;
+        member.deposited_total += deposit_amount;
+        member.total_contributions += deposit_amount;
+        member.surplus_amount += deposit_amount;
+        pool.total_non_conferred_capital += deposit_amount;
+
+        // Still unfunded for Cycle 1:
+        assert!(!member.is_funded);
+        assert!(!member.is_funded_for_pool(&pool));
+        assert_eq!(member.surplus_amount, 50);
+
+        // When cycle rolls to Cycle 2, rollover consumes surplus and flips funded status:
+        pool.current_cycle = 2;
+        member.sync_surplus(&mut pool);
+
+        assert!(member.is_funded);
+        assert_eq!(member.funded_cycle, 2);
+        assert_eq!(member.surplus_amount, 0);
+        assert_eq!(pool.total_conferred_capital, 50);
+        assert!(member.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_member_pause_and_unpause_cycle_rollover_lifecycle() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100, // 50 obligation + 50 surplus prepaid
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+        };
+
+        // Funded in Cycle 0
+        assert!(member.is_funded_for_pool(&pool));
+
+        // Member is going away for Cycle 1 and declines participation:
+        member.is_paused = true;
+
+        // Immediately cannot vote in pool:
+        assert!(!member.is_funded_for_pool(&pool));
+
+        // Cycle rolls from 0 to 1
+        pool.current_cycle = 1;
+        member.sync_surplus(&mut pool);
+
+        // Member did NOT pay obligation; surplus was preserved at 50!
+        assert_eq!(member.surplus_amount, 50);
+        assert!(!member.is_funded);
+        assert!(!member.is_funded_for_pool(&pool));
+
+        // Member returns and unpauses:
+        member.is_paused = false;
+
+        // Mid-cycle during Cycle 1, member cannot vote (not funded for cycle 1):
+        assert!(!member.is_funded_for_pool(&pool));
+
+        // When cycle rolls to Cycle 2, member resumes paying obligation from surplus:
+        pool.current_cycle = 2;
+        member.sync_surplus(&mut pool);
+
+        // Surplus consumed, funded status restored, voting restored!
+        assert_eq!(member.surplus_amount, 0);
+        assert!(member.is_funded);
+        assert_eq!(member.funded_cycle, 2);
+        assert!(member.is_funded_for_pool(&pool));
     }
 }
 

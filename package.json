@@ -17,6 +17,7 @@
     "localnet:start": "bash scripts/localnet-start.sh",
     "localnet:setup": "bash scripts/localnet-setup.sh",
     "localnet:create-test-pool": "node scripts/create-test-pool.mjs",
+    "keeper:crank": "node scripts/crank-keeper.mjs",
     "test:e2e": "playwright test"
   },
   "engines": {
