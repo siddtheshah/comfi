@@ -1437,12 +1437,17 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
     let deadline_cycles = ctx.accounts.pool.get_proposal_deadline_cycles(&action);
     require!(deadline_cycles > 0, ComfiError::InvalidProposalDeadline);
     if let ProposalAction::ConfigurationModification {
+        vote_threshold,
         spender_limit_deadline_cycles,
         withdrawal_deadline_cycles,
         config_modification_deadline_cycles,
         ..
     } = action
     {
+        require!(
+            vote_threshold >= 5001 && vote_threshold <= 10_000,
+            ComfiError::InvalidVoteThreshold
+        );
         require!(
             spender_limit_deadline_cycles > 0
                 && withdrawal_deadline_cycles > 0
@@ -1656,7 +1661,7 @@ pub fn execute_configuration_modification(
         _ => return err!(ComfiError::WrongProposalAction),
     };
     require!(
-        vote_threshold >= 100 && vote_threshold <= 10_000,
+        vote_threshold >= 5001 && vote_threshold <= 10_000,
         ComfiError::InvalidVoteThreshold
     );
     require!(
@@ -5049,6 +5054,52 @@ mod tests {
         unfunded_member.funded_cycle = pool.current_cycle;
         unfunded_member.deposited_total = pool.member_obligation_amount;
         assert!(unfunded_member.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_configuration_modification_below_majority_threshold_rejected() {
+        let _pool = create_test_pool();
+        let invalid_action_5000 = ProposalAction::ConfigurationModification {
+            vote_threshold: 5000, // 50.00% is below strict majority 5001 bps
+            cycle_duration_seconds: 3600,
+            member_obligation_amount: 100,
+            spender_limit_deadline_cycles: 1,
+            withdrawal_deadline_cycles: 1,
+            config_modification_deadline_cycles: 2,
+            spender_limit_execution_mode: ExecutionMode::OnDeadline,
+            withdrawal_execution_mode: ExecutionMode::OnDeadline,
+            config_modification_execution_mode: ExecutionMode::OnDeadline,
+        };
+
+        if let ProposalAction::ConfigurationModification { vote_threshold, .. } = invalid_action_5000 {
+            let res: Result<()> = if vote_threshold >= 5001 && vote_threshold <= 10_000 {
+                Ok(())
+            } else {
+                err!(ComfiError::InvalidVoteThreshold)
+            };
+            assert_eq!(res.unwrap_err(), ComfiError::InvalidVoteThreshold.into());
+        }
+
+        let valid_action_5001 = ProposalAction::ConfigurationModification {
+            vote_threshold: 5001,
+            cycle_duration_seconds: 3600,
+            member_obligation_amount: 100,
+            spender_limit_deadline_cycles: 1,
+            withdrawal_deadline_cycles: 1,
+            config_modification_deadline_cycles: 2,
+            spender_limit_execution_mode: ExecutionMode::OnDeadline,
+            withdrawal_execution_mode: ExecutionMode::OnDeadline,
+            config_modification_execution_mode: ExecutionMode::OnDeadline,
+        };
+
+        if let ProposalAction::ConfigurationModification { vote_threshold, .. } = valid_action_5001 {
+            let res: Result<()> = if vote_threshold >= 5001 && vote_threshold <= 10_000 {
+                Ok(())
+            } else {
+                err!(ComfiError::InvalidVoteThreshold)
+            };
+            assert!(res.is_ok());
+        }
     }
 }
 

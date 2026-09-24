@@ -131,8 +131,9 @@ pool.has_pending_config = true;
 
 #### Resolution
 - Included `ProposalAction::ConfigurationModification` in `Proposal::required_votes_for_pool` with `threshold_bps.max(5001)`.
+- Added strict parameter validation (`vote_threshold >= 5001 && vote_threshold <= 10_000`) in both `create_proposal` and `execute_configuration_modification` so any attempt to lower the threshold below the 50% majority floor fails validation immediately.
 - Updated `execute_configuration_modification` to stage all modified configuration fields into `pool.pending_*` and set `pool.has_pending_config = true`, deferring live state mutations until `apply_pending_config()` is executed at cycle boundary.
-- Verified in unit tests `test_comfi_sec_02_configuration_modification_majority_floor_and_staging` and `test_configuration_modification_deferred_until_cycle_roll`.
+- Verified in unit tests `test_comfi_sec_02_configuration_modification_majority_floor_and_staging`, `test_configuration_modification_below_majority_threshold_rejected`, and `test_configuration_modification_deferred_until_cycle_roll`.
 
 ---
 
