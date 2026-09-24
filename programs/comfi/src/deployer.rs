@@ -53,7 +53,7 @@ pub fn validate_create_pool(paused_new_pools: bool, args: &CreatePoolArgs) -> Re
         ComfiError::DepositBelowMinimum
     );
     require!(
-        args.vote_threshold >= 100 && args.vote_threshold <= 10_000,
+        args.vote_threshold >= 5001 && args.vote_threshold <= 10_000,
         ComfiError::InvalidVoteThreshold
     );
     require!(
@@ -316,7 +316,7 @@ mod tests {
             member_obligation_amount: 50,
             initial_deposit: 100,
             enrollment_fee: 10,
-            vote_threshold: 5000,
+            vote_threshold: 5001,
             voting_period_seconds: 604800,
             timelock_seconds: 86400,
             cycle_duration_seconds: 2592000,
@@ -391,9 +391,13 @@ mod tests {
     #[test]
     fn test_validate_create_pool_invalid_vote_threshold_below_min() {
         let mut args = valid_args();
-        args.vote_threshold = 99;
+        args.vote_threshold = 5000; // Below strict majority minimum floor (5001 bps)
         let err = validate_create_pool(false, &args).unwrap_err();
         assert_eq!(err, ComfiError::InvalidVoteThreshold.into());
+
+        args.vote_threshold = 99;
+        let err2 = validate_create_pool(false, &args).unwrap_err();
+        assert_eq!(err2, ComfiError::InvalidVoteThreshold.into());
     }
 
     #[test]

@@ -760,7 +760,10 @@ impl Proposal {
         let mut threshold_bps = self.vote_threshold as u64;
         if matches!(
             self.action,
-            ProposalAction::SetSpenderLimit { .. } | ProposalAction::ClosePool
+            ProposalAction::SetSpenderLimit { .. }
+                | ProposalAction::ClosePool
+                | ProposalAction::ApproveWithdrawal { .. }
+                | ProposalAction::ConfigurationModification { .. }
         ) {
             threshold_bps = threshold_bps.max(5001);
         }
@@ -1398,6 +1401,10 @@ pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs)
     ctx.accounts.pool.ensure_cycle_current()?;
     require!(args.amount > 0, ComfiError::InvalidAmount);
     require!(
+        ctx.accounts.member.is_funded_for_pool(&ctx.accounts.pool),
+        ComfiError::MemberNotFunded
+    );
+    require!(
         ctx.accounts.member.can_request_spend(),
         ComfiError::NotSpender
     );
@@ -1663,16 +1670,16 @@ pub fn execute_configuration_modification(
         ComfiError::InvalidProposalDeadline
     );
 
-    pool.vote_threshold = vote_threshold;
-    pool.cycle_duration_seconds = cycle_duration_seconds;
-    pool.member_obligation_amount = member_obligation_amount;
-    pool.spender_limit_deadline_cycles = spender_limit_deadline_cycles;
-    pool.withdrawal_deadline_cycles = withdrawal_deadline_cycles;
-    pool.config_modification_deadline_cycles = config_modification_deadline_cycles;
-    pool.spender_limit_execution_mode = spender_limit_execution_mode;
-    pool.withdrawal_execution_mode = withdrawal_execution_mode;
-    pool.config_modification_execution_mode = config_modification_execution_mode;
-    pool.has_pending_config = false;
+    pool.pending_vote_threshold = vote_threshold;
+    pool.pending_cycle_duration_seconds = cycle_duration_seconds;
+    pool.pending_member_obligation_amount = member_obligation_amount;
+    pool.pending_spender_limit_deadline_cycles = spender_limit_deadline_cycles;
+    pool.pending_withdrawal_deadline_cycles = withdrawal_deadline_cycles;
+    pool.pending_config_modification_deadline_cycles = config_modification_deadline_cycles;
+    pool.pending_spender_limit_execution_mode = spender_limit_execution_mode;
+    pool.pending_withdrawal_execution_mode = withdrawal_execution_mode;
+    pool.pending_config_modification_execution_mode = config_modification_execution_mode;
+    pool.has_pending_config = true;
     proposal.state = ProposalState::Executed;
     Ok(())
 }
@@ -1688,6 +1695,10 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
     );
     require!(
         ctx.accounts.executor_member.is_funded_for_pool(&ctx.accounts.pool),
+        ComfiError::MemberNotFunded
+    );
+    require!(
+        ctx.accounts.requester_member.is_funded_for_pool(&ctx.accounts.pool),
         ComfiError::MemberNotFunded
     );
     require!(
@@ -4916,6 +4927,128 @@ mod tests {
         assert!(member.is_funded);
         assert_eq!(member.funded_cycle, 2);
         assert!(member.is_funded_for_pool(&pool));
+    }
+
+    #[test]
+    fn test_comfi_sec_01_approve_withdrawal_strict_majority_floor() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2;
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 1,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5000, // 50.00%
+        };
+
+        // For ApproveWithdrawal, strict majority floor (5001 bps) is enforced.
+        // In a 2-member pool: ceil(2 * 0.5001) = 2 votes required.
+        let required = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(required, 2);
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+
+        // In a 10-member pool with threshold set to 1000 bps (10%):
+        pool.funded_member_count = 10;
+        proposal.vote_threshold = 1000;
+        let required_10 = proposal.required_votes_for_pool(&pool).unwrap();
+        // ceil(10 * 0.5001) = 6 votes required
+        assert_eq!(required_10, 6);
+
+        proposal.yes_votes = 5;
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+
+        proposal.yes_votes = 6;
+        assert!(proposal.is_passed_for_pool(&pool).unwrap());
+    }
+
+    #[test]
+    fn test_comfi_sec_02_configuration_modification_majority_floor_and_staging() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2;
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ConfigurationModification {
+                vote_threshold: 6000,
+                cycle_duration_seconds: 3600,
+                member_obligation_amount: 100,
+                spender_limit_deadline_cycles: 2,
+                withdrawal_deadline_cycles: 2,
+                config_modification_deadline_cycles: 3,
+                spender_limit_execution_mode: ExecutionMode::ThresholdMet,
+                withdrawal_execution_mode: ExecutionMode::ThresholdMet,
+                config_modification_execution_mode: ExecutionMode::ThresholdMet,
+            },
+            yes_votes: 1,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5000, // 50.00%
+        };
+
+        // For ConfigurationModification, strict majority floor (5001 bps) is enforced.
+        // In a 2-member pool: ceil(2 * 0.5001) = 2 votes required.
+        let required = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(required, 2);
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+
+        proposal.yes_votes = 2;
+        assert!(proposal.is_passed_for_pool(&pool).unwrap());
+    }
+
+    #[test]
+    fn test_comfi_sec_06_unfunded_member_cannot_request_or_spend() {
+        let pool = create_test_pool();
+        let mut unfunded_member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Spender,
+            is_funded: false,
+            deposited_total: 0,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 0,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+        };
+
+        // Even with role Spender, unfunded member is rejected by is_funded_for_pool
+        assert!(!unfunded_member.is_funded_for_pool(&pool));
+
+        // When funded status is restored for the current cycle with deposited total >= obligation
+        unfunded_member.is_funded = true;
+        unfunded_member.funded_cycle = pool.current_cycle;
+        unfunded_member.deposited_total = pool.member_obligation_amount;
+        assert!(unfunded_member.is_funded_for_pool(&pool));
     }
 }
 

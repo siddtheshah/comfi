@@ -8,12 +8,12 @@ This document details critical and high-severity security vulnerabilities and at
 
 | Issue ID | Severity | Category | Description | Status |
 |---|---|---|---|---|
-| **COMFI-SEC-01** | **Critical** | Governance / Access Control | Missing strict majority floor on `ApproveWithdrawal` proposals enables single-voter fund drainage | Open |
-| **COMFI-SEC-02** | **Critical** | Governance / State Mutation | `ConfigurationModification` lacks majority floor and bypasses pending-state cycle staging | Open |
+| **COMFI-SEC-01** | **Critical** | Governance / Access Control | Missing strict majority floor on `ApproveWithdrawal` proposals enables single-voter fund drainage | **Resolved** |
+| **COMFI-SEC-02** | **Critical** | Governance / State Mutation | `ConfigurationModification` lacks majority floor and bypasses pending-state cycle staging | **Resolved** |
 | **COMFI-SEC-03** | **High** | Accounting / Liquidation | "Ghost Unfunded" exploit on pool closure: depositing 1 unit flips `is_funded` to false, evading spend attribution and draining senior Tier-1 refunds | **Resolved** |
 | **COMFI-SEC-04** | **High** | Governance / State Drift | Inactive members retain perpetual funded voting status across infinite future cycles | **Resolved** |
 | **COMFI-SEC-05** | **Medium** | Accounting / Governance DoS | Asymmetric `funded_member_count` updates permit counter inflation, diluting shared spend benefit deltas to zero and bricking voting quorums | **Resolved** |
-| **COMFI-SEC-06** | **Medium** | Spend Attribution Bypass | Unfunded members can request shared vendor spends without having benefits attributed to their closure basis | Open |
+| **COMFI-SEC-06** | **Medium** | Spend Attribution Bypass | Unfunded members can request shared vendor spends without having benefits attributed to their closure basis | **Resolved** |
 | **COMFI-SEC-07** | **Medium** | Math / Account Lockout | `deposit` underflow in `total_non_conferred_capital` permanently locks member accounts from re-funding | **Resolved** |
 
 ---
@@ -78,6 +78,11 @@ if matches!(
 }
 ```
 
+#### Resolution
+- Enforced strict majority floor (>= 5001 bps) in `validate_create_pool`, guaranteeing that all pools start with a strong consensus floor.
+- Included `ProposalAction::ApproveWithdrawal` in `Proposal::required_votes_for_pool` with `threshold_bps.max(5001)`.
+- Verified in unit test `test_comfi_sec_01_approve_withdrawal_strict_majority_floor` that sub-majority approvals fail in both 2-member and 10-member pools.
+
 ---
 
 ### COMFI-SEC-02: `ConfigurationModification` Lacks Majority Floor and Staging Mechanism
@@ -123,6 +128,11 @@ pool.pending_withdrawal_execution_mode = withdrawal_execution_mode;
 pool.pending_config_modification_execution_mode = config_modification_execution_mode;
 pool.has_pending_config = true;
 ```
+
+#### Resolution
+- Included `ProposalAction::ConfigurationModification` in `Proposal::required_votes_for_pool` with `threshold_bps.max(5001)`.
+- Updated `execute_configuration_modification` to stage all modified configuration fields into `pool.pending_*` and set `pool.has_pending_config = true`, deferring live state mutations until `apply_pending_config()` is executed at cycle boundary.
+- Verified in unit tests `test_comfi_sec_02_configuration_modification_majority_floor_and_staging` and `test_configuration_modification_deferred_until_cycle_roll`.
 
 ---
 
@@ -287,6 +297,11 @@ if was_funded && !becomes_funded {
 
 #### Remediation
 Require `requester_member.is_funded_for_pool(&ctx.accounts.pool)` in `request_withdrawal` and `spend`, or ensure that vendor spend benefits are debited regardless of current funded status.
+
+#### Resolution
+- Added `require!(ctx.accounts.member.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded)` in `request_withdrawal`.
+- Added `require!(ctx.accounts.requester_member.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded)` in `spend`.
+- Verified in unit test `test_comfi_sec_06_unfunded_member_cannot_request_or_spend`.
 
 ---
 

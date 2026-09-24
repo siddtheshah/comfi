@@ -421,7 +421,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         memberObligationAmount = payload.memberObligationAmount ?? minimumDeposit ?? 10,
         initialDeposit = 100,
         enrollmentFee = 1,
-        voteThreshold = 2,
+        voteThreshold = 5001,
         votingPeriodSeconds = 604800,
         timelockSeconds = 86400,
         cycleDurationSeconds = 2592000,
@@ -885,7 +885,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         }
       } else if (actionKind === 'ConfigurationModification' || actionKind === 'configuration_modification') {
         const {
-          voteThreshold = 2,
+          voteThreshold = 5001,
           cycleDurationSeconds = 2592000,
           memberObligationAmount = 10,
           spenderLimitDeadlineCycles = 1,

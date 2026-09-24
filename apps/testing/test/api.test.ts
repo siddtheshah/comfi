@@ -181,7 +181,7 @@ test('processPoolCycleRoll skips pool if cycle has not elapsed yet', async () =>
       currentCycle: 0,
       cycleDuration: 3600,
       startTime: futureStart,
-      voteThreshold: 2,
+      voteThreshold: 5001,
     }
   }
 
