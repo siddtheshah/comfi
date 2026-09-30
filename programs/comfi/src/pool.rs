@@ -642,6 +642,8 @@ pub struct Member {
     pub total_contributions: u64,
     pub surplus_cycle: u64,
     pub funded_cycle: u64,
+    /// Pause choice for the next rollover. `is_funded` is the effective
+    /// current-cycle status, so a pause cannot change the live electorate.
     pub is_paused: bool,
     pub next_member: Option<Pubkey>,
 }
@@ -658,7 +660,6 @@ impl Member {
 
     pub fn is_funded_for_pool(&self, pool: &Pool) -> bool {
         self.is_funded
-            && !self.is_paused
             && self.funded_cycle == pool.current_cycle
             && self.deposited_total >= pool.member_obligation_amount
     }
@@ -1041,6 +1042,8 @@ pub fn set_paused(ctx: Context<MemberOnly>, paused: bool) -> Result<()> {
     ctx.accounts.pool.ensure_not_closing()?;
     ctx.accounts.pool.ensure_cycle_current()?;
     let member = &mut ctx.accounts.member;
+    // `is_funded` remains unchanged for this cycle. Rollover applies this
+    // pause choice before calculating the next cycle's funded cohort.
     member.is_paused = paused;
     Ok(())
 }
@@ -5011,11 +5014,10 @@ mod tests {
         // Funded in Cycle 0
         assert!(member.is_funded_for_pool(&pool));
 
-        // Member is going away for Cycle 1 and declines participation:
+        // Member requests a pause for Cycle 1. The current electorate stays
+        // intact until rollover.
         member.is_paused = true;
-
-        // Immediately cannot vote in pool:
-        assert!(!member.is_funded_for_pool(&pool));
+        assert!(member.is_funded_for_pool(&pool));
 
         // Cycle rolls from 0 to 1
         pool.current_cycle = 1;
@@ -5026,10 +5028,10 @@ mod tests {
         assert!(!member.is_funded);
         assert!(!member.is_funded_for_pool(&pool));
 
-        // Member returns and unpauses:
+        // The unpause request also waits for the next cycle boundary.
         member.is_paused = false;
 
-        // Mid-cycle during Cycle 1, member cannot vote (not funded for cycle 1):
+        // The member is still unfunded during Cycle 1.
         assert!(!member.is_funded_for_pool(&pool));
 
         // When cycle rolls to Cycle 2, member resumes paying obligation from surplus:

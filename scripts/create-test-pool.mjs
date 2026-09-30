@@ -7,14 +7,18 @@ import { createMint, getAccount, getOrCreateAssociatedTokenAccount, mintTo } fro
 import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const rpcUrl = process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899';
+const argumentValue = (name) => {
+  const prefix = `--${name}=`;
+  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+};
+const rpcUrl = argumentValue('rpc-url') ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899';
 const programId = new PublicKey('bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY');
 const localnetDirectory = resolve(root, '.localnet');
 const statePath = resolve(localnetDirectory, 'state.json');
 const publicOutputPath = resolve(root, 'localnet.json');
 const usdcDecimals = 6;
 const oneUsdc = 10n ** BigInt(usdcDecimals);
-const operation = process.env.COMFI_POOL_MODE ?? 'bootstrap';
+const operation = argumentValue('operation') ?? process.env.COMFI_POOL_MODE ?? 'bootstrap';
 
 if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(?:\/|$)/.test(rpcUrl)) throw new Error(`Refusing to run outside localnet: ${rpcUrl}`);
 const connection = new Connection(rpcUrl, 'confirmed');

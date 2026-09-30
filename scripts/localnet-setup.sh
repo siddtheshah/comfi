@@ -169,17 +169,18 @@ echo "Funding payer account: $PAYER_PUBKEY"
 
 echo "Building and deploying Anchor program..."
 cd "$WORKSPACE_DIR"
-"$ANCHOR" build
+# This script is exclusively for the isolated local test environment. The
+# pool initializer below requests testing_enabled, so deploy the matching
+# feature-gated binary rather than the production binary.
+"$ANCHOR" build -- --features testing
 "$ANCHOR" deploy --provider.cluster localnet --provider.wallet "$PAYER"
 
 echo "Initializing localnet state and funding test wallet..."
-export COMFI_LOCALNET_RPC="$RPC_URL"
-export COMFI_POOL_MODE="initialize"
-"$NODE" scripts/create-test-pool.mjs
-
-export COMFI_POOL_MODE="fund-wallet"
-"$NODE" scripts/create-test-pool.mjs
-unset COMFI_POOL_MODE
+# Pass arguments rather than relying on environment propagation: NODE may be
+# node.exe when this script runs under WSL, and custom WSL variables are not
+# reliably inherited by Windows processes.
+"$NODE" scripts/create-test-pool.mjs --rpc-url="$RPC_URL" --operation=initialize
+"$NODE" scripts/create-test-pool.mjs --rpc-url="$RPC_URL" --operation=fund-wallet
 
 echo ""
 echo "=========================================================================="
