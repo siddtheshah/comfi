@@ -9,9 +9,15 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.j
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const argumentValue = (name) => {
   const prefix = `--${name}=`;
-  return process.argv.find((argument) => argument.startsWith(prefix))?.slice(prefix.length);
+  const equalArg = process.argv.find((argument) => argument.startsWith(prefix));
+  if (equalArg) return equalArg.slice(prefix.length);
+  const index = process.argv.indexOf(`--${name}`);
+  if (index !== -1 && index + 1 < process.argv.length) {
+    return process.argv[index + 1];
+  }
+  return undefined;
 };
-const rpcUrl = argumentValue('rpc-url') ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899';
+const rpcUrl = (argumentValue('rpc-url') ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899').trim();
 const programId = new PublicKey('bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY');
 const localnetDirectory = resolve(root, '.localnet');
 const statePath = resolve(localnetDirectory, 'state.json');
@@ -20,9 +26,33 @@ const usdcDecimals = 6;
 const oneUsdc = 10n ** BigInt(usdcDecimals);
 const operation = argumentValue('operation') ?? process.env.COMFI_POOL_MODE ?? 'bootstrap';
 
-if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(?:\/|$)/.test(rpcUrl)) throw new Error(`Refusing to run outside localnet: ${rpcUrl}`);
+const validOperations = ['bootstrap', 'initialize', 'fund-wallet', 'next'];
+if (!validOperations.includes(operation)) {
+  throw new Error(`Invalid operation: '${operation}'. Expected one of: ${validOperations.join(', ')}`);
+}
+
+if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(?:\/|$)/.test(rpcUrl)) {
+  throw new Error(`Refusing to run outside localnet: ${rpcUrl}`);
+}
 const connection = new Connection(rpcUrl, 'confirmed');
-await connection.getLatestBlockhash();
+
+async function waitForConnection(conn, maxAttempts = 30, delayMs = 1000) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await conn.getLatestBlockhash('confirmed');
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
+
+await waitForConnection(connection);
 await mkdir(localnetDirectory, { recursive: true });
 
 async function readJson(path, fallback) {
@@ -39,7 +69,8 @@ async function keypair(name, fallback) {
 async function fund(wallet) {
   if (await connection.getBalance(wallet.publicKey) >= LAMPORTS_PER_SOL) return;
   const signature = await connection.requestAirdrop(wallet.publicKey, 2 * LAMPORTS_PER_SOL);
-  await connection.confirmTransaction({ signature, ...(await connection.getLatestBlockhash()) }, 'confirmed');
+  const latestBlockhash = await connection.getLatestBlockhash('confirmed');
+  await connection.confirmTransaction({ signature, ...latestBlockhash }, 'confirmed');
 }
 
 const administrator = await keypair('administrator');
