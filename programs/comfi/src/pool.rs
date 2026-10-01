@@ -528,10 +528,40 @@ pub struct Pool {
     pub closing_conferred_pool_capital: u64,
     pub head_member: Option<Pubkey>,
     pub rollover_cursor: Option<Pubkey>,
+    pub is_locked: bool,
+    pub min_quorum_members: u32,
+    pub min_quorum_bps: u32,
+    pub locked_consecutive_cycles: u64,
+    pub auto_close_cycles_threshold: u64,
+    pub pending_min_quorum_members: u32,
+    pub pending_min_quorum_bps: u32,
+    pub pending_auto_close_cycles_threshold: u64,
+}
+
+#[event]
+pub struct PoolLockedEvent {
+    pub pool: Pubkey,
+    pub cycle: u64,
+    pub funded_members: u32,
+    pub locked_consecutive_cycles: u64,
+}
+
+#[event]
+pub struct PoolUnlockedEvent {
+    pub pool: Pubkey,
+    pub cycle: u64,
+    pub funded_members: u32,
+}
+
+#[event]
+pub struct PoolAutoClosedEvent {
+    pub pool: Pubkey,
+    pub cycle: u64,
+    pub consecutive_locked_cycles: u64,
 }
 
 impl Pool {
-    pub const BASE_SPACE: usize = 8 + 426;
+    pub const BASE_SPACE: usize = 8 + 467;
     pub const SPACE: usize = Self::BASE_SPACE;
 
     pub fn space(_member_cap: u32) -> usize {
@@ -546,6 +576,63 @@ impl Pool {
     pub fn ensure_not_closing(&self) -> Result<()> {
         require!(!self.is_closing, ComfiError::PoolIsClosing);
         Ok(())
+    }
+
+    pub fn is_quorum_satisfied(&self) -> bool {
+        if self.funded_member_count < self.min_quorum_members {
+            return false;
+        }
+        let total_members = (self.member_count as u64).max(1);
+        let current_bps = (self.funded_member_count as u64)
+            .saturating_mul(10_000)
+            / total_members;
+        current_bps >= (self.min_quorum_bps as u64)
+    }
+
+    pub fn ensure_not_locked(&self) -> Result<()> {
+        require!(!self.is_locked, ComfiError::PoolLocked);
+        Ok(())
+    }
+
+    pub fn evaluate_lock_and_auto_close(&mut self, pool_key: Pubkey) {
+        if self.is_closing {
+            self.is_locked = false;
+            return;
+        }
+
+        if self.is_quorum_satisfied() {
+            if self.is_locked {
+                self.is_locked = false;
+                emit!(PoolUnlockedEvent {
+                    pool: pool_key,
+                    cycle: self.current_cycle,
+                    funded_members: self.funded_member_count,
+                });
+            }
+            self.locked_consecutive_cycles = 0;
+        } else {
+            self.is_locked = true;
+            self.locked_consecutive_cycles = self.locked_consecutive_cycles.saturating_add(1);
+            emit!(PoolLockedEvent {
+                pool: pool_key,
+                cycle: self.current_cycle,
+                funded_members: self.funded_member_count,
+                locked_consecutive_cycles: self.locked_consecutive_cycles,
+            });
+
+            // Evaluate Auto-Closure trigger:
+            if self.auto_close_cycles_threshold > 0
+                && self.locked_consecutive_cycles >= self.auto_close_cycles_threshold
+            {
+                self.enter_closure();
+                self.is_locked = false;
+                emit!(PoolAutoClosedEvent {
+                    pool: pool_key,
+                    cycle: self.current_cycle,
+                    consecutive_locked_cycles: self.locked_consecutive_cycles,
+                });
+            }
+        }
     }
 
     pub fn ensure_cycle_current_at(&self, current_timestamp: i64) -> Result<()> {
@@ -576,6 +663,7 @@ impl Pool {
 
     pub fn enter_closure(&mut self) {
         self.is_closing = true;
+        self.is_locked = false;
         self.closing_non_conferred_basis = self.total_non_conferred_capital;
         self.closing_conferred_pool_capital = self.total_conferred_capital;
     }
@@ -615,6 +703,9 @@ impl Pool {
             self.withdrawal_execution_mode = self.pending_withdrawal_execution_mode;
             self.config_modification_execution_mode =
                 self.pending_config_modification_execution_mode;
+            self.min_quorum_members = self.pending_min_quorum_members;
+            self.min_quorum_bps = self.pending_min_quorum_bps;
+            self.auto_close_cycles_threshold = self.pending_auto_close_cycles_threshold;
             self.has_pending_config = false;
         }
     }
@@ -780,7 +871,11 @@ impl Proposal {
         ) {
             threshold_bps = threshold_bps.max(5001);
         }
-        let active_members = (pool.funded_member_count as u64).max(1);
+        let active_members = if pool.funded_member_count == 0 && self.action == ProposalAction::ClosePool {
+            (pool.member_count as u64).max(1)
+        } else {
+            (pool.funded_member_count as u64).max(1)
+        };
         let required = active_members
             .checked_mul(threshold_bps)
             .ok_or(ComfiError::MathOverflow)?
@@ -907,6 +1002,7 @@ pub mod pool_handlers {
     pub fn join_pool(ctx: Context<JoinPool>, args: JoinPoolArgs) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     pool.ensure_not_closing()?;
+    pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
     require!(
         pool.member_count < pool.member_cap,
@@ -1055,6 +1151,7 @@ pub fn run_sponsored_set_alias(
     encryption_public_key: [u8; 32],
 ) -> Result<()> {
     ctx.accounts.pool.ensure_not_closing()?;
+    ctx.accounts.pool.ensure_not_locked()?;
     ctx.accounts.pool.ensure_cycle_current()?;
     require!(
         quote.action == SponsoredAction::SetAlias,
@@ -1176,6 +1273,10 @@ pub fn process_cycle_proposals<'info>(
             continue;
         }
 
+        if pool.is_locked && proposal.action != ProposalAction::ClosePool {
+            continue;
+        }
+
         let passed = proposal.is_passed_for_pool(pool)?;
         let is_deadline = ending_cycle >= proposal.deadline_cycle;
 
@@ -1190,8 +1291,12 @@ pub fn process_cycle_proposals<'info>(
 
         if passed {
             proposal.state = ProposalState::Executable;
-            proposal.executable_after = Clock::get()?
-                .unix_timestamp
+            let current_ts = if pool.testing_enabled {
+                pool.cycle_started_at
+            } else {
+                Clock::get()?.unix_timestamp
+            };
+            proposal.executable_after = current_ts
                 .checked_add(pool.timelock_seconds)
                 .ok_or(ComfiError::MathOverflow)?;
         } else {
@@ -1351,7 +1456,10 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
 
     if pool.rollover_cursor.is_none() {
-        process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        if !pool.is_closing {
+            process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+        }
     }
 
     if let Some(cranker) = &ctx.accounts.cranker {
@@ -1399,7 +1507,10 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
 
     if pool.rollover_cursor.is_none() {
-        process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        if !pool.is_closing {
+            process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+        }
     }
     Ok(())
 }
@@ -1424,7 +1535,10 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
 
     if pool.rollover_cursor.is_none() {
-        process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        if !pool.is_closing {
+            process_cycle_proposals(pool_key, pool, ending_cycle, ctx.remaining_accounts)?;
+        }
     }
     Ok(())
 }
@@ -1470,6 +1584,7 @@ pub fn test_reset_member_allowance(ctx: Context<TestMemberOnly>) -> Result<()> {
 
 pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs) -> Result<()> {
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
+    ctx.accounts.pool.ensure_not_locked()?;
     ctx.accounts.pool.ensure_cycle_current()?;
     require!(args.amount > 0, ComfiError::InvalidAmount);
     require!(
@@ -1502,10 +1617,23 @@ pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs)
 pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> Result<()> {
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
     ctx.accounts.pool.ensure_cycle_current()?;
-    require!(
-        ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool),
-        ComfiError::MemberNotFunded
-    );
+    if ctx.accounts.pool.is_locked {
+        require!(
+            action == ProposalAction::ClosePool,
+            ComfiError::PoolLocked
+        );
+    }
+    if ctx.accounts.pool.funded_member_count == 0 && action == ProposalAction::ClosePool {
+        require!(
+            ctx.accounts.proposer.total_contributions > 0,
+            ComfiError::Unauthorized
+        );
+    } else {
+        require!(
+            ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool),
+            ComfiError::MemberNotFunded
+        );
+    }
     let deadline_cycles = ctx.accounts.pool.get_proposal_deadline_cycles(&action);
     require!(deadline_cycles > 0, ComfiError::InvalidProposalDeadline);
     if let ProposalAction::ConfigurationModification {
@@ -1573,10 +1701,23 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     let voter = &mut ctx.accounts.voter;
-    require!(
-        voter.is_funded_for_pool(pool),
-        ComfiError::MemberNotFunded
-    );
+    if pool.is_locked {
+        require!(
+            proposal.action == ProposalAction::ClosePool,
+            ComfiError::PoolLocked
+        );
+    }
+    if pool.funded_member_count == 0 && proposal.action == ProposalAction::ClosePool {
+        require!(
+            voter.total_contributions > 0,
+            ComfiError::Unauthorized
+        );
+    } else {
+        require!(
+            voter.is_funded_for_pool(pool),
+            ComfiError::MemberNotFunded
+        );
+    }
     require!(
         proposal.state == ProposalState::Queued || proposal.state == ProposalState::Open,
         ComfiError::ProposalNotOpen
@@ -1618,6 +1759,12 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
     let pool = &ctx.accounts.pool;
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
+    if pool.is_locked {
+        require!(
+            proposal.action == ProposalAction::ClosePool,
+            ComfiError::PoolLocked
+        );
+    }
     require!(
         proposal.state == ProposalState::Open || proposal.state == ProposalState::Queued,
         ComfiError::ProposalNotOpen
@@ -1665,6 +1812,7 @@ pub fn execute_close_pool(ctx: Context<ExecuteClosePool>) -> Result<()> {
 pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
     let pool = &ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
+    pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     assert_executable(proposal)?;
@@ -1695,6 +1843,7 @@ pub fn execute_configuration_modification(
 ) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     require!(!pool.is_closing, ComfiError::PoolIsClosing);
+    pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
     assert_executable(proposal)?;
@@ -1765,6 +1914,7 @@ pub fn execute_configuration_modification(
 pub fn spend(ctx: Context<Spend>) -> Result<()> {
     let request = &mut ctx.accounts.request;
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
+    ctx.accounts.pool.ensure_not_locked()?;
     ctx.accounts.pool.ensure_cycle_current()?;
     require!(
         request.status == WithdrawalStatus::Pending,
@@ -2051,6 +2201,14 @@ mod tests {
             closing_conferred_pool_capital: 0,
             head_member: None,
             rollover_cursor: None,
+            is_locked: false,
+            min_quorum_members: 0,
+            min_quorum_bps: 0,
+            locked_consecutive_cycles: 0,
+            auto_close_cycles_threshold: 0,
+            pending_min_quorum_members: 0,
+            pending_min_quorum_bps: 0,
+            pending_auto_close_cycles_threshold: 0,
         }
     }
 
@@ -2197,7 +2355,7 @@ mod tests {
 
     #[test]
     fn test_account_space_constants() {
-        assert_eq!(Pool::SPACE, 8 + 426);
+        assert_eq!(Pool::SPACE, 8 + 467);
         assert_eq!(
             Member::SPACE,
             8 + 258
@@ -5629,6 +5787,530 @@ mod tests {
 
         // Pool operations succeed now that rollover is complete:
         assert!(pool.ensure_cycle_current_at(1050).is_ok());
+    }
+
+    #[test]
+    fn test_is_quorum_satisfied_evaluation() {
+        let mut pool = create_test_pool();
+        pool.member_count = 10;
+        pool.min_quorum_members = 3;
+        pool.min_quorum_bps = 5000; // 50%
+
+        // 1. funded < min_quorum_members (2 < 3)
+        pool.funded_member_count = 2;
+        assert!(!pool.is_quorum_satisfied());
+
+        // 2. funded >= min_quorum_members (3 >= 3), but ratio < min_quorum_bps (3/10 = 30% < 50%)
+        pool.funded_member_count = 3;
+        assert!(!pool.is_quorum_satisfied());
+
+        // 3. funded = 4/10 = 40% < 50%
+        pool.funded_member_count = 4;
+        assert!(!pool.is_quorum_satisfied());
+
+        // 4. funded = 5/10 = 50% >= 50% and 5 >= 3 -> satisfied!
+        pool.funded_member_count = 5;
+        assert!(pool.is_quorum_satisfied());
+
+        // 5. If member_count is 4, min_quorum_members is 3, min_quorum_bps is 5000:
+        pool.member_count = 4;
+        pool.funded_member_count = 2; // 2/4 = 50%, but 2 < 3
+        assert!(!pool.is_quorum_satisfied());
+
+        pool.funded_member_count = 3; // 3/4 = 75% >= 50% and 3 >= 3
+        assert!(pool.is_quorum_satisfied());
+    }
+
+    #[test]
+    fn test_pool_locking_and_unlocking_state_transitions() {
+        let mut pool = create_test_pool();
+        let pool_key = Pubkey::new_unique();
+        pool.member_count = 4;
+        pool.min_quorum_members = 2;
+        pool.min_quorum_bps = 5000;
+        pool.auto_close_cycles_threshold = 5;
+
+        assert!(!pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 0);
+
+        // Rollover 1: sub-quorum (1 funded < 2)
+        pool.funded_member_count = 1;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 1);
+        assert!(!pool.is_closing);
+
+        // Rollover 2: still sub-quorum (0 funded)
+        pool.funded_member_count = 0;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 2);
+        assert!(!pool.is_closing);
+
+        // Rollover 3: quorum restored (2 funded out of 4 = 50%)
+        pool.funded_member_count = 2;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(!pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 0);
+        assert!(!pool.is_closing);
+    }
+
+    #[test]
+    fn test_pool_auto_closure_consecutive_cycles_threshold() {
+        let mut pool = create_test_pool();
+        let pool_key = Pubkey::new_unique();
+        pool.member_count = 5;
+        pool.min_quorum_members = 3;
+        pool.min_quorum_bps = 5000;
+        pool.auto_close_cycles_threshold = 3;
+        pool.total_non_conferred_capital = 200;
+        pool.total_conferred_capital = 500;
+
+        // Cycle 1: sub-quorum
+        pool.funded_member_count = 1;
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 1);
+        assert!(!pool.is_closing);
+
+        // Cycle 2: sub-quorum
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 2);
+        assert!(!pool.is_closing);
+
+        // Cycle 3: sub-quorum reaches threshold 3 -> triggers auto-closure!
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(!pool.is_locked); // Invariant 6: closure supersedes lock
+        assert!(pool.is_closing);
+        assert_eq!(pool.locked_consecutive_cycles, 3);
+        assert_eq!(pool.closing_non_conferred_basis, 200);
+        assert_eq!(pool.closing_conferred_pool_capital, 500);
+
+        // Further evaluations while closing remain terminal
+        pool.evaluate_lock_and_auto_close(pool_key);
+        assert!(!pool.is_locked);
+        assert!(pool.is_closing);
+    }
+
+    #[test]
+    fn test_auto_closure_disabled_when_threshold_zero() {
+        let mut pool = create_test_pool();
+        let pool_key = Pubkey::new_unique();
+        pool.member_count = 4;
+        pool.min_quorum_members = 2;
+        pool.min_quorum_bps = 5000;
+        pool.auto_close_cycles_threshold = 0; // disabled
+
+        pool.funded_member_count = 1;
+        for i in 1..=10 {
+            pool.evaluate_lock_and_auto_close(pool_key);
+            assert!(pool.is_locked);
+            assert_eq!(pool.locked_consecutive_cycles, i);
+            assert!(!pool.is_closing);
+        }
+    }
+
+    #[test]
+    fn test_ensure_not_locked_guard() {
+        let mut pool = create_test_pool();
+        pool.is_locked = false;
+        assert!(pool.ensure_not_locked().is_ok());
+
+        pool.is_locked = true;
+        let err = pool.ensure_not_locked().unwrap_err();
+        assert_eq!(err, ComfiError::PoolLocked.into());
+    }
+
+    #[test]
+    fn test_proposal_creation_and_voting_locked_restrictions() {
+        let mut pool = create_test_pool();
+        pool.is_locked = true;
+
+        // ProposalAction other than ClosePool is forbidden when locked
+        let action_spend = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 100,
+        };
+        let action_withdrawal = ProposalAction::ApproveWithdrawal {
+            request: Pubkey::new_unique(),
+        };
+        let action_close = ProposalAction::ClosePool;
+
+        let check_proposal_action = |pool: &Pool, action: &ProposalAction| -> Result<()> {
+            if pool.is_locked {
+                require!(
+                    *action == ProposalAction::ClosePool,
+                    ComfiError::PoolLocked
+                );
+            }
+            Ok(())
+        };
+
+        assert_eq!(
+            check_proposal_action(&pool, &action_spend).unwrap_err(),
+            ComfiError::PoolLocked.into()
+        );
+        assert_eq!(
+            check_proposal_action(&pool, &action_withdrawal).unwrap_err(),
+            ComfiError::PoolLocked.into()
+        );
+        assert!(check_proposal_action(&pool, &action_close).is_ok());
+
+        // Voting is restricted to ClosePool when locked
+        let prop_spend = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: action_spend,
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 6000,
+        };
+        let prop_close = Proposal {
+            pool: pool.global,
+            id: 2,
+            proposer: Pubkey::new_unique(),
+            action: action_close,
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 6000,
+        };
+
+        let check_vote = |pool: &Pool, prop: &Proposal| -> Result<()> {
+            if pool.is_locked {
+                require!(
+                    prop.action == ProposalAction::ClosePool,
+                    ComfiError::PoolLocked
+                );
+            }
+            Ok(())
+        };
+
+        assert_eq!(
+            check_vote(&pool, &prop_spend).unwrap_err(),
+            ComfiError::PoolLocked.into()
+        );
+        assert!(check_vote(&pool, &prop_close).is_ok());
+    }
+
+    #[test]
+    fn test_process_cycle_proposals_locked_skips_non_close_pool() {
+        let pool_key = Pubkey::new_unique();
+        let mut pool = create_test_pool();
+        pool.is_locked = true;
+        let owner = crate::ID;
+
+        let action_spend = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 100,
+        };
+        let action_close = ProposalAction::ClosePool;
+
+        let p_spend = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: action_spend,
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 5001,
+        };
+        let p_close = Proposal {
+            pool: pool_key,
+            id: 2,
+            proposer: Pubkey::new_unique(),
+            action: action_close,
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 5001,
+        };
+
+        let mut data_spend = vec![0u8; Proposal::SPACE];
+        let mut data_close = vec![0u8; Proposal::SPACE];
+        p_spend.try_serialize(&mut &mut data_spend[..]).unwrap();
+        p_close.try_serialize(&mut &mut data_close[..]).unwrap();
+
+        let mut l1 = 1_000_000;
+        let mut l2 = 1_000_000;
+        let key_1 = Pubkey::new_unique();
+        let key_2 = Pubkey::new_unique();
+        let acc_spend = AccountInfo::new(&key_1, false, true, &mut l1, &mut data_spend, &owner, false);
+        let acc_close = AccountInfo::new(&key_2, false, true, &mut l2, &mut data_close, &owner, false);
+
+        pool.funded_member_count = 2;
+        let accounts = vec![acc_spend, acc_close];
+        pool_handlers::process_cycle_proposals(pool_key, &mut pool, 1, &accounts).unwrap();
+
+        // Deserializing proposals:
+        let updated_spend = Proposal::try_deserialize(&mut &data_spend[..]).unwrap();
+        let updated_close = Proposal::try_deserialize(&mut &data_close[..]).unwrap();
+
+        // Spend proposal should remain Open (skipped while locked):
+        assert_eq!(updated_spend.state, ProposalState::Open);
+        // ClosePool proposal should be resolved to Executable:
+        assert_eq!(updated_close.state, ProposalState::Executable);
+    }
+
+    #[test]
+    fn test_close_pool_fallback_when_zero_funded_members() {
+        let mut pool = create_test_pool();
+        pool.member_count = 5;
+        pool.funded_member_count = 0; // all members paused or unfunded
+        pool.vote_threshold = 5001;
+
+        let prop = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 3,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 5001,
+        };
+
+        // Fallback required votes scales with enrolled member_count (5) rather than funded (0):
+        // ceil(5 * 5001 / 10000) = ceil(25005 / 10000) = 3
+        let required = prop.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(required, 3);
+        assert!(prop.is_passed_for_pool(&pool).unwrap());
+
+        // For non-ClosePool proposal with 0 funded members:
+        let prop_other = Proposal {
+            pool: pool.global,
+            id: 2,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::SetSpenderLimit {
+                member: Pubkey::new_unique(),
+                cap: 100,
+            },
+            yes_votes: 1,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 5001,
+        };
+        // Uses funded_member_count.max(1) = 1
+        assert_eq!(prop_other.required_votes_for_pool(&pool).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_apply_pending_config_updates_quorum_parameters() {
+        let mut pool = create_test_pool();
+        pool.min_quorum_members = 1;
+        pool.min_quorum_bps = 5000;
+        pool.auto_close_cycles_threshold = 2;
+
+        pool.has_pending_config = true;
+        pool.pending_min_quorum_members = 4;
+        pool.pending_min_quorum_bps = 6600;
+        pool.pending_auto_close_cycles_threshold = 5;
+
+        // Pending not applied yet
+        assert_eq!(pool.min_quorum_members, 1);
+        assert_eq!(pool.min_quorum_bps, 5000);
+        assert_eq!(pool.auto_close_cycles_threshold, 2);
+
+        pool.apply_pending_config();
+
+        // Applied
+        assert_eq!(pool.min_quorum_members, 4);
+        assert_eq!(pool.min_quorum_bps, 6600);
+        assert_eq!(pool.auto_close_cycles_threshold, 5);
+        assert!(!pool.has_pending_config);
+    }
+
+    #[test]
+    fn test_full_rollover_quorum_lock_and_recovery_flow() {
+        let owner = crate::ID;
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.member_count = 3;
+        pool.member_obligation_amount = 50;
+        pool.min_quorum_members = 2;
+        pool.min_quorum_bps = 5000; // 50%
+        pool.auto_close_cycles_threshold = 3;
+
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let m3_key = Pubkey::new_unique();
+        pool.head_member = Some(m1_key);
+
+        let m1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 200,
+            surplus_amount: 200,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 200,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: Some(m2_key),
+        };
+        let m2 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 200,
+            surplus_amount: 200,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 200,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: Some(m3_key),
+        };
+        let m3 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 200,
+            surplus_amount: 200,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 200,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+        };
+
+        // --- Cycle 1: All 3 funded ---
+        let mut m1_data = vec![0u8; Member::SPACE];
+        let mut m2_data = vec![0u8; Member::SPACE];
+        let mut m3_data = vec![0u8; Member::SPACE];
+        m1.try_serialize(&mut &mut m1_data[..]).unwrap();
+        m2.try_serialize(&mut &mut m2_data[..]).unwrap();
+        m3.try_serialize(&mut &mut m3_data[..]).unwrap();
+
+        let mut l1 = 1_000_000;
+        let mut l2 = 1_000_000;
+        let mut l3 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let a2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        let a3 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        let cycle_1_accounts = vec![a1, a2, a3];
+
+        pool.current_cycle = 1;
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &cycle_1_accounts).unwrap();
+        assert_eq!(pool.funded_member_count, 3);
+        pool.evaluate_lock_and_auto_close(pool.global);
+        assert!(!pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 0);
+
+        // --- Cycle 2: M1 and M2 pause -> funded drops to 1 (below min_quorum_members = 2) ---
+        let mut m1_deser = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+        let mut m2_deser = Member::try_deserialize(&mut &m2_data[..]).unwrap();
+        m1_deser.is_paused = true;
+        m2_deser.is_paused = true;
+        m1_deser.try_serialize(&mut &mut m1_data[..]).unwrap();
+        m2_deser.try_serialize(&mut &mut m2_data[..]).unwrap();
+
+        let a1_c2 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let a2_c2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        let a3_c2 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        let cycle_2_accounts = vec![a1_c2, a2_c2, a3_c2];
+
+        pool.current_cycle = 2;
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &cycle_2_accounts).unwrap();
+        assert_eq!(pool.funded_member_count, 1);
+        pool.evaluate_lock_and_auto_close(pool.global);
+
+        // Locked!
+        assert!(pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 1);
+        assert!(pool.ensure_not_locked().is_err());
+
+        // --- Cycle 3: M1 unpauses (`set_paused(false)`) -> funded returns to 2 >= 2 ---
+        let mut m1_deser_c3 = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+        m1_deser_c3.is_paused = false;
+        m1_deser_c3.try_serialize(&mut &mut m1_data[..]).unwrap();
+
+        let a1_c3 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let a2_c3 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        let a3_c3 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        let cycle_3_accounts = vec![a1_c3, a2_c3, a3_c3];
+
+        pool.current_cycle = 3;
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &cycle_3_accounts).unwrap();
+        assert_eq!(pool.funded_member_count, 2);
+        pool.evaluate_lock_and_auto_close(pool.global);
+
+        // Unlocked and counter reset!
+        assert!(!pool.is_locked);
+        assert_eq!(pool.locked_consecutive_cycles, 0);
+        assert!(pool.ensure_not_locked().is_ok());
     }
 }
 

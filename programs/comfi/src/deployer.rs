@@ -275,6 +275,14 @@ pub mod deployer_handlers {
         pool.closing_conferred_pool_capital = 0;
         pool.head_member = Some(ctx.accounts.creator_member.key());
         pool.rollover_cursor = None;
+        pool.is_locked = false;
+        pool.min_quorum_members = 1;
+        pool.min_quorum_bps = 5001;
+        pool.locked_consecutive_cycles = 0;
+        pool.auto_close_cycles_threshold = 0;
+        pool.pending_min_quorum_members = 1;
+        pool.pending_min_quorum_bps = 5001;
+        pool.pending_auto_close_cycles_threshold = 0;
         ctx.accounts.global.next_pool_id = ctx
             .accounts
             .global

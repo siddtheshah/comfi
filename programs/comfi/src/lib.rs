@@ -229,5 +229,11 @@ pub enum ComfiError {
     CycleRollRequired,
     #[msg("All pool members must be provided to roll_cycle to update member funded statuses.")]
     IncompleteMemberList,
+    #[msg("The pool is currently locked due to low participation quorum.")]
+    PoolLocked,
+    #[msg("The configured quorum threshold is invalid.")]
+    InvalidQuorumConfig,
+    #[msg("This operation is not permitted while the pool is in a locked state.")]
+    LockedOperationForbidden,
 }
 
