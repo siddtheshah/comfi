@@ -15,18 +15,15 @@ fi
 SOLANA_BIN_DIR="${SOLANA_BIN_DIR:-}"
 LEDGER="${LOCALNET_LEDGER_DIR:-/tmp/comfi-localnet-ledger}"
 
-if [ -n "$SOLANA_BIN_DIR" ]; then
-  export PATH="$SOLANA_BIN_DIR:$PATH"
-fi
+# shellcheck source=ensure-localnet-tools.sh
+. "$SCRIPT_DIR/ensure-localnet-tools.sh"
 
-if [ -n "$SOLANA_BIN_DIR" ] && [ -x "$SOLANA_BIN_DIR/solana-test-validator" ]; then
+if [ -x "$SOLANA_BIN_DIR/solana-test-validator" ]; then
   VALIDATOR="$SOLANA_BIN_DIR/solana-test-validator"
 elif command -v solana-test-validator >/dev/null 2>&1; then
   VALIDATOR="$(command -v solana-test-validator)"
-elif [ -x "$HOME/.local/share/solana/install/active_release/bin/solana-test-validator" ]; then
-  VALIDATOR="$HOME/.local/share/solana/install/active_release/bin/solana-test-validator"
 else
-  echo "Error: solana-test-validator not found. Please set SOLANA_BIN_DIR in .env" >&2
+  echo "Error: solana-test-validator not found after localnet tool setup." >&2
   exit 1
 fi
 

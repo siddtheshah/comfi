@@ -84,7 +84,7 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-Review `.env` and adjust the paths if your binaries are not in standard locations:
+Review `.env` only if you want to override the default localnet configuration. `npm run localnet:setup` downloads the pinned Solana and Anchor CLIs into `.localnet-tools` and runs `npm ci` when needed, so it works from a fresh clone without global Solana, Anchor, or Rust installations. You can still set paths to use existing binaries:
 
 ```ini
 # If 'solana' or 'anchor' are not in standard system PATH, specify their directories:
@@ -102,7 +102,7 @@ LOCALNET_PAYER_KEYPAIR=/tmp/comfi-local-payer.json
 # Web UI configuration (read by Vite in apps/web):
 VITE_WALLET_MODE=mock
 VITE_SOLANA_RPC=http://127.0.0.1:8899
-VITE_PROGRAM_ID=bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY
+VITE_PROGRAM_ID=3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP
 VITE_MOCK_WALLET_PUBLIC_KEY=GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB
 ```
 
@@ -118,7 +118,7 @@ anchor build
 Verify that the build outputs exist:
 - `target/deploy/comfi.so` (Compiled SBF shared object)
 - `target/idl/comfi.json` (Anchor Interface Definition Language)
-- Program ID matches `bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY`
+- Program ID matches `3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP`
 
 ---
 
@@ -130,6 +130,14 @@ npm run localnet:setup
 ```
 
 The script runs the localnet in the foreground and waits. When you are finished, press **`Ctrl+C`** to gracefully shut down the validator and clean up local ledger resources.
+
+Keep this terminal open while running localnet-dependent checks in another terminal. After setup reports that the deployer is initialized, verify pool creation with:
+
+```bash
+npm run localnet:create-test-pool -- --operation=next
+```
+
+The command prints the new pool address and `poolMemberCount: 1`.
 
 ### What `npm run localnet:setup` does:
 1. **Starts an isolated validator**: Launches `solana-test-validator` with a clean ledger in `/tmp/comfi-localnet-ledger` listening on `http://127.0.0.1:8899`.
@@ -171,6 +179,14 @@ http://localhost:5173
 4. **Deploy a New Pool**: Click **Start a pool**. The UI deploys an on-chain pool through the local development endpoint, automatically refetches the live chain state, and navigates to the newly created pool.
 5. **Filter & Refresh**: Use the `All`, `On-chain`, or `Demo` filter tabs, or click `↻ Refresh` to fetch the latest on-chain block state.
 
+### Using the ComFi In-Browser Wallet
+
+1. Start the localnet (`npm run localnet:setup`) and web app (`npm run dev`), then open **⚡ ComFi Wallet** in the top bar.
+2. Select **In-Browser Wallet**, then choose **Generate New** or import an existing Base58 or JSON keypair. The wallet is stored in this browser only.
+3. Select **Connect Wallet**, then use **Request 1 SOL** to fund transaction fees. The faucet works only against localnet and devnet.
+4. Use **Mint 100 USDC** only with the local testing server: it calls the local test faucet and is unavailable as a production funding mechanism.
+5. Use **Export Secret Key** only to back up or transfer a development wallet. Treat both exported formats as private keys: anyone who obtains one controls the wallet. Do not use a browser-stored or exported key for mainnet funds.
+
 ---
 
 ## 8. Running Automated Tests
@@ -185,6 +201,7 @@ npm run test
 npm run typecheck
 
 # 3. Run Playwright end-to-end browser test suite (with on-chain pool assertions)
+# Keep `npm run localnet:setup` running in another terminal first.
 npm run test:e2e
 ```
 

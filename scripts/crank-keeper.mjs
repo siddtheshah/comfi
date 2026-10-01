@@ -7,7 +7,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.j
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const rpcUrl = process.env.COMFI_RPC_URL ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899';
-const programId = new PublicKey('bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY');
+const programId = new PublicKey('3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP');
 const localnetDirectory = resolve(root, '.localnet');
 const isOnce = process.argv.includes('--once');
 const pollIntervalMs = Number(process.env.COMFI_CRANK_INTERVAL_MS ?? 5000);

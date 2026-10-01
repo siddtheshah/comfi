@@ -73,4 +73,4 @@
 ## 6. Verification & End-to-End Testing
 - [ ] Run full workspace unit tests (`npm test`) ensuring all test suites pass without evading failure scenarios.
 - [ ] Run typechecks (`npm run typecheck`) across `@comfi/web`, `@comfi/testing`, and `@comfi/sponsor-api`.
-- [ ] Verify localnet compatibility and document instructions for running localnet tests and browser wallet setup.
+- [x] [Completed: Codex-Localnet] Verify localnet compatibility and document instructions for running localnet tests and browser wallet setup.

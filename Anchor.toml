@@ -7,7 +7,7 @@ package_manager = "npm"
 resolution = true
 
 [programs.localnet]
-comfi = "bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY"
+comfi = "3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP"
 
 [provider]
 cluster = "localnet"
