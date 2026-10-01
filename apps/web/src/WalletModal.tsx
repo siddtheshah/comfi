@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { useWallet } from './wallet'
 
 interface WalletModalProps {
@@ -8,13 +8,17 @@ interface WalletModalProps {
 
 export function WalletModal({ isOpen, onClose }: WalletModalProps) {
   const wallet = useWallet()
-  const { inBrowserWallet, mockWallet, walletMode, setWalletMode } = wallet
+  const { inBrowserWallet, walletMode, setWalletMode } = wallet
 
   const [copiedField, setCopiedField] = useState<string | null>(null)
   const [showExport, setShowExport] = useState(false)
   const [importInput, setImportInput] = useState('')
   const [importError, setImportError] = useState<string | null>(null)
   const [confirmGenerate, setConfirmGenerate] = useState(false)
+  const activeMode = useRef({ mode: walletMode, revision: 0 })
+  if (activeMode.current.mode !== walletMode) {
+    activeMode.current = { mode: walletMode, revision: activeMode.current.revision + 1 }
+  }
 
   if (!isOpen) return null
 
@@ -53,7 +57,15 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
     setConfirmGenerate(false)
   }
 
-  const activePubkey = walletMode === 'in-browser' ? inBrowserWallet.publicKey : mockWallet.publicKey
+  const activePubkey = wallet.publicKey
+  // The wallet API rejects failures; this boundary presents them in the modal.
+  const runWalletAction = (action: () => Promise<void>) => {
+    const requestedRevision = activeMode.current.revision
+    setImportError(null)
+    void action().then(() => {}, error => {
+      if (activeMode.current.revision === requestedRevision) setImportError(error instanceof Error ? error.message : String(error))
+    })
+  }
 
   return (
     <div className="wallet-modal-overlay" onClick={onClose} role="dialog" aria-modal="true">
@@ -63,7 +75,7 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
           <div>
             <div className="wallet-modal-badge">
               <span className="network-dot" />
-              <span>{wallet.endpoint.includes('127.0.0.1') || wallet.endpoint.includes('localhost') ? 'Localnet' : 'Devnet'}</span>
+              <span>{wallet.endpoint.includes('127.0.0.1') || wallet.endpoint.includes('localhost') ? 'Localnet' : wallet.endpoint.includes('testnet') ? 'Testnet' : wallet.endpoint.includes('devnet') ? 'Devnet' : 'Custom RPC'}</span>
             </div>
             <h2>ComFi Wallet Manager</h2>
           </div>
@@ -76,15 +88,22 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
         <div className="wallet-mode-tabs">
           <button
             type="button"
+            className={`wallet-mode-tab ${walletMode === 'phantom' ? 'active' : ''}`}
+            onClick={() => { setImportError(null); setWalletMode('phantom') }}
+          >
+            Phantom
+          </button>
+          <button
+            type="button"
             className={`wallet-mode-tab ${walletMode === 'in-browser' ? 'active' : ''}`}
-            onClick={() => setWalletMode('in-browser')}
+            onClick={() => { setImportError(null); setWalletMode('in-browser') }}
           >
             ⚡ In-Browser Wallet
           </button>
           <button
             type="button"
             className={`wallet-mode-tab ${walletMode === 'mock' ? 'active' : ''}`}
-            onClick={() => setWalletMode('mock')}
+            onClick={() => { setImportError(null); setWalletMode('mock') }}
           >
             🧪 Mock Test Identity
           </button>
@@ -97,15 +116,18 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
             <button
               type="button"
               className="copy-btn"
-              onClick={() => void copyToClipboard(activePubkey, 'activePubkey')}
+              disabled={!activePubkey}
+              onClick={() => activePubkey && void copyToClipboard(activePubkey, 'activePubkey')}
             >
               {copiedField === 'activePubkey' ? '✓ Copied' : '📋 Copy Address'}
             </button>
           </div>
           <div className="wallet-pubkey-display" title={activePubkey}>
-            {activePubkey}
+            {activePubkey ?? 'Connect a wallet to see its address.'}
           </div>
         </div>
+
+        {wallet.connectionError && <p className="wallet-alert error" role="alert">{wallet.connectionError}</p>}
 
         {/* In-Browser Wallet Content */}
         {walletMode === 'in-browser' ? (
@@ -258,6 +280,19 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
               </div>
             </div>
           </>
+        ) : walletMode === 'phantom' ? (
+          <div className="mock-wallet-view phantom-wallet-view">
+            <h3>Phantom browser wallet</h3>
+            {!wallet.phantomAvailable && <p>Install <a href="https://phantom.com/download" target="_blank" rel="noreferrer">Phantom</a> and reload this page to connect.</p>}
+            <p>App RPC: <code>{wallet.endpoint}</code></p>
+            <p>In Phantom, open Settings → Developer Settings → Change Network and select the same network as the app. Some versions call this Testnet Mode.</p>
+            <p>For localnet, select or configure <code>http://127.0.0.1:8899</code> if your Phantom version supports a custom RPC. If it does not, use the in-browser wallet for localnet.</p>
+            <p>ComFi cannot change or verify Phantom’s selected network. Connecting shares your public address; it does not sign a transaction.</p>
+            <button type="button" className="primary" disabled={!wallet.phantomAvailable || wallet.isConnecting || wallet.connected}
+              onClick={() => runWalletAction(wallet.connect)}>
+              {wallet.isConnecting ? 'Connecting…' : wallet.connected ? 'Phantom connected' : 'Connect Phantom'}
+            </button>
+          </div>
         ) : (
           /* Mock Wallet View */
           <div className="mock-wallet-view">
@@ -272,7 +307,7 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
               <button
                 type="button"
                 className="primary"
-                onClick={() => setWalletMode('in-browser')}
+                onClick={() => { setImportError(null); setWalletMode('in-browser') }}
               >
                 Switch to In-Browser Web Wallet
               </button>
@@ -280,18 +315,15 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
           </div>
         )}
 
+        {importError && walletMode === 'phantom' && !wallet.connectionError && <p role="alert" className="import-error-msg">{importError}</p>}
+
         {/* Modal Footer */}
         <div className="wallet-modal-footer">
           <button
             type="button"
             className="disconnect-btn"
-            onClick={() => {
-              if (wallet.connected) {
-                wallet.disconnect()
-              } else {
-                wallet.connect()
-              }
-            }}
+            disabled={wallet.isConnecting || (walletMode === 'phantom' && !wallet.phantomAvailable)}
+            onClick={() => runWalletAction(wallet.connected ? wallet.disconnect : wallet.connect)}
           >
             {wallet.connected ? 'Disconnect' : 'Connect Wallet'}
           </button>

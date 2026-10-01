@@ -75,3 +75,24 @@ Autonomous agents contributing to this repository operate under the **Two-Commit
 
 - **Audit & Remediation**: See the [Security Vulnerability & Audit Tracker](programs/comfi/README.md#security-vulnerability--audit-tracker) in `programs/comfi` for resolved and tracked findings.
 - **On-Chain Transparency**: While all transactions and justifications are immutably recorded on-chain, community members must actively review spending history and exercise their voting rights. ComFi is a transparent financial companion to community chats, not a substitute for human communication.
+
+### Phantom browser wallet
+
+Open **ComFi Wallet → Phantom → Connect Phantom** and approve the extension's
+connection request. ComFi uses Phantom's dedicated `window.phantom.solana`
+provider when available, falling back to `window.solana` only if `isPhantom` is
+true. Account changes and extension disconnects update the app automatically;
+rejecting a request displays an error and leaves the wallet disconnected.
+
+Set `VITE_SOLANA_RPC` to `http://127.0.0.1:8899`,
+`https://api.devnet.solana.com`, or `https://api.testnet.solana.com` before starting
+the web app. In Phantom, use **Settings → Developer Settings → Change Network**
+(or **Testnet Mode**, depending on the extension version) to match that network.
+For localnet, configure a custom RPC if your Phantom version supports it;
+otherwise select the ComFi in-browser wallet. ComFi cannot switch or verify the
+extension's selected network. This integration connects your public identity;
+the current pool creation and initialization endpoints still require the mock
+wallet and use the local development signer.
+
+Provider API references: [Detecting Phantom](https://docs.phantom.com/solana/detecting-the-provider)
+and [connection lifecycle](https://docs.phantom.com/solana/establishing-a-connection).

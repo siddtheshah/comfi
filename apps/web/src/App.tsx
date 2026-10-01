@@ -108,7 +108,7 @@ export function App() {
   const closeNotice = () => setNotice('')
 
   const createPool = async () => {
-    if (!wallet.connected) return setNotice('Connect the local mock wallet first.')
+    if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setCreatingPool(true)
     try {
       const response = await fetch('/__comfi/mock-wallet/create-pool', { method: 'POST' })
@@ -125,7 +125,7 @@ export function App() {
   }
 
   const initialize = async () => {
-    if (!wallet.connected) return setNotice('Connect the local mock wallet first.')
+    if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setInitializing(true)
     try {
       const response = await fetch('/__comfi/mock-wallet/initialize', { method: 'POST' })
@@ -190,18 +190,17 @@ export function App() {
               title={`Click to open ComFi Wallet Manager (${wallet.publicKey})`}
               onClick={() => setWalletModalOpen(true)}
             >
-              {wallet.walletMode === 'mock' ? 'Mock wallet' : 'ComFi Wallet'} · {wallet.publicKey?.slice(0, 4)}…{wallet.publicKey?.slice(-4)}
+              {wallet.walletLabel} · {wallet.publicKey?.slice(0, 4)}…{wallet.publicKey?.slice(-4)}
             </button>
           ) : (
             <button
               className="primary"
               data-testid="connect-wallet"
               onClick={() => {
-                wallet.connect()
                 setWalletModalOpen(true)
               }}
             >
-              Connect mock wallet
+              Connect wallet
             </button>
           )}
           <button className="avatar you">YT</button>
@@ -209,7 +208,7 @@ export function App() {
       </header>
       {wallet.connected && (
         <div className="localnet-banner" data-testid="localnet-wallet">
-          {wallet.walletMode === 'mock' ? 'Localnet mock wallet connected' : 'ComFi In-Browser wallet connected'} · {wallet.endpoint}
+          {wallet.walletMode === 'mock' ? 'Localnet mock wallet connected' : wallet.walletMode === 'phantom' ? 'Phantom wallet connected' : 'ComFi In-Browser wallet connected'} · {wallet.endpoint}
         </div>
       )}
       <WalletModal isOpen={walletModalOpen} onClose={() => setWalletModalOpen(false)} />

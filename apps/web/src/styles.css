@@ -102,3 +102,10 @@
 .close-btn{font-size:12px;font-weight:600;color:#ffffff;background:#243328;padding:7px 15px;border-radius:7px}
 .close-btn:hover{background:#354a3b}
 
+
+.wallet-mode-tabs{flex-wrap:wrap}
+.wallet-mode-tab{flex:1 1 120px}
+.mock-wallet-view code{overflow-wrap:anywhere}
+
+.phantom-wallet-view h3{font:600 17px 'Playfair Display',serif;margin:0;color:#1c2920}
+.phantom-wallet-view p{font-size:12px;line-height:1.5;color:#506255;margin:0}
