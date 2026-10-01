@@ -1,70 +1,77 @@
-# ComFi
+# ComFi (Community Finance)
 
-ComFi (Com - FI) is a Community Finance decentralized application that enables communities to pool
-resources and make payments amongst each other, while authorizing members to have spend limits from
-the community pool.
+ComFi is a decentralized Community Finance protocol on Solana that enables groups, DAOs, and clubs to pool funds, establish recurring funding cycles, and authorize trusted members with transparent spending allowances from a shared community USDC vault.
 
-ComFi's priority is ensuring transparent transaction history to all participants in a pool, and enabling
-the building of a trusted community without needing an expensive paid app.
+All transactions and governance actions are verifiably settled on-chain. ComFi provides an open, trusted alternative to opaque group budgeting and expensive SaaS subscription apps.
 
-## Key Usage
+---
 
-ComFi lets you keep track of your spending pools, which are pushed to blockchain. You can join or create
-a pool, which has rules on its funding cycle and what is needed to remain a "funded member". Funded members get permissions and voting rights in regards to sending the spend limits of the authorized spenders.
+## Key Features
 
-The authorized spenders may take from the pool up to their spend limit on a given cycle. They are required to give justification by default, which can be scanned by all the members of the community. The community can then vote to raise or lower their spend limit by proposal, after seeing the spenders history of transactions with the justifications.
+- **Pooled USDC Vaults**: PDA-governed native USDC vaults secured by Anchor smart contracts.
+- **Funding Cycles & Obligations**: Configurable cycle durations and member deposit obligations with transparent voting power.
+- **Granular Spend Limits & Justifications**: Authorized spenders can draw up to per-cycle caps or submit one-off withdrawal requests accompanied by publicly inspectable justifications.
+- **Democratic Governance**: Six distinct proposal types (`SetSpenderLimit`, `ApproveWithdrawal`, `ConfigurationModification`, `ClosePool`, `EvictMember`, `AdmitMember`) with quorum enforcement and execution timelocks.
+- **Fair Settlement & Anti-Cartel Settlement**: Mathematical $O(1)$ cumulative spend-benefit tracking and anti-cartel closure waterfall to protect members upon pool wind-down.
+- **Subagent Protocol**: Automated development workflow powered by autonomous subagents coordinating via task claims in [`TASKLIST.md`](./TASKLIST.md).
 
-## Prototype workspace
+---
 
-The first implementation slice is organized as a small workspace:
+## Workspace Structure
 
-- `apps/web` — responsive member workspace for viewing live on-chain pools, vault balances, activity, proposals, and payment requests.
-- `services/sponsor-api` — bounded, short-lived sponsorship and enrollment quote service.
-- `programs/comfi` — Anchor program that guards the pool USDC vault and governance flows. See the [Security Vulnerability & Audit Tracker](programs/comfi/README.md#security-vulnerability--audit-tracker) for actively tracked findings and remediation roadmap.
+This monorepo is organized into the following packages and services:
 
+| Package | Path | Description |
+| :--- | :--- | :--- |
+| **`@comfi/web`** | [`apps/web`](./apps/web) | Member web application (React, Vite, TypeScript) for pool exploration, multi-wallet connections, governance voting, and treasury management. |
+| **`@comfi/testing`** | [`apps/testing`](./apps/testing) | Developer test console and governance action simulator running on localnet and devnet. |
+| **`@comfi/sponsor-api`** | [`services/sponsor-api`](./services/sponsor-api) | Bounded, HMAC-signed transaction sponsorship and capacity-enrollment quote microservice. |
+| **`comfi`** | [`programs/comfi`](./programs/comfi) | Anchor smart contract guarding USDC vaults, member accounts, cycles, and governance proposals. |
 
 ---
 
 ## Installation & Setup
 
-For full installation requirements (Node.js 22+, Rust, Solana CLI, Anchor CLI, and WSL2 instructions), please read the comprehensive **[Installation Guide](file:///c:/Users/sidds/Documents/comfi/INSTALL.md)**.
-
-### Quick Start (from scratch)
-
-1. **Install dependencies**:
-   ```shell
-   npm install
-   ```
-2. **Configure environment**:
-   ```shell
-   cp .env.example .env
-   ```
-3. **Build the Anchor smart contract**:
-   ```shell
-   anchor build
-   ```
-4. **Bootstrap the isolated localnet validator and deployer**:
-   ```shell
-   npm run localnet:setup
-   ```
-   *This starts the validator on `http://127.0.0.1:8899`, deploys `programs/comfi`, initializes the USDC mint and treasury, and funds the development mock wallet.*
-5. **Start the Web UI**:
-   ```shell
-   npm run dev
-   ```
-   *Open `http://localhost:5173` to view live on-chain pools, inspect contract parameters, and deploy new pools with **Start a pool**.*
+For complete, step-by-step setup instructions—including toolchain prerequisites (Node.js 22+, Rust, Solana CLI, Anchor CLI, WSL2), localnet validator setup, and environment configuration—please see the **[Installation Guide](./INSTALL.md)**.
 
 ---
 
-## Validation & Testing
+## Testing & Verification
 
-- `npm run test` — runs workspace unit tests (quote generation, member allowances, structured error handling).
-- `npm run typecheck` — strict TypeScript verification across `@comfi/web` and `@comfi/sponsor-api`.
-- `npm run test:e2e` — Playwright end-to-end tests validating mock wallet connections, on-chain pool inspections, proposals, and payment requests.
-- [Devnet testing fixtures](fixtures/devnet/README.md) — public Devnet deployment details, fixture requirements, and secret-handling rules.
+Always run test suites before committing changes:
 
+- **Unit Tests**:
+  ```shell
+  npm test
+  ```
+  *Executes test suites across `@comfi/testing` and `@comfi/sponsor-api`.*
 
-## Community Vigilance
+- **Type Checking**:
+  ```shell
+  npm run typecheck
+  ```
+  *Strict TypeScript verification across `@comfi/web`, `@comfi/testing`, and `@comfi/sponsor-api`.*
 
-As all transactions are persisted to blockchain, all transactions are visible. However, it is still the duty of the community to act on this information, and communicate properly to each other to ensure that
-spending is legitimate. ComFi is a companion to group chats and community servers, not a replacement.
+- **End-to-End Tests**:
+  ```shell
+  npm run test:e2e
+  ```
+  *Runs Playwright E2E suites validating wallet connection, pool inspections, proposals, and requests.*
+
+- **Devnet Fixtures**: See [`fixtures/devnet/README.md`](./fixtures/devnet/README.md) for public Devnet deployment details and test fixture configurations.
+
+---
+
+## Subagents & Development Protocol
+
+Autonomous agents contributing to this repository operate under the **Two-Commit Execution Model** defined in **[`AGENTS.md`](./AGENTS.md)**:
+
+1. **Claim Task**: Subagents inspect **[`TASKLIST.md`](./TASKLIST.md)**, assign their identifier and an ISO-8601 deadline, and commit the claim as Commit 1.
+2. **Execute & Complete**: Subagents implement the task, ensure `npm test` and `npm run typecheck` pass, update the task to completed (`- [x]`), commit the work as Commit 2, and terminate.
+
+---
+
+## Security & Community Vigilance
+
+- **Audit & Remediation**: See the [Security Vulnerability & Audit Tracker](programs/comfi/README.md#security-vulnerability--audit-tracker) in `programs/comfi` for resolved and tracked findings.
+- **On-Chain Transparency**: While all transactions and justifications are immutably recorded on-chain, community members must actively review spending history and exercise their voting rights. ComFi is a transparent financial companion to community chats, not a substitute for human communication.
