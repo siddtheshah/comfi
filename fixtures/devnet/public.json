@@ -25,6 +25,18 @@
         "pauseTransaction": "4tAfMWaqH2FJqAJ19pPNfsaTmhnKy7dYhH8f1bfbYHnn4WdTzsfh56McFWBHyRG5WYs5pwGHLU1RHvS3GC6DBvua",
         "unpauseTransaction": "FR3DsTNCfsXvHtgtqJhYbP3sS1nh58p3B3BRobLSc62FoVNXtccNsKGvZ7UerYe8jTa88eZZRnWaxpUM4kch5VD",
         "finalPaused": false
+      },
+      "solanaCosts": {
+        "poolCreation": {
+          "transactionFeeLamports": 10000,
+          "accountRentLamports": 6334920,
+          "totalCreatorDebitLamports": 6344920
+        },
+        "memberPauseExercise": {
+          "pauseFeeLamports": 5000,
+          "unpauseFeeLamports": 5000,
+          "totalCreatorDebitLamports": 10000
+        }
       }
     }
   ],

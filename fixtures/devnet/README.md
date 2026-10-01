@@ -26,6 +26,9 @@ fixture set. It contains no key material. The corresponding quote-authority
 keypair remains only in the ignored `fixtures/devnet/runtime/` directory.
 The listed test pool is a normal (non-testing-feature) pool with a 10 USDC
 initial vault balance and a 1 USDC enrollment fee paid to the treasury.
+Its measured creation cost was 0.00634492 SOL: 0.00001 SOL in transaction fees
+and 0.00633492 SOL in account rent. The completed member pause/unpause exercise
+cost 0.00001 SOL in total transaction fees.
 
 The deployed binary is the normal build. It excludes the development-only
 `test_*` instructions. Pool tests can use real, short timing parameters, or the
