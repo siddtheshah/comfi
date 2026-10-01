@@ -3,7 +3,7 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Mint, Token, TokenAccount},
 };
-use crate::pool::{transfer_user_tokens, ExecutionMode, Member, MemberRole, MemberStatus, Pool};
+use crate::pool::{transfer_user_tokens, AdmissionMode, ExecutionMode, Member, MemberRole, MemberStatus, Pool};
 use crate::ComfiError;
 
 #[account]
@@ -288,6 +288,13 @@ pub mod deployer_handlers {
         pool.pending_min_quorum_members = 1;
         pool.pending_min_quorum_bps = 5001;
         pool.pending_auto_close_cycles_threshold = 0;
+        pool.admission_mode = AdmissionMode::InviteVouched;
+        pool.voting_maturation_cycles = 2;
+        pool.proposal_execution_delay_cycles = 1;
+        pool.voting_member_count = if is_funded { 1 } else { 0 };
+        pool.pending_admission_mode = None;
+        pool.pending_voting_maturation_cycles = None;
+        pool.pending_proposal_execution_delay_cycles = None;
         ctx.accounts.global.next_pool_id = ctx
             .accounts
             .global
@@ -319,6 +326,12 @@ pub mod deployer_handlers {
         member.next_member = None;
         member.status = MemberStatus::Active;
         member.claimable_surplus_escrow = 0;
+        member.vouched_by = None;
+        member.lineage_depth = 0;
+        member.vouched_count = 0;
+        member.joined_cycle = 0;
+        member.funded_cycle_streak = if is_funded { 2 } else { 0 };
+        member.is_matured_voter = is_funded;
         Ok(())
     }
 }

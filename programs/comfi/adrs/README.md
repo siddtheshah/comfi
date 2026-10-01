@@ -21,7 +21,7 @@ Architecture Decision Records (ADRs) capture important architectural decisions a
 | [0001](0001-fair-closure-algorithm.md) | Fair Closure Algorithm | Implemented | 2026-09-23 |
 | [0002](0002-low-quorum-pool-locking.md) | Low Quorum Pool Locking and Auto-Closure Mechanism | Proposed | 2026-10-01 |
 | [0003](0003-member-voluntary-exit-and-governance-eviction.md) | Member Voluntary Exit, Governance Eviction, and Inviolable Surplus Preservation | Implemented | 2026-10-01 |
-| [0004](0004-sybil-resistance-and-governance-takeover-defense.md) | Sybil Resistance and Multi-Wallet Takeover Defense | Proposed | 2026-10-01 |
+| [0004](0004-sybil-resistance-and-governance-takeover-defense.md) | Sybil Resistance and Constrained Pool Admission via Lineage-Vouched Governance | Implemented | 2026-10-01 |
 
 ## ADR Template
 

@@ -1,11 +1,11 @@
-# ADR 0004: Sybil Resistance and Multi-Wallet Takeover Defense
+# ADR 0004: Sybil Resistance and Constrained Pool Admission via Lineage-Vouched Governance
 
 ## Status
-Proposed
+Implemented
 
 ## Context and Problem Statement
 
-The ComFi protocol governs collaborative, revolving savings vaults on Solana. Members join pools governed by periodic funding cycles, contributing fixed recurring obligations ([`member_obligation_amount`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L488)), accumulating unconsumed advance prepayments ([`surplus_amount`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L728)), and authorizing shared expenditures via on-chain governance proposals.
+The ComFi protocol governs collaborative, revolving savings vaults on Solana. Members join pools governed by periodic funding cycles, contributing fixed recurring obligations ([`member_obligation_amount`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L488)), accumulating unconsumed advance prepayments ([`surplus_amount`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L951)), and authorizing shared expenditures via on-chain governance proposals.
 
 In an active pool, proposal approval thresholds ([`Proposal::required_votes_for_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L859-L886)) are calculated dynamically based on the cohort of funded, voting participants in the current cycle:
 
@@ -15,10 +15,10 @@ $$\text{required\_votes} = \left\lceil \frac{\text{active\_members} \times \text
 
 ### The Multi-Wallet Sybil Takeover Attack Vector
 
-Under the baseline protocol implementation, [`join_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1002-L1070) is open and permissionless to any valid Solana wallet keypair:
+Under an unconstrained, permissionless entry model, [`join_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1002-L1070) allows any valid Solana wallet keypair to enter:
 1. **Wallet Proliferation**: An attacker generates $K$ distinct Solana keypairs ($W_1, W_2, \dots, W_K$).
 2. **Minimal Capital Infiltration**: The attacker deposits the minimum single-cycle obligation $O = \text{member\_obligation\_amount}$ into the pool from each of the $K$ wallets.
-3. **Instant Enfranchisement**: Upon the subsequent cycle rollover ([`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1428-L1485)), every wallet transitions to `is_funded = true`, each receiving strictly $1$ vote in governance.
+3. **Instant Enfranchisement**: Upon cycle rollover ([`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1428-L1485)), every wallet transitions to `is_funded = true`, each receiving strictly $1$ vote in governance.
 4. **Majority Seizure**: In a pool with $N$ honest members, an adversary depositing $(N + 1) \times O$ acquires:
    $$\frac{K}{N + K} = \frac{N + 1}{2N + 1} > 50\%$$
    This crosses the simple majority threshold ($\ge 5,001$ bps).
@@ -30,22 +30,26 @@ Under the baseline protocol implementation, [`join_pool`](file:///c:/Users/sidds
 
 Because on-chain voting power scales linearly with funded wallet addresses rather than verified unique human identity or tenured community commitment, revolving pools face a severe vulnerability to hostile Sybil takeovers.
 
+To secure revolving pools against governance capture, **joining a pool must be substantially more constrained**. 
+
 ---
 
 ## Decision Drivers
 
-1. **Anti-Sybil Perimeter Security**:
-   Pools must have the ability to restrict admission based on verified unique human identity, community vouchers, or governance approval without forcing global centralized KYC.
-2. **Anti-Flash-Join Voting Defense (Temporal Maturation)**:
-   Newly admitted wallets must not acquire voting power on the very next cycle rollover. A maturation/probation schedule must delay voting rights, preventing flash-funding hostile takeovers.
-3. **Preservation of Pseudonymous Privacy**:
-   Identity verification must not compromise user privacy or expose real-world identity on-chain; it must leverage zero-knowledge proofs, decentralized identity credentials, or opaque sponsor quote attestations.
-4. **Economic and Game-Theoretic Disincentives**:
-   Hostile takeovers must be economically irrational. Attackers must risk capital lockup while honest members possess an escape hatch to exit unharmed.
-5. **Configurability Across Diverse Pool Use-Cases**:
-   Different pools have different trust assumptions (e.g. private family savings circles vs. semi-public mutual credit DAOs). The protocol must offer flexible admission policies suited to each use-case.
-6. **Timelocked Ragequit Protection**:
-   Mandatory timelocks combined with voluntary exit ([ADR 0003](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md)) must guarantee that honest members can withdraw 100% of their surplus prepayments before any contested proposal executes.
+1. **Constrained Pool Admission Perimeter**:
+   Pool entry must not be unconstrained or permissionless by default. Prospective members must be vetted and admitted through a secure protocol barrier before receiving membership or funding status.
+2. **Member-Proposed Admission with Peer Governance Vote**:
+   Admission must be initiated by an existing pool member proposing to add a candidate wallet. Existing pool members must review and vote to approve the candidate before enrollment.
+3. **Off-Chain Identity and Cluster Analysis via Web-of-Trust Lineage**:
+   The protocol explicitly rejects hardcoding centralized identity authorities, KYC credentials, or on-chain identity attestations into the smart contract. Centralized attestations create trusted third parties, censorship risks, and fragile oracle dependencies. Instead, identity distinctness and wallet clustering analysis are conducted **off-chain** by client applications, social graph indexers, and community members, utilizing the on-chain lineage graph (`vouched_by`, `lineage_depth`, `vouched_count`) as an immutable data foundation.
+4. **Lineage Transparency as an Informed Voting Basis**:
+   Every member's vouching lineage (`vouched_by`, parent chain, and number of introduced members) must be permanently recorded on-chain. Transparent lineage provides voters with the critical context needed to identify and reject concentrated Sybil clusters.
+5. **Acknowledging Single-Inviter Degradation while Assuming Distributed Vouching**:
+   A pool might organically exhibit single-inviter behavior where one member proposes all new entrants and others routinely vote to approve them. While such a pattern might emerge in practice, it severely degrades the pool's Sybil security perimeter. The protocol does not create explicit mechanisms or roles for single-inviters; rather, the security model assumes distributed vouching across members, actively advocates against single-inviter concentration, and provides on-chain lineage tracking so voters can detect and reject it.
+6. **Anti-Flash-Join Voting Maturation Schedule**:
+   Even after admission approval, newly funded wallets must undergo a probationary maturation schedule before gaining voting rights.
+7. **Cycle-Based Timelock and Sovereign Ragequit Protection**:
+   Mandatory proposal execution delays must be specified in terms of cycles (`proposal_execution_delay_cycles \ge 1`). Because voluntary member exit ([ADR 0003](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md)) refunds surplus immediately but only unlinks members and recalculates quorum on cycle rollover ([`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1428)), delaying execution by at least one cycle rollover guarantees that dissenting members can exit cleanly, and any resulting drop below quorum automatically triggers a low-quorum pool lock ([ADR 0002](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0002-low-quorum-pool-locking.md)) before the proposal can ever execute.
 
 ---
 
@@ -54,23 +58,37 @@ Because on-chain voting power scales linearly with funded wallet addresses rathe
 ### Option 1: Prohibitive Upfront Capital Staking / Bonding
 - **Mechanism**: Every member must deposit an enormous non-refundable bond (e.g. $10\times$ cycle obligation) to join.
 - **Drawbacks**: 
-  - Highly exclusionary for lower-income participants, contradicting ComFi's core mission of accessible revolving savings.
+  - Highly exclusionary for lower-income participants, contradicting ComFi's core mission of accessible revolving credit.
   - Wealthy adversaries can still comfortably out-capitalize small honest pools.
 
-### Option 2: Mandatory Global KYC Gatekeeper
-- **Mechanism**: Require all users to submit government identification to a centralized gatekeeper before creating or joining any pool.
+### Option 2: Mandatory Global Centralized KYC Gatekeeper
+- **Mechanism**: Require all users to submit government identification to a centralized KYC vendor before creating or joining any pool.
 - **Drawbacks**:
   - Destroys decentralization, pseudonymous privacy, and composability.
-  - Introduces substantial regulatory liability and single points of failure.
+  - Introduces substantial regulatory liability, custody risk, and single points of failure.
+  - Inflexible for private community savings circles that already possess social trust.
 
-### Option 3: Layered Defense-in-Depth Architecture (Chosen)
+### Option 3: Centralized Identity Attestations / Oracles On-Chain (Rejected)
+- **Mechanism**: Require on-chain identity attestations, biometric proof-of-personhood receipts, or third-party oracle attestations (e.g. World ID, centralized identity issuers).
+- **Drawbacks**:
+  - Replaces decentralized trust with reliance on external authorities, oracle keys, and administrative issuance policies.
+  - Introduces censorship vulnerabilities where users can be de-platformed or blacklisted by off-chain identity authorities.
+  - Fragile on-chain surface area susceptible to oracle desynchronization or discontinued support.
+
+### Option 4: Open Permissionless Entry with Reactive Eviction
+- **Mechanism**: Allow anyone to join freely, relying on governance to evict malicious members post-facto via [ADR 0003](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md).
+- **Drawbacks**:
+  - Flawed timing: once an attacker funds $N+1$ wallets, they already command the voting majority. Honest members can no longer pass an eviction proposal against the attacker's cartel.
+
+### Option 5: Constrained Admission via `InviteVouched` with On-Chain Lineage Tracking, Maturation Delays, and Off-Chain Identity Analysis (Chosen)
 - **Mechanism**:
-  - **Layer 1: Configurable Admission Modes**: Pools declare admission policies at creation (`Open`, `InviteVouched`, `GovernanceApproved`, `AttestedIdentity`).
-  - **Layer 2: Cryptographic Identity Attestation**: For public pools (`AttestedIdentity`), require an Ed25519 sponsor attestation of unique human identity (e.g. Civic Pass, WorldID, or device biometric key), enforcing strictly **1 wallet per unique human per pool** via an on-chain `IdentityReceipt` PDA.
-  - **Layer 3: Voting Power Maturation Schedule**: Newly joined members must complete $M$ consecutive funded cycles before acquiring voting rights (`is_matured_voter = true`). Voting thresholds are calculated strictly over matured members.
-  - **Layer 4: Supermajority Floors**: Critical proposals (`SetSpenderLimit`, `EvictMember`, `ConfigurationModification`) require a strict $66.67\%$ (6,667 bps) supermajority.
-  - **Layer 5: Timelocked Sovereign Ragequit**: Mandatory timelocks allow honest members to invoke `leave_pool` ([ADR 0003](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md)) with 100% surplus before execution, dropping participation below quorum and triggering an automated pool lock ([ADR 0002](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0002-low-quorum-pool-locking.md)).
-- **Outcome**: Completely neutralizes multi-wallet takeovers across economic, temporal, cryptographic, and game-theoretic attack vectors.
+  - **Constrained Entry Gate**: Pool joining is gated. Wallets cannot enter without being proposed by an active member.
+  - **Member Vouching & Peer Vote Approval**: An active member submits a proposal to admit a candidate wallet. Existing pool members vote to agree.
+  - **Immutable Lineage Tracking**: The candidate's `Member` account records their direct sponsor (`vouched_by`) and increments the sponsor's `vouched_count`. Pool members inspect this lineage tree as an informed basis when voting.
+  - **Off-Chain Identity & Cluster Analysis**: Client interfaces, indexers, and community members perform identity distinctness and wallet clustering analysis off-chain to inform peer votes.
+  - **Single-Inviter Risk Acknowledged**: The protocol avoids any dedicated single-inviter role or mechanism; if a pool chooses to funnel all additions through one member, its Sybil security foundation breaks down. Lineage tracking makes this pattern transparent so members can advocate against it.
+  - **Defense-in-Depth**: Combined with a voting maturation schedule ($M$ cycles before voting), supermajority floors on sensitive actions, and cycle-based timelocked sovereign ragequit.
+- **Outcome**: Completely stops automated and Sybil infiltration at the perimeter without centralized oracles, preserves member privacy, and ensures democratic oversight over pool membership.
 
 ---
 
@@ -83,14 +101,11 @@ Because on-chain voting power scales linearly with funded wallet addresses rathe
 ```rust
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AdmissionMode {
-    /// Anyone can join permissionlessly (default for testing/private trusted circles).
-    Open,
-    /// Must be vouched by an existing funded member who stakes a voucher bond.
+    /// Constrained entry: active member proposes candidate, pool members vote to agree.
+    /// Tracks on-chain vouching lineage. (Default)
     InviteVouched,
-    /// Admission requires a passed governance proposal (AdmitMember).
-    GovernanceApproved,
-    /// Requires an Ed25519 sponsor attestation of unique human identity (1 human = 1 wallet per pool).
-    AttestedIdentity,
+    /// Unrestricted permissionless joining (strictly for local testing or pre-seeded trusted circles).
+    Open,
 }
 
 pub struct Pool {
@@ -104,21 +119,56 @@ pub struct Pool {
     /// Default: 2 cycles. Prevents flash-join Sybil takeovers.
     pub voting_maturation_cycles: u64,
 
+    /// Mandatory execution delay in cycles between proposal approval and execution.
+    /// Default: 1 cycle (D >= 1). Guarantees at least one cycle rollover occurs before
+    /// any proposal executes, giving leaving members time to resolve departure.
+    pub proposal_execution_delay_cycles: u64,
+
     /// Total number of voting-eligible (matured) funded members in the current cycle.
     pub voting_member_count: u32,
 
     /// Pending configuration fields for governance updates:
-    pub pending_voting_maturation_cycles: u64,
+    pub pending_admission_mode: Option<AdmissionMode>,
+    pub pending_voting_maturation_cycles: Option<u64>,
+    pub pending_proposal_execution_delay_cycles: Option<u64>,
 }
 ```
 
-#### B. Member Account Additions ([`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L715-L740))
+#### B. Proposal Account Additions ([`Proposal`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1070-L1082))
+
+```rust
+pub struct Proposal {
+    // ... existing fields ...
+
+    pub voting_cycle: u64,
+    pub deadline_cycle: u64,
+
+    /// Cycle number on or after which this proposal can be executed.
+    /// Set upon reaching Executable state: voting_cycle + pool.proposal_execution_delay_cycles.
+    pub executable_cycle: u64,
+
+    pub executable_after: i64,
+    pub state: ProposalState,
+}
+```
+
+#### C. Member Account Additions ([`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L939-L965))
 
 ```rust
 pub struct Member {
     // ... existing fields ...
 
-    /// Cycle number on which the member first achieved funded status.
+    /// Direct inviter wallet that vouched for and proposed this member.
+    /// Root members of the pool (pool creators/initial cohort) have None.
+    pub vouched_by: Option<Pubkey>,
+
+    /// Number of hops from the pool's founding cohort (lineage tree depth).
+    pub lineage_depth: u32,
+
+    /// Total number of members this wallet has personally vouched for and added.
+    pub vouched_count: u32,
+
+    /// Cycle number on which the member first enrolled in the pool.
     pub joined_cycle: u64,
 
     /// Number of cumulative cycles this member has been actively funded.
@@ -126,110 +176,133 @@ pub struct Member {
 
     /// True if the member has satisfied the pool's voting maturation requirement.
     pub is_matured_voter: bool,
-
-    /// Optional voucher address that endorsed this member (for InviteVouched mode).
-    pub vouched_by: Option<Pubkey>,
 }
 ```
 
-#### C. Identity Receipt PDA (Unique Human Enforcement)
-
-For pools operating under `AdmissionMode::AttestedIdentity`, uniqueness is enforced on-chain via a dedicated PDA:
+#### D. Proposal Action: `AdmitMember` ([`ProposalAction`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L942-L965))
 
 ```rust
-/// PDA seeds: ["identity", pool.key().as_ref(), identity_commitment.as_ref()]
-#[account]
-pub struct IdentityReceipt {
-    pub pool: Pubkey,
-    pub member: Pubkey,
-    pub identity_commitment: [u8; 32],
-    pub bump: u8,
-}
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq, Debug)]
+pub enum ProposalAction {
+    // ... existing actions: SetSpenderLimit, ConfigurationModification, ClosePool, EvictMember ...
 
-impl IdentityReceipt {
-    pub const SPACE: usize = 8 + 32 + 32 + 32 + 1;
+    /// Propose admitting a new wallet to the pool under InviteVouched admission mode.
+    AdmitMember {
+        /// The prospective member's wallet address.
+        candidate_wallet: Pubkey,
+        /// The proposing/vouching member's wallet.
+        vouched_by: Pubkey,
+    },
 }
 ```
 
+#### E. Off-Chain Identity Analysis & Web-of-Trust Lineage
+
+Rather than binding the on-chain program to centralized identity oracles or fragile credential attestations, identity verification is modeled as a **two-tier architecture**:
+1. **On-Chain Cryptoeconomic Guarantees**: Immutable lineage tracking (`vouched_by`, `lineage_depth`, `vouched_count`), peer governance votes, anti-flash-join voting maturation, and cycle-delayed sovereign ragequits.
+2. **Off-Chain Identity & Cluster Analysis**: Client dApps, community dashboards, and indexers analyze transaction graphs, social graphs, and wallet clustering heuristics to assist members in making informed voting decisions before approving an admission proposal.
+
 ---
 
-### 2. Multi-Layer Defense Architecture
+## Admission Architecture & Governance Workflow
 
 ```mermaid
-graph TD
-    A[New Wallet Join Request] --> B{Layer 1: Admission Mode}
-    B -->|Open| C[Unrestricted Deposit]
-    B -->|InviteVouched| D[Active Member Vouch Bond]
-    B -->|GovernanceApproved| E[AdmitMember Proposal Vote]
-    B -->|AttestedIdentity| F[Ed25519 Sponsor Unique Human Attestation]
+sequenceDiagram
+    autonumber
+    actor Inviter as Proposing Member
+    actor Candidate as Candidate Wallet
+    participant PoolContract as ComFi Program
+    actor Voters as Pool Voting Members
+    actor Cranker as Crank / Rollover
 
-    C & D & E & F --> G[Enrolled as Member]
+    Note over Inviter,Candidate: Step 1: Peer Sponsorship
+    Candidate->>Inviter: Request Invitation (Candidate Wallet)
+    Inviter->>PoolContract: propose_admit_member(candidate_wallet)
+    PoolContract->>PoolContract: Create ProposalAction::AdmitMember<br/>Expose Inviter's Lineage & vouched_count
 
-    G --> H{Layer 2: Voting Maturation Period}
-    H -->|funded_cycles < M| I[Funded Non-Voting Member: is_matured_voter = false]
-    H -->|funded_cycles >= M| J[Full Governance Voter: is_matured_voter = true]
+    Note over Voters,PoolContract: Step 2: Off-Chain Analysis & Peer Voting
+    Voters->>Voters: Inspect Candidate & Proposer Lineage off-chain
+    Voters->>PoolContract: vote(proposal, VoteType::Yes)
 
-    I --> K[Participates in Savings / Receives Benefits]
-    J --> L[Creates Proposals & Votes]
+    Note over PoolContract,Cranker: Step 3: Enactment & Onboarding
+    PoolContract->>PoolContract: Proposal Passes Threshold
+    Cranker->>PoolContract: execute_admit_member()
+    PoolContract->>PoolContract: Initialize Member PDA<br/>vouched_by = Inviter<br/>lineage_depth = Inviter.depth + 1<br/>Inviter.vouched_count += 1
 
-    L --> M{Layer 3: Supermajority & Anti-Cartel Floors}
-    M --> N[Spender Limits: 66.67% Supermajority]
-    M --> O[Evictions: 66.67% Supermajority, Target Excluded]
-    M --> P[Pool Closure: 50.01% Majority + Anti-51% Net Benefit Clawback]
-
-    L --> Q{Layer 4: Mandatory Timelock & Ragequit Window}
-    Q --> R[Proposal Passes -> Timelock Active]
-    R --> S[Honest Members Inspect Action]
-    S -->|Hostile Proposal Detected| T[Honest Members Call leave_pool]
-    T --> U[100% Surplus Reclaimed Instantly, Pool Drops Below Quorum]
-    U --> V[ADR 0002 Quorum Lock Triggers: Spends Frozen]
+    Note over Candidate,PoolContract: Step 4: Funding & Maturation
+    Candidate->>PoolContract: deposit(member_obligation_amount)
+    Cranker->>PoolContract: roll_cycle() [M cycles elapse]
+    PoolContract->>PoolContract: member.is_matured_voter = true<br/>pool.voting_member_count += 1
 ```
 
 ---
 
-### 3. Layer 1: Configurable Admission Modes
+## Core Security & Architectural Principles
 
-When creating a pool ([`CreatePoolArgs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs#L25-L46)), the creator selects the admission policy:
+### 1. `InviteVouched` Admission Flow
 
-#### A. Mode 1: `AdmissionMode::AttestedIdentity` (Decentralized Identity Verification)
-- Uses the existing ComFi off-chain quote verification architecture (`verify_preceding_ed25519_quote` with `GlobalConfig.quote_authority`).
-- The sponsor API verifies a unique decentralized identity credential (e.g. Civic Pass, WorldID, Solana Mobile Stack hardware key, or phone-bound passkey).
-- The sponsor issues an Ed25519 signed message:
-  ```rust
-  pub struct SponsorJoinQuote {
-      pub quote_id: [u8; 32],
-      pub pool: Pubkey,
-      pub candidate_wallet: Pubkey,
-      pub identity_commitment: [u8; 32], // Hash of unique human credential
-      pub expires_at: i64,
-  }
-  ```
-- An on-chain PDA `IdentityReceipt` (`seeds = ["identity", pool, identity_commitment]`) is initialized on join. If the same physical identity attempts to join with a secondary wallet, the PDA initialization fails with `AccountAlreadyInitialized`.
-- **Result**: Exactly 1 wallet per unique human per pool. Sybil wallet proliferation is impossible.
-
-#### B. Mode 2: `AdmissionMode::InviteVouched` (Web-of-Trust / Mutual Credit)
-- A prospective member can join only if accompanied by an `inviter: Signer` who is an active funded member of the pool.
-- The inviter stakes a temporary voucher bond ($B = \text{member\_obligation\_amount}$). If the vouched member defaults or is evicted for malicious behavior, the bond is forfeited to pool conferred capital.
-- Each active member has a limited invitation quota (e.g. 1 active invite per cycle).
-- **Result**: An attacker cannot generate wallets out of thin air; they must convince existing members to stake real capital on each wallet.
-
-#### C. Mode 3: `AdmissionMode::GovernanceApproved` (Club / DAO Mode)
-- Calling `join_pool` creates a `JoinPoolRequest` account and escrows the initial deposit.
-- Existing members vote on a `ProposalAction::AdmitMember { candidate_wallet }`.
-- Only once the proposal passes and completes timelock can the candidate be enrolled as an active member.
-- **Result**: Sybil takeovers are blocked at the perimeter by community vetting.
-
-#### D. Mode 4: `AdmissionMode::Open`
-- Permissionless joining for development, testing, or private family pools where all participants know each other off-chain.
+In `AdmissionMode::InviteVouched`:
+1. **Proposal Initiation**: An active, funded member creates a proposal (`ProposalAction::AdmitMember`). A random external wallet cannot call `join_pool` directly.
+2. **Off-Chain Identity Vetting**:
+   - Members and community participants inspect the candidate wallet and proposing lineage off-chain (e.g. cluster analysis, social vouches, off-chain attestations).
+   - The on-chain contract remains completely permissionless and unburdened by central oracle dependencies.
+3. **Lineage Disclosure on Proposal**:
+   - The on-chain proposal state directly exposes the proposing member's address, their own `vouched_by` ancestor, and their current `vouched_count`.
+   - All pool participants can immediately observe:
+     - How many members the proposer has already introduced.
+     - The track record and funding status of the proposer's existing lineage.
+4. **Peer Voting Agreement**:
+   - Active voting members cast votes on the admission proposal.
+   - Threshold: Simple majority ($\ge 5,001$ bps) of the current matured voting electorate.
+5. **Execution and Enrollment**:
+   - Once approved and through any configured timelock, `execute_admit_member` initializes the candidate's `Member` account.
+   - The candidate's `vouched_by` is set to the proposing member.
+   - The proposer's `vouched_count` is incremented.
+   - The candidate can now deposit funds to become funded in the next cycle.
 
 ---
 
-### 4. Layer 2: Voting Power Maturation Schedule (Anti-Flash-Join Period)
+### 2. Lineage Tracking as an Informed Basis for Voting
 
-Even if an attacker bypasses admission (or in `Open` pools), they **cannot immediately vote**:
+A core insight of this ADR is that **sybil resistance in collaborative credit does not require invasive KYC if social lineage is transparently auditable on-chain**.
 
-- When a member joins, their `joined_cycle = pool.current_cycle` and `funded_cycle_streak = 0`.
-- During [`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1428-L1485), as obligations are consumed:
+- **Lineage Tree**: Every member record contains:
+  $$\text{Member.lineage} = (\text{vouched\_by}, \text{lineage\_depth}, \text{vouched\_count})$$
+- **Informed Voting Evaluation**:
+  When a member proposes adding Wallet $W_{new}$, voters evaluate:
+  1. *Who is the sponsor?* Is the sponsor a tenured, consistently funded member with good standing?
+  2. *What is the sponsor's vouch count?* Has this sponsor already vouched for 5 other wallets in recent cycles?
+  3. *Is the sponsor's tree behaving well?* Have previous members in this lineage defaulted, paused, or caused friction?
+- **Spreading Invites Evenly (The Smart Posture)**:
+  - Best practice for pool health is for members to distribute new invitations evenly across the cohort (e.g. each member sponsors 1–2 peers).
+  - If one member begins proposing a disproportionate number of new wallets, the remaining members observe the concentration immediately in the lineage data and can vote **NO** on the admission proposal.
+  - Even without hardcoded algorithmic quotas, transparent lineage gives voters an informed basis to halt Sybil expansion.
+
+---
+
+### 3. Emergent Single-Inviter Concentration and Security Breakdown
+
+In some real-world communities or organizational settings, an operational pattern may emerge where a single member (e.g., a pool creator, employer, or organizer) proposes all new members, while other members passively vote to approve them.
+
+#### The Breakdown of the Security Perimeter
+The protocol explicitly acknowledges this risk:
+- **Security Degradation**: If a pool adopts single-inviter behavior, its Sybil defense foundation fundamentally breaks down. A single proposer holding a de facto monopoly over introductions can curate a cartel of Sybil wallets over successive cycles, eventually undermining quorum and capturing pool governance.
+- **Advocated Against**: The protocol strongly advocates against single-inviter concentration. Collaborative revolving credit is built on decentralized web-of-trust vouching, where invitations, social accountability, and risk are spread across the cohort.
+
+#### Protocol Stance: No Special Privileges & Distributed Assumption
+1. **No Explicit Protocol Roles for Single-Inviters**: The protocol intentionally provides no dedicated "single-inviter" account roles, bypass flags, or whitelist mechanics. Every addition must proceed through the same peer-voted `ProposalAction::AdmitMember` flow.
+2. **Assumption of Distributed Vouching**: The security model fundamentally assumes that honest pools will distribute invitations across multiple independent members.
+3. **Lineage as the Safeguard**: On-chain tracking of `vouched_by` and `vouched_count` ensures that single-inviter concentration cannot occur invisibly. If one wallet begins introducing a disproportionate share of entrants, active voters can immediately observe the clustering in the proposal metadata, challenge the behavior, and vote **NO** to preserve pool decentralization.
+
+---
+
+### 4. Layered Defenses Against Post-Admission Infiltration
+
+Even if a malicious wallet is successfully admitted via `InviteVouched`, downstream protocol layers prevent governance takeover:
+
+#### A. Voting Maturation Schedule (Anti-Flash-Join)
+- Admitted members start with `funded_cycle_streak = 0` and `is_matured_voter = false`.
+- During [`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1428-L1485), as recurring obligations are paid:
   ```rust
   if member.is_funded {
       member.funded_cycle_streak = member.funded_cycle_streak.saturating_add(1);
@@ -247,17 +320,12 @@ Even if an attacker bypasses admission (or in `Open` pools), they **cannot immed
       }
   }
   ```
-- **Maturation Requirement**: A member can create proposals or cast votes (`create_proposal`, `vote`) **only if** `member.is_matured_voter == true`.
-- **Electorate Basis**: Proposal thresholds are calculated against `pool.voting_member_count`, **not** raw `funded_member_count`:
+- **Threshold Basis**: Governance proposal thresholds are calculated against `pool.voting_member_count`, **not** raw `funded_member_count`:
   $$\text{active\_electorate} = \max(\text{pool.voting\_member\_count}, 1)$$
-- **Security Consequence**:
-  An attacker cannot deposit funds at cycle $C$ and vote at cycle $C+1$. They must deposit and sustain obligations over $M$ cycles (e.g. 2–3 full cycles). Over this multi-week window, honest members observe the influx of unknown funded wallets, can inspect their behavior, freeze spending via quorum locks, or invoke their ragequit rights.
+- New members must fund obligations for $M$ consecutive cycles (e.g. 2–3 cycles) before acquiring voting rights.
 
----
-
-### 5. Layer 3: Supermajority Floors for Hostile Actions
-
-Simple $50.01\%$ majorities are insufficient for actions that redistribute wealth or alter membership:
+#### B. Supermajority Floors for Critical Actions
+Critical proposals that redistribute capital or alter membership enforce strict supermajorities:
 
 | Proposal Action | Voting Threshold Floor | Eligible Electorate |
 | :--- | :--- | :--- |
@@ -265,24 +333,45 @@ Simple $50.01\%$ majorities are insufficient for actions that redistribute wealt
 | `EvictMember` | **$66.67\%$ (6,667 bps)** Supermajority | Matured voting members **excluding target** |
 | `AdmitMember` | **$50.01\%$ (5,001 bps)** Majority | All matured voting members |
 | `ConfigurationModification` | **$66.67\%$ (6,667 bps)** Supermajority | All matured voting members |
-| `ClosePool` | **$50.01\%$ (5,001 bps)** Majority | All funded members (or contributors if zero funded) |
+| `ClosePool` | **$50.01\%$ (5,001 bps)** Majority | All funded members |
 
-By elevating `SetSpenderLimit` and `EvictMember` to a $2/3$ supermajority, an attacker needs double the votes of honest participants, making Sybil attacks economically unviable.
+#### C. Cycle-Based Timelock (`proposal_execution_delay_cycles`) and Sovereign Ragequit Window
 
----
+In a cycle-indexed revolving credit protocol, specifying timelocks purely in wall-clock seconds creates an accounting hazard:
+- Calling [`leave_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1072) refunds unconsumed surplus prepayments immediately, but stages member unlinking, funded count decrements, and quorum re-evaluation to occur at cycle rollover ([`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1428-L1485)).
+- If a proposal were permitted to execute in the *same cycle* it passed (e.g. after a 24-hour delay that expires mid-cycle), an attacker could execute a `SetSpenderLimit` and spend within that active cycle. This spend would sync obligations across members still active for that cycle, causing an accounting race against leaving members.
 
-### 6. Layer 4: Timelocked Sovereign Ragequit
+To solve this, proposal execution is explicitly delayed by **cycles**:
 
-All proposals in ComFi must observe `pool.timelock_seconds` between finalization (`ProposalState::Executable`) and execution (`execute_*`).
+$$\text{proposal.executable\_cycle} = \text{proposal.voting\_cycle} + \text{pool.proposal\_execution\_delay\_cycles} \quad (D \ge 1)$$
 
-- If an attacker somehow achieves supermajority and passes a malicious `SetSpenderLimit` or `EvictMember` proposal:
-  1. The proposal enters the mandatory timelock window (e.g. 48–72 hours).
-  2. The proposal state is publicly visible as `Executable` with timestamp `executable_after`.
-  3. Any honest member can immediately call `leave_pool` ([ADR 0003](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md)).
-  4. The exiting member withdraws 100% of their unconsumed surplus prepayments directly to their wallet.
-  5. If multiple honest members exit, the vault balance drops, and the pool drops below `min_quorum_members` or `min_quorum_bps`.
-  6. Upon next rollover, the pool automatically locks ([ADR 0002](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0002-low-quorum-pool-locking.md)), blocking the execution of all non-closure proposals!
-- **Game-Theoretic Result**: An attacker who attempts a hostile spend ends up locking their own capital into a frozen vault, while honest participants walk away with all their surplus intact.
+```rust
+pub fn assert_executable(
+    proposal: &Account<Proposal>,
+    pool: &Account<Pool>,
+) -> Result<()> {
+    require!(
+        proposal.state == ProposalState::Executable,
+        ComfiError::ProposalNotExecutable
+    );
+    // 1. Mandatory cycle rollover delay (D >= 1)
+    require!(
+        pool.current_cycle >= proposal.executable_cycle,
+        ComfiError::ExecutionCycleNotReached
+    );
+    // 2. Physical wall-clock timelock floor
+    require!(
+        Clock::get()?.unix_timestamp >= proposal.executable_after,
+        ComfiError::TimelockActive
+    );
+    Ok(())
+}
+```
+
+#### How Cycle Delays Guarantee Security:
+1. **Forced Rollover Window**: Setting $D \ge 1$ guarantees that at least one cycle rollover (`roll_cycle`) must execute between proposal approval and execution. A proposal approved in Cycle $C$ cannot execute in Cycle $C$.
+2. **Clean Member Detachment**: Honest members observe the passed proposal in Cycle $C$ and call `leave_pool`. When `roll_cycle` runs, their status transitions from `Leaving` $\to$ `Exited`, their active count is decremented, and their ties to future pool obligations are completely severed.
+3. **Automated Quorum Lock Preempts Execution**: If honest departures drop active participation below `min_quorum_members` or `min_quorum_bps`, `roll_cycle` transitions the pool to `Locked` ([ADR 0002](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0002-low-quorum-pool-locking.md)). When Cycle $C+D$ arrives and the attacker attempts execution, `pool.ensure_not_locked()?` aborts the transaction. Malicious proposals cannot execute against a locked pool.
 
 ---
 
@@ -290,49 +379,62 @@ All proposals in ComFi must observe `pool.timelock_seconds` between finalization
 
 | Threat Vector | Adversarial Mechanism | Protocol Mitigation |
 | :--- | :--- | :--- |
-| **Flash Multi-Wallet Funding Takeover** | Attacker creates 10 wallets, funds 1 cycle each, and attempts to pass malicious spend limits on next cycle roll. | **1.** `AttestedIdentity` / `InviteVouched` gates admission.<br>**2.** `voting_maturation_cycles` delays voting rights by $M$ cycles.<br>**3.** $66.67\%$ supermajority required for spend limits.<br>**4.** Timelocked ragequit lets honest members exit with surplus before execution. |
-| **Sybil Flooding to Brick Quorum** | Attacker floods pool with unpaused accounts to inflate `member_count` and cause quorum lock failure. | `min_quorum_bps` is evaluated against enrolled members, but `member_cap` limits total pool size, and admission modes (`InviteVouched`/`AttestedIdentity`) prevent unauthorized account creation. |
-| **Fake Identity Spoofing** | Attacker attempts to reuse identity proofs across multiple wallets. | On-chain `IdentityReceipt` PDA derivation (`seeds = ["identity", pool, identity_commitment]`) rejects duplicate commitments atomically. |
-| **Bribing Existing Voters** | Attacker purchases voting power from established matured members. | Mandatory timelock ensures honest non-colluding members can always ragequit before malicious spending occurs. |
+| **Permissionless Sybil Infiltration** | Attacker spins up 20 wallets and funds them to capture majority. | **Blocked at perimeter**: `AdmissionMode::InviteVouched` requires an existing member to propose and the pool to vote-agree. Direct `join_pool` without an approved proposal is rejected. |
+| **Duplicate Identity Under Multiple Wallets** | An existing member attempts to introduce their own alternate wallet. | **Peer Review & Off-Chain Cluster Analysis**: Transparent proposal and lineage history exposes sponsor patterns. Members and client indexers inspect funding patterns and social graphs off-chain, voting **NO** on suspicious duplicate admissions. |
+| **Concentrated Inviter Infiltration** | A colluding member proposes a stream of attacker wallets. | **Lineage visibility**: Proposal displays proposer's `vouched_count` and ancestor lineage. Members see the concentration and vote **NO**. |
+| **Emergent Single-Inviter Concentration** | Pool members passively allow a single wallet to propose all additions, enabling that wallet to onboard a Sybil cartel. | Lineage tracking exposes proposer concentration (`vouched_count`). Protocol documentation advocates against this pattern. If members still surrender vouching to one actor, security degrades; however, voting maturation ($M$ cycles) and cycle-delayed ragequit still protect existing surplus. |
+| **Flash-Funding Takeover** | Attacker gets admitted and deposits massive funds on cycle $C$ to vote on $C+1$. | `voting_maturation_cycles` requires $M$ consecutive funded cycles before `is_matured_voter = true`. Thresholds exclude immature wallets. |
+| **Hostile Member Eviction / Fund Drain** | Cartel attempts to evict honest members or set massive spend limits. | $66.67\%$ supermajority required. Target excluded from eviction count. Mandatory `proposal_execution_delay_cycles \ge 1` forces rollover, letting honest members exit with surplus and triggering quorum lock before execution. |
 
 ---
 
 ## Invariants and Properties
 
-1. **Unique Physical Identity Invariant**:
-   $$\text{In AttestedIdentity mode}, \quad \forall w_1 \ne w_2 \in \text{Wallets}, \quad \text{Identity}(w_1) \ne \text{Identity}(w_2)$$
+1. **Constrained Admission Invariant**:
+   $$\forall w \in \text{Members}, \quad \text{Admitted}(w) \implies (\text{admission\_mode} = \text{Open}) \lor \left(\exists P \in \text{PassedProposals}: P.\text{action} = \texttt{AdmitMember}(w)\right)$$
 
-2. **Voting Power Exclusivity**:
+2. **Lineage Traceability Invariant**:
+   $$\forall m \in \text{Members} \setminus \text{FoundingCohort}, \quad m.\text{vouched\_by} \ne \text{None} \land m.\text{lineage\_depth} = \text{Member}(m.\text{vouched\_by}).\text{lineage\_depth} + 1$$
+
+3. **Lineage Monotonicity Invariant**:
+   $$\forall m \in \text{Members}, \quad m.\text{vouched\_count} = \sum_{c \in \text{Members}} \mathbb{I}(c.\text{vouched\_by} = m.\text{wallet})$$
+
+4. **Lineage Provenance Invariant**:
+   $$\forall m \in \text{Members}, \quad \text{LineageRecord}(m) \text{ is immutable post-admission, ensuring permanent off-chain graph auditability.}$$
+
+5. **Voter Maturation Exclusivity**:
    $$\text{VoterEligibility}(m) \iff (m.\text{is\_funded} = \text{true}) \land (m.\text{funded\_cycle\_streak} \ge \text{pool.voting\_maturation\_cycles}) \land (m.\text{status} = \text{Active})$$
 
-3. **Electorate Integrity**:
-   $$\text{pool.voting\_member\_count} = \sum_{m} \mathbb{I}(\text{VoterEligibility}(m))$$
+6. **Cycle-Delayed Execution Invariant**:
+   $$\forall P \in \text{Proposals}, \quad \text{Executable}(P) \implies (P.\text{executable\_cycle} \ge P.\text{voting\_cycle} + 1) \land (\text{pool.current\_cycle} \ge P.\text{executable\_cycle})$$
 
-4. **Timelock Sovereign Exit Right**:
-   $$\text{For any proposal } P \text{ in state } \texttt{Executable}, \quad \forall t < P.\text{executable\_after}, \quad \texttt{leave\_pool} \text{ is unconditionally permitted.}$$
+7. **Sovereign Ragequit Separation Invariant**:
+   $$\forall m \in \text{LeavingMembers}(\text{cycle } C), \quad \text{Status}(m, \text{cycle } C+1) = \text{Exited} \land (C+1 \le P.\text{executable\_cycle})$$
 
 ---
 
 ## Consequences
 
 ### Positive
-- **Complete Elimination of Sybil Takeovers**: Public pools can safely operate on Solana without risking multi-wallet governance capture.
-- **Flexible Community Gating**: Accommodates diverse organizational structures (open testbeds, private circles, mutual credit DAOs).
-- **Protection for Honest Capital**: Combines identity verification, voting maturation, supermajorities, and timelocked ragequits into an impenetrable security boundary.
+- **Guaranteed Perimeter Security**: Eliminates permissionless multi-wallet infiltration without relying on invasive or centralized KYC.
+- **Informed Governance Context**: Lineage transparency empowers pool members to make informed voting decisions based on community relationships and inviter accountability.
+- **Transparent Social Accountability**: Supports decentralized mutual-credit groups with distributed vouching while exposing concentration risks on-chain so pools can preserve decentralization.
+- **Graceful Failure Modes**: Even if an unauthorized wallet slips past admission, voting maturation, supermajority floors, and timelocked ragequits prevent capital loss.
 
 ### Negative / Trade-offs
-- **Onboarding Friction in Attested Pools**: Members joining `AttestedIdentity` pools must obtain an off-chain sponsor quote or pass decentralized identity verification.
-- **Voting Latency**: Newly funded members must wait $M$ cycles before participating in governance votes, slightly delaying initial governance involvement.
+- **Onboarding Latency**: Prospective members cannot join instantaneously; they must be proposed and wait for an admission voting window.
+- **Account State Size**: Slight increase in `Member` account byte layout to store `vouched_by`, `lineage_depth`, and `vouched_count`.
+- **Governance Overhead**: Existing members must actively participate in voting on admission proposals for new entrants.
 
 ---
 
 ## Implementation References
 
-- Member data structure and maturation tracking: [`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L715-L804)
-- Pool governance and proposal threshold calculations: [`Proposal::required_votes_for_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L859-L886)
-- Cycle rollover and linked list traversal: [`process_cycle_members`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1318-L1426)
-- Pool creation arguments and validation: [`CreatePoolArgs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs#L25-L46)
-- Sponsor Ed25519 signature verification: [`verify_preceding_ed25519_quote`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L38-L98)
-- Fair Closure liquidation reference: [ADR 0001: Fair Closure Algorithm](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0001-fair-closure-algorithm.md)
+- Member data structure and lineage tracking: [`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L939-L965)
+- Pool configuration and admission modes: [`Pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L480-L539)
+- Governance proposal definitions and execution: [`ProposalAction`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L942-L965)
+- Voting threshold calculations: [`Proposal::required_votes_for_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L859-L886)
+- Rollover cycle linked-list traversal: [`process_cycle_members`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1318-L1426)
+- Fair Closure reference: [ADR 0001: Fair Closure Algorithm](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0001-fair-closure-algorithm.md)
 - Low Quorum locking reference: [ADR 0002: Low Quorum Pool Locking and Auto-Closure](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0002-low-quorum-pool-locking.md)
-- Member exit and eviction reference: [ADR 0003: Member Voluntary Exit, Governance Eviction, and Inviolable Surplus Preservation](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md)
+- Member voluntary exit and eviction reference: [ADR 0003: Member Voluntary Exit, Governance Eviction, and Inviolable Surplus Preservation](file:///c:/Users/sidds/Documents/comfi/programs/comfi/adrs/0003-member-voluntary-exit-and-governance-eviction.md)

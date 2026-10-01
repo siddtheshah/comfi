@@ -76,10 +76,14 @@ pub fn unlink_member(
     Ok(())
 }
 
-pub fn assert_executable(proposal: &Account<Proposal>) -> Result<()> {
+pub fn assert_executable(proposal: &Proposal, pool: &Pool) -> Result<()> {
     require!(
         proposal.state == ProposalState::Executable,
         ComfiError::ProposalNotExecutable
+    );
+    require!(
+        pool.current_cycle >= proposal.executable_cycle,
+        ComfiError::ExecutionCycleNotReached
     );
     require!(
         Clock::get()?.unix_timestamp >= proposal.executable_after,
@@ -607,6 +611,30 @@ pub struct ClaimEvictionRefund<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct ExecuteAdmitMember<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(seeds = [b"global"], bump = global.bump)]
+    pub global: Box<Account<'info, GlobalConfig>>,
+    #[account(
+        mut,
+        has_one = global,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+    #[account(mut, has_one = pool)]
+    pub proposal: Box<Account<'info, Proposal>>,
+    #[account(
+        mut,
+        has_one = pool,
+    )]
+    pub inviter_member: Box<Account<'info, Member>>,
+    /// CHECK: Initialized via CPI in execute_admit_member
+    #[account(mut)]
+    pub candidate_member: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
 #[cfg(any(test, feature = "testing"))]
 #[derive(Accounts)]
 pub struct TestPoolOnly<'info> {
@@ -634,6 +662,18 @@ pub struct TestMemberOnly<'info> {
 pub enum ExecutionMode {
     OnDeadline,
     ThresholdMet,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AdmissionMode {
+    InviteVouched,
+    Open,
+}
+
+impl Default for AdmissionMode {
+    fn default() -> Self {
+        AdmissionMode::InviteVouched
+    }
 }
 
 pub const BENEFIT_SCALE: u128 = 1_000_000_000_000; // 1e12
@@ -704,6 +744,13 @@ pub struct Pool {
     pub eviction_execution_mode: ExecutionMode,
     pub pending_eviction_deadline_cycles: u64,
     pub pending_eviction_execution_mode: ExecutionMode,
+    pub admission_mode: AdmissionMode,
+    pub voting_maturation_cycles: u64,
+    pub proposal_execution_delay_cycles: u64,
+    pub voting_member_count: u32,
+    pub pending_admission_mode: Option<AdmissionMode>,
+    pub pending_voting_maturation_cycles: Option<u64>,
+    pub pending_proposal_execution_delay_cycles: Option<u64>,
 }
 
 #[event]
@@ -732,6 +779,14 @@ pub struct MemberEvictedEvent {
 }
 
 #[event]
+pub struct MemberAdmittedEvent {
+    pub pool: Pubkey,
+    pub candidate: Pubkey,
+    pub vouched_by: Pubkey,
+    pub lineage_depth: u32,
+}
+
+#[event]
 pub struct PoolLockedEvent {
     pub pool: Pubkey,
     pub cycle: u64,
@@ -754,7 +809,7 @@ pub struct PoolAutoClosedEvent {
 }
 
 impl Pool {
-    pub const BASE_SPACE: usize = 8 + 493;
+    pub const BASE_SPACE: usize = 8 + 534;
     pub const SPACE: usize = Self::BASE_SPACE;
 
     pub fn space(_member_cap: u32) -> usize {
@@ -882,6 +937,13 @@ impl Pool {
                     self.withdrawal_deadline_cycles
                 }
             }
+            ProposalAction::AdmitMember { .. } => {
+                if self.withdrawal_deadline_cycles > 0 {
+                    self.withdrawal_deadline_cycles
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -894,6 +956,7 @@ impl Pool {
             }
             ProposalAction::ClosePool => self.close_execution_mode,
             ProposalAction::EvictMember { .. } => self.eviction_execution_mode,
+            ProposalAction::AdmitMember { .. } => self.withdrawal_execution_mode,
         }
     }
 
@@ -915,6 +978,18 @@ impl Pool {
             self.auto_close_cycles_threshold = self.pending_auto_close_cycles_threshold;
             self.eviction_deadline_cycles = self.pending_eviction_deadline_cycles;
             self.eviction_execution_mode = self.pending_eviction_execution_mode;
+            if let Some(mode) = self.pending_admission_mode {
+                self.admission_mode = mode;
+                self.pending_admission_mode = None;
+            }
+            if let Some(cycles) = self.pending_voting_maturation_cycles {
+                self.voting_maturation_cycles = cycles;
+                self.pending_voting_maturation_cycles = None;
+            }
+            if let Some(cycles) = self.pending_proposal_execution_delay_cycles {
+                self.proposal_execution_delay_cycles = cycles;
+                self.pending_proposal_execution_delay_cycles = None;
+            }
             self.has_pending_config = false;
         }
     }
@@ -962,10 +1037,16 @@ pub struct Member {
     pub next_member: Option<Pubkey>,
     pub status: MemberStatus,
     pub claimable_surplus_escrow: u64,
+    pub vouched_by: Option<Pubkey>,
+    pub lineage_depth: u32,
+    pub vouched_count: u32,
+    pub joined_cycle: u64,
+    pub funded_cycle_streak: u64,
+    pub is_matured_voter: bool,
 }
 
 impl Member {
-    pub const SPACE: usize = 8 + 267;
+    pub const SPACE: usize = 8 + 325;
 
     pub fn can_request_spend(&self) -> bool {
         matches!(
@@ -1070,6 +1151,7 @@ pub struct Proposal {
     pub no_votes: u32,
     pub voting_cycle: u64,
     pub deadline_cycle: u64,
+    pub executable_cycle: u64,
     pub deadline: i64,
     pub executable_after: i64,
     pub state: ProposalState,
@@ -1079,7 +1161,7 @@ pub struct Proposal {
 }
 
 impl Proposal {
-    pub const SPACE: usize = 8 + 32 + 8 + 32 + 48 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4;
+    pub const SPACE: usize = 8 + 32 + 8 + 32 + 65 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4;
 
     pub fn required_votes_for_pool(&self, pool: &Pool) -> Result<u32> {
         require!(
@@ -1090,20 +1172,33 @@ impl Proposal {
         if matches!(
             self.action,
             ProposalAction::SetSpenderLimit { .. }
-                | ProposalAction::ClosePool
-                | ProposalAction::ApproveWithdrawal { .. }
                 | ProposalAction::ConfigurationModification { .. }
+                | ProposalAction::EvictMember { .. }
+        ) {
+            threshold_bps = threshold_bps.max(6667);
+        } else if matches!(
+            self.action,
+            ProposalAction::ClosePool
+                | ProposalAction::ApproveWithdrawal { .. }
+                | ProposalAction::AdmitMember { .. }
         ) {
             threshold_bps = threshold_bps.max(5001);
-        } else if matches!(self.action, ProposalAction::EvictMember { .. }) {
-            threshold_bps = threshold_bps.max(6667);
         }
+
+        let base_voting_members = if pool.voting_member_count > 0 {
+            pool.voting_member_count as u64
+        } else {
+            pool.funded_member_count as u64
+        };
+
         let active_members = if pool.funded_member_count == 0 && self.action == ProposalAction::ClosePool {
             (pool.member_count as u64).max(1)
-        } else if matches!(self.action, ProposalAction::EvictMember { .. }) {
-            (pool.funded_member_count as u64).saturating_sub(1).max(1)
-        } else {
+        } else if matches!(self.action, ProposalAction::ClosePool) {
             (pool.funded_member_count as u64).max(1)
+        } else if matches!(self.action, ProposalAction::EvictMember { .. }) {
+            base_voting_members.saturating_sub(1).max(1)
+        } else {
+            base_voting_members.max(1)
         };
         let required = active_members
             .checked_mul(threshold_bps)
@@ -1193,6 +1288,10 @@ pub enum ProposalAction {
     EvictMember {
         member: Pubkey,
     },
+    AdmitMember {
+        candidate_wallet: Pubkey,
+        vouched_by: Pubkey,
+    },
 }
 
 /// Exact message signed by the sponsor API. `quote_id` permits off-chain audit
@@ -1236,6 +1335,10 @@ pub mod pool_handlers {
     pool.ensure_not_closing()?;
     pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
+    require!(
+        pool.admission_mode == AdmissionMode::Open,
+        ComfiError::AdmissionGated
+    );
     require!(
         pool.member_count < pool.member_cap,
         ComfiError::MemberCapReached
@@ -1299,6 +1402,12 @@ pub mod pool_handlers {
     member.next_member = pool.head_member;
     member.status = MemberStatus::Active;
     member.claimable_surplus_escrow = 0;
+    member.vouched_by = None;
+    member.lineage_depth = 0;
+    member.vouched_count = 0;
+    member.joined_cycle = pool.current_cycle;
+    member.funded_cycle_streak = 0;
+    member.is_matured_voter = false;
     pool.head_member = Some(ctx.accounts.member.key());
     Ok(())
 }
@@ -1537,6 +1646,9 @@ pub fn process_cycle_proposals<'info>(
             proposal.executable_after = current_ts
                 .checked_add(pool.timelock_seconds)
                 .ok_or(ComfiError::MathOverflow)?;
+            proposal.executable_cycle = ending_cycle
+                .max(proposal.voting_cycle)
+                .saturating_add(pool.proposal_execution_delay_cycles);
         } else {
             proposal.state = ProposalState::Rejected;
         }
@@ -1551,12 +1663,13 @@ pub fn process_cycle_members<'info>(
     pool: &mut Pool,
     remaining_accounts: &[AccountInfo<'info>],
 ) -> Result<()> {
-    let (mut current_expected, mut newly_funded_count) = match pool.rollover_cursor {
-        Some(cursor) => (cursor, pool.funded_member_count),
+    let (mut current_expected, mut newly_funded_count, mut newly_voting_count) = match pool.rollover_cursor {
+        Some(cursor) => (cursor, pool.funded_member_count, pool.voting_member_count),
         None => match pool.head_member {
-            Some(head) => (head, 0),
+            Some(head) => (head, 0, 0),
             None => {
                 pool.funded_member_count = 0;
+                pool.voting_member_count = 0;
                 pool.rollover_cursor = None;
                 return Ok(());
             }
@@ -1617,6 +1730,8 @@ pub fn process_cycle_members<'info>(
         if member.status == MemberStatus::Leaving {
             member.status = MemberStatus::Exited;
             member.is_funded = false;
+            member.funded_cycle_streak = 0;
+            member.is_matured_voter = false;
             member.next_member = None;
             member.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
 
@@ -1645,6 +1760,8 @@ pub fn process_cycle_members<'info>(
             let obligation = pool.member_obligation_amount;
             if member.is_paused {
                 member.is_funded = false;
+                member.funded_cycle_streak = 0;
+                member.is_matured_voter = false;
             } else if member.surplus_amount >= obligation && obligation > 0 {
                 let consumed = obligation;
                 member.surplus_amount = member
@@ -1663,8 +1780,20 @@ pub fn process_cycle_members<'info>(
                 newly_funded_count = newly_funded_count
                     .checked_add(1)
                     .ok_or(ComfiError::MathOverflow)?;
+
+                member.funded_cycle_streak = member.funded_cycle_streak.saturating_add(1);
+                if member.funded_cycle_streak >= pool.voting_maturation_cycles {
+                    member.is_matured_voter = true;
+                    newly_voting_count = newly_voting_count
+                        .checked_add(1)
+                        .ok_or(ComfiError::MathOverflow)?;
+                } else {
+                    member.is_matured_voter = false;
+                }
             } else {
                 member.is_funded = false;
+                member.funded_cycle_streak = 0;
+                member.is_matured_voter = false;
             }
             member.surplus_cycle = pool.current_cycle;
 
@@ -1679,6 +1808,7 @@ pub fn process_cycle_members<'info>(
             None => {
                 pool.rollover_cursor = None;
                 pool.funded_member_count = newly_funded_count;
+                pool.voting_member_count = newly_voting_count;
                 return Ok(());
             }
         }
@@ -1691,6 +1821,7 @@ pub fn process_cycle_members<'info>(
     } else {
         pool.rollover_cursor = Some(current_expected);
         pool.funded_member_count = newly_funded_count;
+        pool.voting_member_count = newly_voting_count;
     }
 
     Ok(())
@@ -1720,6 +1851,7 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
         pool.cycle_started_at = next_start;
         pool.apply_pending_config();
         pool.funded_member_count = 0;
+        pool.voting_member_count = 0;
     }
 
     let ending_cycle = pool.current_cycle.saturating_sub(1);
@@ -1771,6 +1903,7 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
         pool.cycle_started_at = Clock::get()?.unix_timestamp;
         pool.apply_pending_config();
         pool.funded_member_count = 0;
+        pool.voting_member_count = 0;
     }
 
     let ending_cycle = pool.current_cycle.saturating_sub(1);
@@ -1801,6 +1934,7 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
     pool.cycle_started_at = Clock::get()?.unix_timestamp;
     pool.apply_pending_config();
     pool.funded_member_count = 0;
+    pool.voting_member_count = 0;
     pool.rollover_cursor = None;
 
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
@@ -1838,6 +1972,12 @@ pub fn test_finalize_proposal(ctx: Context<TestFinalizeProposal>) -> Result<()> 
     if passed {
         proposal.state = ProposalState::Executable;
         proposal.executable_after = clock.unix_timestamp;
+        proposal.executable_cycle = ctx
+            .accounts
+            .pool
+            .current_cycle
+            .max(proposal.voting_cycle)
+            .saturating_add(ctx.accounts.pool.proposal_execution_delay_cycles);
     } else {
         proposal.state = ProposalState::Rejected;
     }
@@ -1902,6 +2042,27 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
             ComfiError::TargetCannotVoteOnEviction
         );
     }
+    if let ProposalAction::AdmitMember {
+        candidate_wallet,
+        vouched_by,
+    } = action
+    {
+        require!(
+            ctx.accounts.pool.admission_mode != AdmissionMode::Open,
+            ComfiError::AdmissionGated
+        );
+        require!(candidate_wallet != Pubkey::default(), ComfiError::InvalidCandidate);
+        require!(candidate_wallet != ctx.accounts.proposer.wallet, ComfiError::InvalidCandidate);
+        require_keys_eq!(
+            vouched_by,
+            ctx.accounts.proposer.wallet,
+            ComfiError::Unauthorized
+        );
+        require!(
+            ctx.accounts.pool.member_count < ctx.accounts.pool.member_cap,
+            ComfiError::MemberCapReached
+        );
+    }
     if ctx.accounts.pool.funded_member_count == 0 && action == ProposalAction::ClosePool {
         require!(
             ctx.accounts.proposer.total_contributions > 0,
@@ -1912,6 +2073,12 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
             ctx.accounts.proposer.is_funded_for_pool(&ctx.accounts.pool),
             ComfiError::MemberNotFunded
         );
+        if ctx.accounts.pool.voting_maturation_cycles > 0 && ctx.accounts.pool.voting_member_count > 0 {
+            require!(
+                ctx.accounts.proposer.is_matured_voter,
+                ComfiError::MemberNotMatured
+            );
+        }
     }
     let deadline_cycles = ctx.accounts.pool.get_proposal_deadline_cycles(&action);
     require!(deadline_cycles > 0, ComfiError::InvalidProposalDeadline);
@@ -1958,6 +2125,7 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
     proposal.no_votes = 0;
     proposal.voting_cycle = next_voting_cycle;
     proposal.deadline_cycle = deadline_cycle;
+    proposal.executable_cycle = 0;
     proposal.deadline = clock
         .unix_timestamp
         .checked_add(duration_seconds)
@@ -1998,11 +2166,22 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
             voter.total_contributions > 0,
             ComfiError::Unauthorized
         );
+    } else if proposal.action == ProposalAction::ClosePool {
+        require!(
+            voter.is_funded_for_pool(pool),
+            ComfiError::MemberNotFunded
+        );
     } else {
         require!(
             voter.is_funded_for_pool(pool),
             ComfiError::MemberNotFunded
         );
+        if pool.voting_maturation_cycles > 0 && pool.voting_member_count > 0 {
+            require!(
+                voter.is_matured_voter,
+                ComfiError::MemberNotMatured
+            );
+        }
     }
     require!(
         proposal.state == ProposalState::Queued || proposal.state == ProposalState::Open,
@@ -2071,6 +2250,10 @@ pub fn finalize_proposal(ctx: Context<FinalizeProposal>) -> Result<()> {
             .unix_timestamp
             .checked_add(pool.timelock_seconds)
             .ok_or(ComfiError::MathOverflow)?;
+        proposal.executable_cycle = pool
+            .current_cycle
+            .max(proposal.voting_cycle)
+            .saturating_add(pool.proposal_execution_delay_cycles);
     } else {
         proposal.state = ProposalState::Rejected;
     }
@@ -2081,7 +2264,7 @@ pub fn execute_close_pool(ctx: Context<ExecuteClosePool>) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
-    assert_executable(proposal)?;
+    assert_executable(proposal, pool)?;
     match proposal.action {
         ProposalAction::ClosePool => {}
         _ => return err!(ComfiError::WrongProposalAction),
@@ -2101,7 +2284,7 @@ pub fn execute_spender_limit(ctx: Context<ExecuteSpenderLimit>) -> Result<()> {
     pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
-    assert_executable(proposal)?;
+    assert_executable(proposal, pool)?;
     let (target, cap) = match proposal.action {
         ProposalAction::SetSpenderLimit { member, cap } => (member, cap),
         _ => return err!(ComfiError::WrongProposalAction),
@@ -2132,7 +2315,7 @@ pub fn execute_configuration_modification(
     pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
     let proposal = &mut ctx.accounts.proposal;
-    assert_executable(proposal)?;
+    assert_executable(proposal, pool)?;
     let (
         vote_threshold,
         cycle_duration_seconds,
@@ -2224,7 +2407,7 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
             .proposal
             .as_ref()
             .ok_or(ComfiError::ProposalRequired)?;
-        assert_executable(proposal)?;
+        assert_executable(proposal, &ctx.accounts.pool)?;
         match proposal.action {
             ProposalAction::ApproveWithdrawal { request: key } if key == request.key() => {}
             _ => return err!(ComfiError::WrongProposalAction),
@@ -2483,7 +2666,7 @@ pub fn execute_evict_member(ctx: Context<ExecuteEvictMember>) -> Result<()> {
     pool.ensure_cycle_current()?;
 
     let proposal = &mut ctx.accounts.proposal;
-    assert_executable(proposal)?;
+    assert_executable(proposal, pool)?;
 
     let target_key = match proposal.action {
         ProposalAction::EvictMember { member } => member,
@@ -2553,6 +2736,11 @@ pub fn execute_evict_member(ctx: Context<ExecuteEvictMember>) -> Result<()> {
     if target.is_funded_for_pool(pool) {
         pool.funded_member_count = pool.funded_member_count.saturating_sub(1);
     }
+    if target.is_matured_voter {
+        pool.voting_member_count = pool.voting_member_count.saturating_sub(1);
+        target.is_matured_voter = false;
+    }
+    target.funded_cycle_streak = 0;
 
     target.status = MemberStatus::Evicted;
     target.is_funded = false;
@@ -2594,6 +2782,138 @@ pub fn claim_eviction_refund(ctx: Context<ClaimEvictionRefund>) -> Result<()> {
         .total_non_conferred_capital
         .saturating_sub(amount);
     member.claimable_surplus_escrow = 0;
+
+    Ok(())
+}
+
+pub fn execute_admit_member(ctx: Context<ExecuteAdmitMember>) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    require!(!pool.is_closing, ComfiError::PoolIsClosing);
+    pool.ensure_not_locked()?;
+    pool.ensure_cycle_current()?;
+    let proposal = &mut ctx.accounts.proposal;
+    assert_executable(proposal, pool)?;
+
+    let (candidate_wallet, vouched_by) = match proposal.action {
+        ProposalAction::AdmitMember {
+            candidate_wallet,
+            vouched_by,
+        } => (candidate_wallet, vouched_by),
+        _ => return err!(ComfiError::WrongProposalAction),
+    };
+
+    require!(
+        pool.member_count < pool.member_cap,
+        ComfiError::MemberCapReached
+    );
+    require_keys_eq!(
+        ctx.accounts.inviter_member.wallet,
+        vouched_by,
+        ComfiError::Unauthorized
+    );
+    require_keys_eq!(
+        ctx.accounts.inviter_member.pool,
+        pool.key(),
+        ComfiError::Unauthorized
+    );
+    require!(
+        ctx.accounts.inviter_member.status == MemberStatus::Active,
+        ComfiError::MemberNotActive
+    );
+
+    let (expected_candidate_pda, member_bump) = Pubkey::find_program_address(
+        &[b"member", pool.key().as_ref(), candidate_wallet.as_ref()],
+        &crate::ID,
+    );
+    require_keys_eq!(
+        ctx.accounts.candidate_member.key(),
+        expected_candidate_pda,
+        ComfiError::Unauthorized
+    );
+    require!(
+        ctx.accounts.candidate_member.data_is_empty(),
+        ComfiError::MemberAlreadyExists
+    );
+
+    let rent = Rent::get()?;
+    let member_space = Member::SPACE;
+    let member_lamports = rent.minimum_balance(member_space);
+
+    let pool_key = pool.key();
+    let member_seeds: &[&[u8]] = &[
+        b"member",
+        pool_key.as_ref(),
+        candidate_wallet.as_ref(),
+        &[member_bump],
+    ];
+
+    anchor_lang::solana_program::program::invoke_signed(
+        &anchor_lang::solana_program::system_instruction::create_account(
+            ctx.accounts.payer.key,
+            ctx.accounts.candidate_member.key,
+            member_lamports,
+            member_space as u64,
+            &crate::ID,
+        ),
+        &[
+            ctx.accounts.payer.to_account_info(),
+            ctx.accounts.candidate_member.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+        &[member_seeds],
+    )?;
+
+    let candidate_member = Member {
+        pool: pool.key(),
+        wallet: candidate_wallet,
+        role: MemberRole::Member,
+        is_funded: false,
+        deposited_total: 0,
+        surplus_amount: 0,
+        total_withdrawn: 0,
+        closure_claimed: false,
+        last_benefit_index: pool.cumulative_benefit_per_member,
+        cumulative_benefit_received: 0,
+        total_contributions: 0,
+        alias_hash: [0u8; 32],
+        encryption_public_key: [0u8; 32],
+        alias_version: 1,
+        allowance_cycle: pool.current_cycle,
+        action_allowance_used: 0,
+        bump: member_bump,
+        surplus_cycle: pool.current_cycle,
+        funded_cycle: 0,
+        is_paused: false,
+        next_member: pool.head_member,
+        status: MemberStatus::Active,
+        claimable_surplus_escrow: 0,
+        vouched_by: Some(vouched_by),
+        lineage_depth: ctx.accounts.inviter_member.lineage_depth.saturating_add(1),
+        vouched_count: 0,
+        joined_cycle: pool.current_cycle,
+        funded_cycle_streak: 0,
+        is_matured_voter: false,
+    };
+    candidate_member.try_serialize(&mut *ctx.accounts.candidate_member.try_borrow_mut_data()?)?;
+
+    pool.head_member = Some(ctx.accounts.candidate_member.key());
+    pool.member_count = pool.member_count.checked_add(1).ok_or(ComfiError::MathOverflow)?;
+
+    ctx.accounts.inviter_member.vouched_count = ctx
+        .accounts
+        .inviter_member
+        .vouched_count
+        .checked_add(1)
+        .ok_or(ComfiError::MathOverflow)?;
+
+    proposal.state = ProposalState::Executed;
+
+    emit!(MemberAdmittedEvent {
+        pool: pool.key(),
+        candidate: candidate_wallet,
+        vouched_by,
+        lineage_depth: candidate_member.lineage_depth,
+    });
 
     Ok(())
 }
@@ -2668,6 +2988,13 @@ mod tests {
             eviction_execution_mode: ExecutionMode::OnDeadline,
             pending_eviction_deadline_cycles: 1,
             pending_eviction_execution_mode: ExecutionMode::OnDeadline,
+            admission_mode: AdmissionMode::InviteVouched,
+            voting_maturation_cycles: 0,
+            proposal_execution_delay_cycles: 1,
+            voting_member_count: 0,
+            pending_admission_mode: None,
+            pending_voting_maturation_cycles: None,
+            pending_proposal_execution_delay_cycles: None,
         }
     }
 
@@ -2707,6 +3034,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         assert!(member.can_request_spend());
@@ -2746,6 +3079,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Deposited 40 < 50 obligation: not counted as funded member
@@ -2818,10 +3157,10 @@ mod tests {
 
     #[test]
     fn test_account_space_constants() {
-        assert_eq!(Pool::SPACE, 8 + 493);
+        assert_eq!(Pool::SPACE, 8 + 534);
         assert_eq!(
             Member::SPACE,
-            8 + 267
+            8 + 325
         );
         assert_eq!(SpenderCycle::SPACE, 8 + 32 + 32 + 8 + 8 + 8 + 1);
         assert_eq!(
@@ -2830,7 +3169,7 @@ mod tests {
         );
         assert_eq!(
             Proposal::SPACE,
-            8 + 32 + 8 + 32 + 48 + 4 + 4 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4
+            8 + 32 + 8 + 32 + 65 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4
         );
         assert_eq!(VoteReceipt::SPACE, 8 + 32 + 32 + 1 + 1);
         assert_eq!(SponsorQuoteReceipt::SPACE, 8 + 32 + 32 + 32 + 1);
@@ -2850,6 +3189,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 100,
             executable_after: 0,
             state: ProposalState::Open,
@@ -2894,7 +3234,8 @@ mod tests {
             yes_votes: 0,
             no_votes: 0,
             voting_cycle: 1, // Enqueued for cycle 1
-            deadline_cycle: 2, // 2-cycle voting window: cycles 1 and 2
+            deadline_cycle: 2,
+            executable_cycle: 0, // 2-cycle voting window: cycles 1 and 2
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Queued,
@@ -2956,6 +3297,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3031,6 +3373,7 @@ mod tests {
             no_votes: 1,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3107,7 +3450,8 @@ mod tests {
             yes_votes: 2,
             no_votes: 0,
             voting_cycle: 1,
-            deadline_cycle: 5, // Deadline is cycle 5
+            deadline_cycle: 5,
+            executable_cycle: 0, // Deadline is cycle 5
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3145,7 +3489,8 @@ mod tests {
             yes_votes: 2, // Threshold met already!
             no_votes: 0,
             voting_cycle: 1,
-            deadline_cycle: 4, // Deadline is cycle 4
+            deadline_cycle: 4,
+            executable_cycle: 0, // Deadline is cycle 4
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3237,6 +3582,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: next_voting_cycle,
             deadline_cycle,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3317,6 +3663,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3350,6 +3697,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Member B with max allowed surplus (100 total = 50 obligation + 50 surplus)
@@ -3377,6 +3730,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -3425,6 +3784,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -3497,6 +3857,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         c1.sync_benefit(&pool).unwrap();
         assert_eq!(c1.cumulative_benefit_received, 100);
@@ -3526,6 +3892,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         m3.sync_benefit(&pool).unwrap();
         assert_eq!(m3.cumulative_benefit_received, 0); // No spends happened while M3 was in pool!
@@ -3594,6 +3966,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Member B (contributed 100)
@@ -3621,6 +3999,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Delegated spend of 60 occurs
@@ -3678,6 +4062,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Member B (unfunded, only 20 deposited, obligation is 50)
@@ -3705,6 +4095,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         assert!(member_a.is_funded_for_pool(&pool));
@@ -3777,6 +4173,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         assert_eq!(member.total_contributions, 50);
 
@@ -3848,6 +4250,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         let mut member_b = Member {
             pool: pool.global,
@@ -3873,6 +4281,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         pool.funded_member_count = 2;
         vault_balance += 100;
@@ -3942,6 +4356,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         pool.total_non_conferred_capital += 50;
         vault_balance += 100;
@@ -3971,6 +4391,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         vault_balance += 50;
         pool.funded_member_count = 4; // A, B, C, D all funded
@@ -4159,6 +4585,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut member_b = Member {
@@ -4185,6 +4617,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Snapshot closure pro-rata basis on first claim
@@ -4248,6 +4686,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         pool.total_non_conferred_capital = 50;
         pool.total_conferred_capital = 50;
@@ -4299,6 +4743,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // A spend of 40 occurs in the pool
@@ -4351,6 +4801,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut member_b = Member {
@@ -4377,6 +4833,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Snapshot basis
@@ -4445,6 +4907,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut member_b = Member {
@@ -4471,6 +4939,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut member_c = Member {
@@ -4497,6 +4971,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Snapshot basis
@@ -4601,6 +5081,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Executed,
@@ -4649,6 +5130,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 100,
             state: ProposalState::Executable,
@@ -4726,6 +5208,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let withdrawal_amount: u64 = 60;
@@ -4778,6 +5266,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Invariant: prior to voting sync, voter has 0 cumulative benefit totaled
@@ -4828,6 +5322,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         assert!(!unfunded_voter.is_funded_for_pool(&pool));
     }
@@ -4845,6 +5345,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -4962,6 +5463,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Initially, voter has 0 cumulative benefit totaled
@@ -5035,6 +5542,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -5082,6 +5590,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // After VULN-04 remediation: sync_surplus consumes elapsed surplus into conferred capital
@@ -5123,6 +5637,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let spend_amount: u64 = 40;
@@ -5166,6 +5686,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 0,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -5217,6 +5738,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 0,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -5272,6 +5794,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Even though pool.is_closing is true, sync_surplus must consume
@@ -5310,6 +5838,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // When a proposal is approved for withdrawal, requires_proposal is true.
@@ -5392,6 +5926,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Cycle rolls from 0 to 1
@@ -5490,6 +6030,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut member_b = Member {
@@ -5516,6 +6062,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Advance pool cycle from 0 to 1
@@ -5575,6 +6127,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // In Cycle 0: member is funded
@@ -5637,6 +6195,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Member is funded in Cycle 0
@@ -5702,6 +6266,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Funded in Cycle 0
@@ -5754,6 +6324,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 0,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -5806,6 +6377,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 0,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -5851,6 +6423,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Even with role Spender, unfunded member is rejected by is_funded_for_pool
@@ -5958,6 +6536,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // Mid-cycle: New member is NOT funded and has NO voting power in the active cycle
@@ -6047,6 +6631,12 @@ mod tests {
             is_paused: false,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
             next_member: Some(member_2_key),
         };
         member_1.try_serialize(&mut &mut member_1_data[..]).unwrap();
@@ -6106,6 +6696,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         member_2.try_serialize(&mut &mut member_2_data[..]).unwrap();
 
@@ -6185,6 +6781,12 @@ mod tests {
             is_paused: false,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
             next_member: Some(m2_key),
         };
         m1.try_serialize(&mut &mut m1_data[..]).unwrap();
@@ -6216,6 +6818,12 @@ mod tests {
             is_paused: false,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
             next_member: Some(m3_key),
         };
         m2.try_serialize(&mut &mut m2_data[..]).unwrap();
@@ -6248,6 +6856,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         m3.try_serialize(&mut &mut m3_data[..]).unwrap();
 
@@ -6516,6 +7130,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 2,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -6532,6 +7147,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 2,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -6579,6 +7195,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -6595,6 +7212,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -6645,6 +7263,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -6672,6 +7291,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 1,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -6748,6 +7368,12 @@ mod tests {
             is_paused: false,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
             next_member: Some(m2_key),
         };
         let m2 = Member {
@@ -6773,6 +7399,12 @@ mod tests {
             is_paused: false,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
             next_member: Some(m3_key),
         };
         let m3 = Member {
@@ -6799,6 +7431,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // --- Cycle 1: All 3 funded ---
@@ -6900,6 +7538,12 @@ mod tests {
             next_member: Some(m2_key),
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let m2 = Member {
@@ -6926,6 +7570,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         pool.head_member = Some(m1_key);
@@ -7015,6 +7665,12 @@ mod tests {
             next_member: Some(m2_key),
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut m2 = Member {
@@ -7041,6 +7697,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         pool.head_member = Some(m1_key);
@@ -7143,6 +7805,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
         // Can stage leave while locked:
         m.status = MemberStatus::Leaving;
@@ -7180,6 +7848,12 @@ mod tests {
             next_member: Some(m2_key),
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let mut m2 = Member {
@@ -7206,6 +7880,12 @@ mod tests {
             next_member: Some(m3_key),
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         let m3 = Member {
@@ -7232,6 +7912,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         pool.head_member = Some(m1_key);
@@ -7280,6 +7966,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         // For an unfunded member who deposited mid-cycle, non_conferred_amount is their entire contribution
@@ -7315,6 +8007,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         pool.head_member = Some(m1_key);
@@ -7354,6 +8052,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Exited,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         assert_ne!(m.status, MemberStatus::Active);
@@ -7375,6 +8079,7 @@ mod tests {
             no_votes: 0,
             voting_cycle: 1,
             deadline_cycle: 2,
+            executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
             state: ProposalState::Open,
@@ -7456,6 +8161,12 @@ mod tests {
             next_member: None,
             status: MemberStatus::Active,
             claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
         };
 
         pool.head_member = Some(target_key);
@@ -7513,6 +8224,358 @@ mod tests {
 
         assert_eq!(pool.head_member, Some(next_key));
         assert_eq!(pool.rollover_cursor, Some(next_key));
+    }
+
+    #[test]
+    fn test_constrained_admission_blocks_direct_join() {
+        let mut pool = create_test_pool();
+        pool.admission_mode = AdmissionMode::InviteVouched;
+
+        let check_admission = |p: &Pool| -> Result<()> {
+            require!(
+                p.admission_mode == AdmissionMode::Open,
+                ComfiError::AdmissionGated
+            );
+            Ok(())
+        };
+
+        // InviteVouched blocks direct join
+        assert_eq!(
+            check_admission(&pool).unwrap_err(),
+            ComfiError::AdmissionGated.into()
+        );
+
+        // Open allows direct join
+        pool.admission_mode = AdmissionMode::Open;
+        assert!(check_admission(&pool).is_ok());
+    }
+
+    #[test]
+    fn test_admit_member_proposal_threshold_simple_majority() {
+        let mut pool = create_test_pool();
+        pool.voting_member_count = 4;
+
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::AdmitMember {
+                candidate_wallet: Pubkey::new_unique(),
+                vouched_by: Pubkey::new_unique(),
+            },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 1000,
+        };
+
+        // 4 voting members -> 4 * 5001 / 10000 = 2, + 1 = 3 votes required (simple majority floor)
+        let req = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(req, 3);
+
+        // 3 voting members -> 3 * 5001 / 10000 = 1, + 1 = 2 votes required
+        pool.voting_member_count = 3;
+        let req3 = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(req3, 2);
+
+        // 1 voting member -> 1 * 5001 / 10000 = 0, + 1 = 1 vote required
+        pool.voting_member_count = 1;
+        let req1 = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(req1, 1);
+    }
+
+    #[test]
+    fn test_admit_member_execution_initializes_member_and_lineage() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 3;
+        pool.member_count = 2;
+        let sponsor_key = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut sponsor = Member {
+            pool: pool.global,
+            wallet: sponsor_key,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 3,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 3,
+            funded_cycle: 3,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 2,
+            vouched_count: 1,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        // Simulate admission state mutation matching execute_admit_member
+        let candidate_member = Member {
+            pool: pool.global,
+            wallet: candidate_wallet,
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 0,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: pool.cumulative_benefit_per_member,
+            cumulative_benefit_received: 0,
+            total_contributions: 0,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: pool.current_cycle,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: pool.current_cycle,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: pool.head_member,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: Some(sponsor_key),
+            lineage_depth: sponsor.lineage_depth.saturating_add(1),
+            vouched_count: 0,
+            joined_cycle: pool.current_cycle,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+
+        pool.head_member = Some(Pubkey::new_unique());
+        pool.member_count = pool.member_count + 1;
+        sponsor.vouched_count = sponsor.vouched_count + 1;
+
+        assert_eq!(candidate_member.vouched_by, Some(sponsor_key));
+        assert_eq!(candidate_member.lineage_depth, 3);
+        assert_eq!(candidate_member.vouched_count, 0);
+        assert_eq!(candidate_member.joined_cycle, 3);
+        assert_eq!(candidate_member.funded_cycle_streak, 0);
+        assert!(!candidate_member.is_matured_voter);
+        assert_eq!(sponsor.vouched_count, 2);
+        assert_eq!(pool.member_count, 3);
+    }
+
+    #[test]
+    fn test_voting_maturation_schedule_anti_flash_join() {
+        let mut pool = create_test_pool();
+        pool.voting_maturation_cycles = 2;
+        pool.voting_member_count = 1; // e.g. creator
+
+        let mut new_member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 0,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 0,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+
+        // Flash joiner cannot propose while not matured
+        assert!(!new_member.is_matured_voter);
+
+        // Cycle 1 rollover: deposit deposited, becomes funded for 1 cycle
+        new_member.deposited_total = pool.member_obligation_amount;
+        let is_now_funded = new_member.deposited_total >= pool.member_obligation_amount;
+        assert!(is_now_funded);
+        new_member.is_funded = true;
+        new_member.funded_cycle_streak = new_member.funded_cycle_streak + 1; // streak = 1
+        new_member.is_matured_voter = new_member.funded_cycle_streak >= pool.voting_maturation_cycles;
+        assert!(!new_member.is_matured_voter); // 1 < 2: still cannot vote/propose!
+
+        // Cycle 2 rollover: streak reaches 2
+        new_member.funded_cycle_streak = new_member.funded_cycle_streak + 1; // streak = 2
+        let previously_matured = new_member.is_matured_voter;
+        new_member.is_matured_voter = new_member.funded_cycle_streak >= pool.voting_maturation_cycles;
+        assert!(new_member.is_matured_voter); // matured!
+        if !previously_matured && new_member.is_matured_voter {
+            pool.voting_member_count += 1;
+        }
+        assert_eq!(pool.voting_member_count, 2);
+
+        // Pausing resets or halts streak
+        new_member.is_funded = false;
+        new_member.funded_cycle_streak = 0;
+        new_member.is_matured_voter = false;
+        assert!(!new_member.is_matured_voter);
+        assert_eq!(new_member.funded_cycle_streak, 0);
+        pool.voting_member_count -= 1;
+        assert_eq!(pool.voting_member_count, 1);
+    }
+
+    #[test]
+    fn test_cycle_based_execution_delay_prevents_premature_execution() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        pool.proposal_execution_delay_cycles = 1;
+
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 0,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::SetSpenderLimit {
+                member: Pubkey::new_unique(),
+                cap: 500,
+            },
+            yes_votes: 3,
+            no_votes: 0,
+            voting_cycle: 2,
+            deadline_cycle: 2,
+            executable_cycle: 3, // voting_cycle + delay (2 + 1 = 3)
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        let check_cycle_executable = |p: &Proposal, pool: &Pool| -> Result<()> {
+            require!(
+                p.state == ProposalState::Executable,
+                ComfiError::ProposalNotExecutable
+            );
+            require!(
+                pool.current_cycle >= p.executable_cycle,
+                ComfiError::ExecutionCycleNotReached
+            );
+            Ok(())
+        };
+
+        // Attempting to execute in current cycle 2 fails with ExecutionCycleNotReached
+        let res_premature = check_cycle_executable(&proposal, &pool);
+        assert!(res_premature.is_err());
+        assert_eq!(
+            res_premature.unwrap_err(),
+            ComfiError::ExecutionCycleNotReached.into()
+        );
+
+        // Once cycle reaches 3 (timelock expires), execution is permitted
+        pool.current_cycle = 3;
+        assert!(check_cycle_executable(&proposal, &pool).is_ok());
+    }
+
+    #[test]
+    fn test_ragequit_and_low_quorum_lock_preempts_malicious_proposal() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 1;
+        pool.funded_member_count = 3;
+        pool.min_quorum_members = 3;
+        pool.proposal_execution_delay_cycles = 1;
+
+        let malicious_proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 2,
+            no_votes: 1,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2, // Cannot execute until cycle 2!
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        // Honest member detects malicious proposal during delay window and ragequits (leave_pool)
+        let mut honest_member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 1,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 1,
+            funded_cycle: 1,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Leaving,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        // Rollover to cycle 2: leaving member resolves and exits
+        honest_member.status = MemberStatus::Exited;
+        honest_member.is_funded = false;
+        pool.funded_member_count = pool.funded_member_count.saturating_sub(1); // 3 -> 2
+        pool.current_cycle = 2;
+
+        // Quorum check triggers lock because funded_member_count (2) < min_quorum_members (3)
+        assert!(pool.funded_member_count < pool.min_quorum_members);
+        pool.is_locked = true;
+
+        // In cycle 2, proposal's executable_cycle is reached, BUT pool is locked!
+        assert!(pool.current_cycle >= malicious_proposal.executable_cycle);
+        let lock_guard = pool.ensure_not_locked();
+        assert!(lock_guard.is_err());
+        assert_eq!(lock_guard.unwrap_err(), ComfiError::PoolLocked.into());
     }
 }
 

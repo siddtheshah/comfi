@@ -143,6 +143,10 @@ pub mod comfi {
     pub fn claim_eviction_refund(ctx: Context<ClaimEvictionRefund>) -> Result<()> {
         pool::pool_handlers::claim_eviction_refund(ctx)
     }
+
+    pub fn execute_admit_member(ctx: Context<ExecuteAdmitMember>) -> Result<()> {
+        pool::pool_handlers::execute_admit_member(ctx)
+    }
 }
 
 #[error_code]
@@ -251,5 +255,15 @@ pub enum ComfiError {
     MemberNotActive,
     #[msg("The target of an eviction proposal cannot vote on it.")]
     TargetCannotVoteOnEviction,
+    #[msg("Proposal cycle execution delay has not elapsed.")]
+    ExecutionCycleNotReached,
+    #[msg("Member has not met the voting maturation cycle requirements.")]
+    MemberNotMatured,
+    #[msg("Direct pool admission is gated under current admission mode.")]
+    AdmissionGated,
+    #[msg("Candidate wallet is invalid.")]
+    InvalidCandidate,
+    #[msg("Candidate member is already enrolled in the pool.")]
+    MemberAlreadyExists,
 }
 
