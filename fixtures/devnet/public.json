@@ -10,6 +10,24 @@
   "treasuryTokenAccount": "5LywXjKyDpBeYwAXz5A9GcPTAjy9GS6wVp7KUb8Q6xAf",
   "quoteAuthority": "ARUqRS7phiw35GvB3qmFyRhDVv3XSXurFBEbSZkBoZfA",
   "members": [],
+  "pools": [
+    {
+      "id": 0,
+      "address": "H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M",
+      "vault": "5yvucmBWxbbDcEXFgkruWSkHdwL89cpuX9T5ErVYerKf",
+      "creator": "FoAfHiY4yxfneJ6ogXNf1PzxyC8ykGGVJjyGZAPuFC3k",
+      "initialDepositAtomic": "10000000",
+      "enrollmentFeeAtomic": "1000000",
+      "testingEnabled": false,
+      "transaction": "31CBte7mz6csjMEt7QsJ6qgLa4oojnGMnyNtaACnnzehTfLPwtcCYwQBk8ipp8p9n5BTmpzDcedj2WMmnttV7mvC",
+      "memberPauseExercise": {
+        "member": "3Rtv7fgs1aU5bKGmFy7bZF34mXu3BVj4Sx9jbVSPccSe",
+        "pauseTransaction": "4tAfMWaqH2FJqAJ19pPNfsaTmhnKy7dYhH8f1bfbYHnn4WdTzsfh56McFWBHyRG5WYs5pwGHLU1RHvS3GC6DBvua",
+        "unpauseTransaction": "FR3DsTNCfsXvHtgtqJhYbP3sS1nh58p3B3BRobLSc62FoVNXtccNsKGvZ7UerYe8jTa88eZZRnWaxpUM4kch5VD",
+        "finalPaused": false
+      }
+    }
+  ],
   "transactions": {
     "createMint": "5Q5rjTwqMViuhM78rv5qNyKNENZ941mr91GRRSrMhmVGkQ57yYuqntb56bY8AJiy19YAYgTgPxEuxdSEpRRJTs2d",
     "createTreasuryTokenAccount": "3dTSNU3UQMHmhXfXpAP1D3RxmRAtc25hXNcbKFWBAuNjLnUPLnL1rBgxFuSWaZLK3AXZdfsakNT3omnKF1wGMoSU",

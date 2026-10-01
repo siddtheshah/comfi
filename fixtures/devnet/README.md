@@ -19,10 +19,13 @@ USDC or mainnet keys.
 | Treasury authority | `Cu5th5dsqqZ3hQ1MAfNPjwktgb4ktQ4z7yuD5Yvwu14f` |
 | Treasury token account | `5LywXjKyDpBeYwAXz5A9GcPTAjy9GS6wVp7KUb8Q6xAf` |
 | Quote authority | `ARUqRS7phiw35GvB3qmFyRhDVv3XSXurFBEbSZkBoZfA` |
+| Test pool #0 | `H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M` |
 
 [`public.json`](public.json) is the reusable public manifest for this Devnet
 fixture set. It contains no key material. The corresponding quote-authority
 keypair remains only in the ignored `fixtures/devnet/runtime/` directory.
+The listed test pool is a normal (non-testing-feature) pool with a 10 USDC
+initial vault balance and a 1 USDC enrollment fee paid to the treasury.
 
 The deployed binary is the normal build. It excludes the development-only
 `test_*` instructions. Pool tests can use real, short timing parameters, or the
