@@ -1,0 +1,14 @@
+{
+  "cluster": "devnet",
+  "rpcUrl": "https://api.devnet.solana.com",
+  "programId": "bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY",
+  "programData": "6YnjNLg1SE9K4ggWsyT6ejPU1s8XFmozCyrw8232btbm",
+  "upgradeAuthority": "Cu5th5dsqqZ3hQ1MAfNPjwktgb4ktQ4z7yuD5Yvwu14f",
+  "globalConfig": null,
+  "testMint": null,
+  "treasuryAuthority": null,
+  "treasuryTokenAccount": null,
+  "quoteAuthority": null,
+  "members": [],
+  "transactions": {}
+}

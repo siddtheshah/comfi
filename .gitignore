@@ -9,6 +9,10 @@ target/
 test-ledger/
 .localnet/
 localnet.json
+# Generated Devnet fixture state may contain keypair material. Keep only the
+# public template under fixtures/devnet in version control.
+fixtures/devnet/runtime/
+fixtures/devnet/*.keypair.json
 playwright-report/
 test-results/
 .DS_Store

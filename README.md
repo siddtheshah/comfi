@@ -61,6 +61,7 @@ For full installation requirements (Node.js 22+, Rust, Solana CLI, Anchor CLI, a
 - `npm run test` — runs workspace unit tests (quote generation, member allowances, structured error handling).
 - `npm run typecheck` — strict TypeScript verification across `@comfi/web` and `@comfi/sponsor-api`.
 - `npm run test:e2e` — Playwright end-to-end tests validating mock wallet connections, on-chain pool inspections, proposals, and payment requests.
+- [Devnet testing fixtures](fixtures/devnet/README.md) — public Devnet deployment details, fixture requirements, and secret-handling rules.
 
 
 ## Community Vigilance
