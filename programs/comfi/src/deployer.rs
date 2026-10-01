@@ -3,7 +3,7 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{Mint, Token, TokenAccount},
 };
-use crate::pool::{transfer_user_tokens, ExecutionMode, Member, MemberRole, Pool};
+use crate::pool::{transfer_user_tokens, ExecutionMode, Member, MemberRole, MemberStatus, Pool};
 use crate::ComfiError;
 
 #[account]
@@ -265,6 +265,11 @@ pub mod deployer_handlers {
         pool.total_non_conferred_capital = initial_non_conferred;
         pool.close_deadline_cycles = args.withdrawal_deadline_cycles;
         pool.close_execution_mode = ExecutionMode::OnDeadline;
+        pool.total_escrowed_surplus = 0;
+        pool.eviction_deadline_cycles = args.withdrawal_deadline_cycles;
+        pool.eviction_execution_mode = ExecutionMode::OnDeadline;
+        pool.pending_eviction_deadline_cycles = args.withdrawal_deadline_cycles;
+        pool.pending_eviction_execution_mode = ExecutionMode::OnDeadline;
         pool.total_settled_capital = 0;
         pool.funded_member_count = if is_funded { 1 } else { 0 };
         pool.cumulative_benefit_per_member = 0;
@@ -312,6 +317,8 @@ pub mod deployer_handlers {
         member.funded_cycle = if is_funded { 0 } else { 0 };
         member.is_paused = false;
         member.next_member = None;
+        member.status = MemberStatus::Active;
+        member.claimable_surplus_escrow = 0;
         Ok(())
     }
 }

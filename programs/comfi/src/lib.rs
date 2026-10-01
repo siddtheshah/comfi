@@ -131,6 +131,18 @@ pub mod comfi {
     pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
         pool::pool_handlers::claim_closure_refund(ctx)
     }
+
+    pub fn leave_pool(ctx: Context<LeavePool>) -> Result<()> {
+        pool::pool_handlers::leave_pool(ctx)
+    }
+
+    pub fn execute_evict_member(ctx: Context<ExecuteEvictMember>) -> Result<()> {
+        pool::pool_handlers::execute_evict_member(ctx)
+    }
+
+    pub fn claim_eviction_refund(ctx: Context<ClaimEvictionRefund>) -> Result<()> {
+        pool::pool_handlers::claim_eviction_refund(ctx)
+    }
 }
 
 #[error_code]
@@ -235,5 +247,9 @@ pub enum ComfiError {
     InvalidQuorumConfig,
     #[msg("This operation is not permitted while the pool is in a locked state.")]
     LockedOperationForbidden,
+    #[msg("Member is not active in the pool.")]
+    MemberNotActive,
+    #[msg("The target of an eviction proposal cannot vote on it.")]
+    TargetCannotVoteOnEviction,
 }
 
