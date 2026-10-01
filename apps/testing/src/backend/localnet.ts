@@ -196,6 +196,18 @@ export async function getSystemStatus(): Promise<SystemStatus> {
         pendingSpenderLimitExecutionMode: parseExecutionMode(p.pendingSpenderLimitExecutionMode ?? p.spenderLimitExecutionMode),
         pendingWithdrawalExecutionMode: parseExecutionMode(p.pendingWithdrawalExecutionMode ?? p.withdrawalExecutionMode),
         pendingConfigModificationExecutionMode: parseExecutionMode(p.pendingConfigModificationExecutionMode ?? p.configModificationExecutionMode),
+        isClosing: Boolean(p.isClosing),
+        isLocked: Boolean(p.isLocked),
+        admissionMode: p.admissionMode?.open || p.admissionMode === 'Open' || p.admissionMode === 'open' ? 'Open' : 'InviteVouched',
+        fundedMemberCount: Number(p.fundedMemberCount ?? 0),
+        votingMemberCount: Number(p.votingMemberCount ?? 0),
+        minQuorumMembers: Number(p.minQuorumMembers ?? 0),
+        minQuorumBps: Number(p.minQuorumBps ?? 0),
+        autoCloseCyclesThreshold: Number(p.autoCloseCyclesThreshold ?? 0),
+        totalConferredCapital: formatUsdc(p.totalConferredCapital ? p.totalConferredCapital.toString() : 0),
+        totalNonConferredCapital: formatUsdc(p.totalNonConferredCapital ? p.totalNonConferredCapital.toString() : 0),
+        totalEscrowedSurplus: formatUsdc(p.totalEscrowedSurplus ? p.totalEscrowedSurplus.toString() : 0),
+        lockedConsecutiveCycles: Number(p.lockedConsecutiveCycles ?? 0),
       }
     })
   )
@@ -240,6 +252,11 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       const spendLimit = cycleAccount ? formatUsdc(cycleAccount.cap.toString()) : '$0.00'
       const spentCurrentCycle = cycleAccount ? formatUsdc(cycleAccount.spent.toString()) : '$0.00'
 
+      let status: MemberInfo['status'] = 'Active'
+      if (m.status?.leaving || m.status === 'Leaving') status = 'Leaving'
+      else if (m.status?.exited || m.status === 'Exited') status = 'Exited'
+      else if (m.status?.evicted || m.status === 'Evicted') status = 'Evicted'
+
       return {
         address: item.publicKey.toBase58(),
         pool: m.pool.toBase58(),
@@ -255,6 +272,14 @@ export async function getPoolDetails(poolAddress: string): Promise<{
         spendLimit,
         spentCurrentCycle,
         isPaused: Boolean(m.isPaused),
+        status,
+        surplusAmount: formatUsdc(m.surplusAmount ? m.surplusAmount.toString() : 0),
+        claimableSurplusEscrow: formatUsdc(m.claimableSurplusEscrow ? m.claimableSurplusEscrow.toString() : 0),
+        lineageDepth: Number(m.lineageDepth ?? 0),
+        vouchedBy: m.vouchedBy ? m.vouchedBy.toBase58() : null,
+        isMaturedVoter: Boolean(m.isMaturedVoter),
+        vouchedCount: Number(m.vouchedCount ?? 0),
+        streak: Number(m.fundedCycleStreak ?? 0),
       }
     })
   )
@@ -267,9 +292,15 @@ export async function getPoolDetails(poolAddress: string): Promise<{
     const p = item.account
     let actionType: ProposalInfo['actionType'] = 'Other'
     let actionDetails = ''
+    let targetMember: string | undefined
+    let candidateWallet: string | undefined
+    let vouchedBy: string | undefined
+
     if (p.action.setSpenderLimit) {
       actionType = 'SetSpenderLimit'
-      actionDetails = `Member: ${p.action.setSpenderLimit.member.toBase58().slice(0, 8)}… Cap: ${formatUsdc(p.action.setSpenderLimit.cap.toString())}`
+      const mStr = p.action.setSpenderLimit.member.toBase58()
+      targetMember = mStr
+      actionDetails = `Member: ${mStr.slice(0, 8)}… Cap: ${formatUsdc(p.action.setSpenderLimit.cap.toString())}`
     } else if (p.action.approveWithdrawal) {
       actionType = 'ApproveWithdrawal'
       actionDetails = `Request: ${p.action.approveWithdrawal.request.toBase58().slice(0, 8)}…`
@@ -277,6 +308,21 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       actionType = 'ConfigurationModification'
       const cfg = p.action.configurationModification
       actionDetails = `Threshold: ${cfg.voteThreshold}, Cycle: ${cfg.cycleDurationSeconds.toString()}s, Obligation: ${formatUsdc(cfg.memberObligationAmount.toString())}, Deadlines: Spender=${cfg.spenderLimitDeadlineCycles ?? 1}c (${parseExecutionMode(cfg.spenderLimitExecutionMode)}), Withdrawal=${cfg.withdrawalDeadlineCycles ?? 1}c (${parseExecutionMode(cfg.withdrawalExecutionMode)}), Config=${cfg.configModificationDeadlineCycles ?? 1}c (${parseExecutionMode(cfg.configModificationExecutionMode)})`
+    } else if (p.action.closePool) {
+      actionType = 'ClosePool'
+      actionDetails = 'Initiates pool closure and capital snapshot'
+    } else if (p.action.evictMember) {
+      actionType = 'EvictMember'
+      const mStr = p.action.evictMember.member.toBase58()
+      targetMember = mStr
+      actionDetails = `Target Member: ${mStr.slice(0, 8)}…`
+    } else if (p.action.admitMember) {
+      actionType = 'AdmitMember'
+      const cStr = p.action.admitMember.candidateWallet.toBase58()
+      const vStr = p.action.admitMember.vouchedBy.toBase58()
+      candidateWallet = cStr
+      vouchedBy = vStr
+      actionDetails = `Candidate: ${cStr.slice(0, 8)}…, Vouched by: ${vStr.slice(0, 8)}…`
     }
 
     let state: ProposalInfo['state'] = 'Open'
@@ -293,6 +339,9 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       proposer: p.proposer.toBase58(),
       actionType,
       actionDetails,
+      targetMember,
+      candidateWallet,
+      vouchedBy,
       yesVotes: Number(p.yesVotes),
       noVotes: Number(p.noVotes),
       votingCycle: Number(p.votingCycle ?? 0),
@@ -867,11 +916,6 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!proposer) throw new Error(`Invalid proposerWalletName: ${proposerWalletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
-      const poolAccount = await program.account.pool.fetch(poolPubkey)
-      const nextProposalId = new BN(poolAccount.nextProposalId.toString())
-
-      const [proposerMemberPda] = PublicKey.findProgramAddressSync([Buffer.from('member'), poolPubkey.toBuffer(), proposer.publicKey.toBuffer()], programId)
-      const [proposalPda] = PublicKey.findProgramAddressSync([Buffer.from('proposal'), poolPubkey.toBuffer(), nextProposalId.toArrayLike(Buffer, 'le', 8)], programId)
 
       let actionPayload: any
       if (actionKind === 'SetSpenderLimit') {
@@ -913,9 +957,73 @@ export async function executeAction(action: string, payload: any): Promise<any> 
             configModificationExecutionMode: toExecutionModeArg(payload.configModificationExecutionMode),
           },
         }
+      } else if (actionKind === 'ClosePool' || actionKind === 'close_pool') {
+        actionPayload = {
+          closePool: {},
+        }
+      } else if (actionKind === 'EvictMember' || actionKind === 'evict_member') {
+        let targetMemberPubkey: PublicKey
+        if (payload.targetMemberAddress) {
+          targetMemberPubkey = new PublicKey(payload.targetMemberAddress)
+        } else if (payload.targetWalletName) {
+          const tw = wallets[payload.targetWalletName as keyof typeof wallets]
+          if (!tw) throw new Error(`Invalid targetWalletName: ${payload.targetWalletName}`)
+          const [pda] = PublicKey.findProgramAddressSync([Buffer.from('member'), poolPubkey.toBuffer(), tw.publicKey.toBuffer()], programId)
+          targetMemberPubkey = pda
+        } else if (payload.targetMember) {
+          targetMemberPubkey = new PublicKey(payload.targetMember)
+        } else {
+          throw new Error('Missing targetMember or targetWalletName for EvictMember proposal')
+        }
+        actionPayload = {
+          evictMember: {
+            member: targetMemberPubkey,
+          },
+        }
+      } else if (actionKind === 'AdmitMember' || actionKind === 'admit_member') {
+        let candidateWalletPubkey: PublicKey
+        if (payload.candidateWallet) {
+          candidateWalletPubkey = new PublicKey(payload.candidateWallet)
+        } else if (payload.candidateWalletAddress) {
+          candidateWalletPubkey = new PublicKey(payload.candidateWalletAddress)
+        } else if (payload.candidateWalletName) {
+          const cw = wallets[payload.candidateWalletName as keyof typeof wallets]
+          if (!cw) throw new Error(`Invalid candidateWalletName: ${payload.candidateWalletName}`)
+          candidateWalletPubkey = cw.publicKey
+        } else {
+          throw new Error('Missing candidateWallet for AdmitMember proposal')
+        }
+
+        let vouchedByPubkey: PublicKey
+        if (payload.vouchedBy) {
+          vouchedByPubkey = new PublicKey(payload.vouchedBy)
+        } else if (payload.inviterMemberAddress) {
+          vouchedByPubkey = new PublicKey(payload.inviterMemberAddress)
+        } else if (payload.inviterWalletName) {
+          const iw = wallets[payload.inviterWalletName as keyof typeof wallets]
+          if (!iw) throw new Error(`Invalid inviterWalletName: ${payload.inviterWalletName}`)
+          const [pda] = PublicKey.findProgramAddressSync([Buffer.from('member'), poolPubkey.toBuffer(), iw.publicKey.toBuffer()], programId)
+          vouchedByPubkey = pda
+        } else {
+          const [proposerMemberPda] = PublicKey.findProgramAddressSync([Buffer.from('member'), poolPubkey.toBuffer(), proposer.publicKey.toBuffer()], programId)
+          vouchedByPubkey = proposerMemberPda
+        }
+
+        actionPayload = {
+          admitMember: {
+            candidateWallet: candidateWalletPubkey,
+            vouchedBy: vouchedByPubkey,
+          },
+        }
       } else {
         throw new Error(`Unsupported proposal action kind: ${actionKind}`)
       }
+
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const nextProposalId = new BN(poolAccount.nextProposalId.toString())
+
+      const [proposerMemberPda] = PublicKey.findProgramAddressSync([Buffer.from('member'), poolPubkey.toBuffer(), proposer.publicKey.toBuffer()], programId)
+      const [proposalPda] = PublicKey.findProgramAddressSync([Buffer.from('proposal'), poolPubkey.toBuffer(), nextProposalId.toArrayLike(Buffer, 'le', 8)], programId)
 
       const tx = await program.methods
         .createProposal(actionPayload)
@@ -1033,6 +1141,241 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         .rpc()
 
       return { tx, proposal: proposalAddress, pool: proposalAccount.pool.toBase58() }
+    }
+
+    case 'execute_close_pool': {
+      const { poolAddress, proposalAddress, callerWalletName = 'creator' } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for execute_close_pool')
+      if (!proposalAddress) throw new Error('Missing proposalAddress for execute_close_pool')
+      const caller = wallets[callerWalletName as keyof typeof wallets]
+      if (!caller) throw new Error(`Invalid callerWalletName: ${callerWalletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const proposalPubkey = new PublicKey(proposalAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+
+      const tx = await program.methods
+        .executeClosePool()
+        .accounts({
+          caller: caller.publicKey,
+          global: globalPda,
+          pool: poolPubkey,
+          proposal: proposalPubkey,
+          vault: poolAccount.vault,
+        })
+        .signers([caller])
+        .rpc()
+
+      return { tx, pool: poolAddress, proposal: proposalAddress }
+    }
+
+    case 'execute_evict_member': {
+      const { poolAddress, proposalAddress, callerWalletName = 'creator', targetMemberAddress, prevMemberAddress, targetUsdcAddress } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for execute_evict_member')
+      if (!proposalAddress) throw new Error('Missing proposalAddress for execute_evict_member')
+      const caller = wallets[callerWalletName as keyof typeof wallets]
+      if (!caller) throw new Error(`Invalid callerWalletName: ${callerWalletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const proposalPubkey = new PublicKey(proposalAddress)
+      const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+
+      let targetMemberPubkey: PublicKey
+      if (targetMemberAddress) {
+        targetMemberPubkey = new PublicKey(targetMemberAddress)
+      } else if (proposalAccount.action.evictMember) {
+        targetMemberPubkey = proposalAccount.action.evictMember.member
+      } else {
+        throw new Error('Could not determine target member for execute_evict_member')
+      }
+
+      let prevMemberPubkey: PublicKey | null = null
+      if (prevMemberAddress) {
+        prevMemberPubkey = new PublicKey(prevMemberAddress)
+      } else if (poolAccount.headMember && !poolAccount.headMember.equals(targetMemberPubkey)) {
+        const allMembers = await program.account.member.all([
+          { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+        ])
+        const prev = allMembers.find((m: any) => m.account.nextMember && m.account.nextMember.equals(targetMemberPubkey))
+        if (prev) {
+          prevMemberPubkey = prev.publicKey
+        }
+      }
+
+      const tx = await program.methods
+        .executeEvictMember()
+        .accounts({
+          caller: caller.publicKey,
+          global: globalPda,
+          pool: poolPubkey,
+          proposal: proposalPubkey,
+          targetMember: targetMemberPubkey,
+          prevMember: prevMemberPubkey,
+          vault: poolAccount.vault,
+          targetUsdc: targetUsdcAddress ? new PublicKey(targetUsdcAddress) : null,
+          tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+        })
+        .signers([caller])
+        .rpc()
+
+      return { tx, pool: poolAddress, proposal: proposalAddress, evictedMember: targetMemberPubkey.toBase58() }
+    }
+
+    case 'execute_admit_member': {
+      const { poolAddress, proposalAddress, payerWalletName = 'creator' } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for execute_admit_member')
+      if (!proposalAddress) throw new Error('Missing proposalAddress for execute_admit_member')
+      const payer = wallets[payerWalletName as keyof typeof wallets]
+      if (!payer) throw new Error(`Invalid payerWalletName: ${payerWalletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const proposalPubkey = new PublicKey(proposalAddress)
+      const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
+
+      if (!proposalAccount.action.admitMember) {
+        throw new Error('Proposal action is not AdmitMember.')
+      }
+
+      const candidateWalletPubkey = proposalAccount.action.admitMember.candidateWallet
+      const inviterMemberPubkey = proposalAccount.action.admitMember.vouchedBy
+
+      const [candidateMemberPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('member'), poolPubkey.toBuffer(), candidateWalletPubkey.toBuffer()],
+        programId
+      )
+
+      const tx = await program.methods
+        .executeAdmitMember()
+        .accounts({
+          payer: payer.publicKey,
+          global: globalPda,
+          pool: poolPubkey,
+          proposal: proposalPubkey,
+          inviterMember: inviterMemberPubkey,
+          candidateMember: candidateMemberPda,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([payer])
+        .rpc()
+
+      return { tx, pool: poolAddress, proposal: proposalAddress, candidateMember: candidateMemberPda.toBase58() }
+    }
+
+    case 'claim_closure_refund': {
+      const { poolAddress, walletName = 'creator' } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for claim_closure_refund')
+      const memberWallet = wallets[walletName as keyof typeof wallets]
+      if (!memberWallet) throw new Error(`Invalid walletName: ${walletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const globalAccount = await program.account.globalConfig.fetch(globalPda)
+      const mint = globalAccount.usdcMint
+
+      const [memberPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('member'), poolPubkey.toBuffer(), memberWallet.publicKey.toBuffer()],
+        programId
+      )
+      const memberUsdcAta = await getOrCreateAssociatedTokenAccount(connection, wallets.administrator, mint, memberWallet.publicKey)
+
+      const tx = await program.methods
+        .claimClosureRefund()
+        .accounts({
+          memberWallet: memberWallet.publicKey,
+          global: globalPda,
+          pool: poolPubkey,
+          member: memberPda,
+          vault: poolAccount.vault,
+          memberUsdc: memberUsdcAta.address,
+          tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+        })
+        .signers([memberWallet])
+        .rpc()
+
+      return { tx, pool: poolAddress, member: memberPda.toBase58() }
+    }
+
+    case 'claim_eviction_refund': {
+      const { poolAddress, walletName = 'member2' } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for claim_eviction_refund')
+      const memberWallet = wallets[walletName as keyof typeof wallets]
+      if (!memberWallet) throw new Error(`Invalid walletName: ${walletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const globalAccount = await program.account.globalConfig.fetch(globalPda)
+      const mint = globalAccount.usdcMint
+
+      const [memberPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('member'), poolPubkey.toBuffer(), memberWallet.publicKey.toBuffer()],
+        programId
+      )
+      const userUsdcAta = await getOrCreateAssociatedTokenAccount(connection, wallets.administrator, mint, memberWallet.publicKey)
+
+      const tx = await program.methods
+        .claimEvictionRefund()
+        .accounts({
+          memberWallet: memberWallet.publicKey,
+          global: globalPda,
+          pool: poolPubkey,
+          member: memberPda,
+          vault: poolAccount.vault,
+          userUsdc: userUsdcAta.address,
+          tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+        })
+        .signers([memberWallet])
+        .rpc()
+
+      return { tx, pool: poolAddress, member: memberPda.toBase58() }
+    }
+
+    case 'leave_pool': {
+      const { poolAddress, walletName = 'member2', prevMemberAddress } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for leave_pool')
+      const user = wallets[walletName as keyof typeof wallets]
+      if (!user) throw new Error(`Invalid walletName: ${walletName}`)
+
+      const poolPubkey = new PublicKey(poolAddress)
+      const poolAccount = await program.account.pool.fetch(poolPubkey)
+      const globalAccount = await program.account.globalConfig.fetch(globalPda)
+      const mint = globalAccount.usdcMint
+
+      const [memberPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('member'), poolPubkey.toBuffer(), user.publicKey.toBuffer()],
+        programId
+      )
+      const userUsdcAta = await getOrCreateAssociatedTokenAccount(connection, wallets.administrator, mint, user.publicKey)
+
+      let prevMemberPubkey: PublicKey | null = null
+      if (prevMemberAddress) {
+        prevMemberPubkey = new PublicKey(prevMemberAddress)
+      } else if (poolAccount.headMember && !poolAccount.headMember.equals(memberPda)) {
+        const allMembers = await program.account.member.all([
+          { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+        ])
+        const prev = allMembers.find((m: any) => m.account.nextMember && m.account.nextMember.equals(memberPda))
+        if (prev) {
+          prevMemberPubkey = prev.publicKey
+        }
+      }
+
+      const tx = await program.methods
+        .leavePool()
+        .accounts({
+          user: user.publicKey,
+          global: globalPda,
+          pool: poolPubkey,
+          member: memberPda,
+          prevMember: prevMemberPubkey,
+          userUsdc: userUsdcAta.address,
+          vault: poolAccount.vault,
+          tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+        })
+        .signers([user])
+        .rpc()
+
+      return { tx, pool: poolAddress, member: memberPda.toBase58() }
     }
 
     case 'request_withdrawal': {

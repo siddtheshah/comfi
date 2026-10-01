@@ -1,22 +1,22 @@
 # ComFi Task List: Governance Upgrades, Testing App, Web App, Wallet, Invites, and AI Copilot
 
 ## 1. Pool Governance Upgrades & Testing App Integration (`apps/testing`)
-- [ ] Update `types.ts` in `@comfi/testing` to reflect new pool state (`isClosing`, `isLocked`, `admissionMode`, `fundedMemberCount`, `votingMemberCount`, `minQuorumMembers`, `minQuorumBps`, `autoCloseCyclesThreshold`, `totalConferredCapital`, `totalNonConferredCapital`, `totalEscrowedSurplus`), member state (`status`, `surplusAmount`, `claimableSurplusEscrow`, `lineageDepth`, `vouchedBy`, `isMaturedVoter`), and proposal actions (`ClosePool`, `EvictMember`, `AdmitMember`).
-- [ ] Expand `getSystemStatus()` in `apps/testing/src/backend/localnet.ts` to decode updated Pool, Member, and Proposal accounts with complete governance fields.
-- [ ] Implement new proposal creation variants in `executeAction('create_proposal')`:
-  - [ ] `ClosePool` proposal creation
-  - [ ] `EvictMember` proposal creation (with target member PDA)
-  - [ ] `AdmitMember` proposal creation (with candidate wallet and inviter member vouch)
-- [ ] Implement new proposal execution and member lifecycle actions in `executeAction()`:
-  - [ ] `execute_close_pool` (initiates pool closure, snapshots vault and capital)
-  - [ ] `execute_evict_member` (unlinks member from list, refunds or escrows surplus)
-  - [ ] `execute_admit_member` (allocates and initializes candidate Member account via SystemProgram CPI)
-  - [ ] `claim_closure_refund` (claims member's pro-rata surplus after pool closure)
-  - [ ] `claim_eviction_refund` (claims escrowed surplus for evicted members)
-  - [ ] `leave_pool` (stages departure or exits immediately if unfunded)
-  - [ ] `set_paused` (toggles member rollover pause flag)
-- [ ] Add unit tests in `apps/testing/test/api.test.ts` for all new governance actions, parameter validation, and escalation on invalid arguments.
-- [ ] Update testing UI (`apps/testing/src/App.tsx`) with controls for creating, voting on, and executing eviction, admission, and closure proposals.
+- [x] Update `types.ts` in `@comfi/testing` to reflect new pool state (`isClosing`, `isLocked`, `admissionMode`, `fundedMemberCount`, `votingMemberCount`, `minQuorumMembers`, `minQuorumBps`, `autoCloseCyclesThreshold`, `totalConferredCapital`, `totalNonConferredCapital`, `totalEscrowedSurplus`), member state (`status`, `surplusAmount`, `claimableSurplusEscrow`, `lineageDepth`, `vouchedBy`, `isMaturedVoter`), and proposal actions (`ClosePool`, `EvictMember`, `AdmitMember`).
+- [x] Expand `getSystemStatus()` in `apps/testing/src/backend/localnet.ts` to decode updated Pool, Member, and Proposal accounts with complete governance fields.
+- [x] Implement new proposal creation variants in `executeAction('create_proposal')`:
+  - [x] `ClosePool` proposal creation
+  - [x] `EvictMember` proposal creation (with target member PDA)
+  - [x] `AdmitMember` proposal creation (with candidate wallet and inviter member vouch)
+- [x] Implement new proposal execution and member lifecycle actions in `executeAction()`:
+  - [x] `execute_close_pool` (initiates pool closure, snapshots vault and capital)
+  - [x] `execute_evict_member` (unlinks member from list, refunds or escrows surplus)
+  - [x] `execute_admit_member` (allocates and initializes candidate Member account via SystemProgram CPI)
+  - [x] `claim_closure_refund` (claims member's pro-rata surplus after pool closure)
+  - [x] `claim_eviction_refund` (claims escrowed surplus for evicted members)
+  - [x] `leave_pool` (stages departure or exits immediately if unfunded)
+  - [x] `set_paused` (toggles member rollover pause flag)
+- [x] Add unit tests in `apps/testing/test/api.test.ts` for all new governance actions, parameter validation, and escalation on invalid arguments.
+- [x] Update testing UI (`apps/testing/src/App.tsx`) with controls for creating, voting on, and executing eviction, admission, and closure proposals.
 
 ## 2. Multi-Network Browser Wallet Integration (`apps/web`)
 - [ ] Research and integrate browser wallet support for localnet (`http://127.0.0.1:8899`), devnet, and testnet:

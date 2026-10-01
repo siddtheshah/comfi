@@ -130,6 +130,90 @@ test('executeAction escalates on missing required poolAddress parameter for pool
     },
     { message: /Missing proposalAddress/ }
   )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_close_pool', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_close_pool', { poolAddress: '11111111111111111111111111111111' })
+    },
+    { message: /Missing proposalAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_evict_member', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_evict_member', { poolAddress: '11111111111111111111111111111111' })
+    },
+    { message: /Missing proposalAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_admit_member', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('execute_admit_member', { poolAddress: '11111111111111111111111111111111' })
+    },
+    { message: /Missing proposalAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('claim_closure_refund', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('claim_eviction_refund', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('leave_pool', {})
+    },
+    { message: /Missing poolAddress/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('create_proposal', { poolAddress: '11111111111111111111111111111111', actionKind: 'EvictMember' })
+    },
+    { message: /Missing targetMember or targetWalletName/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('create_proposal', { poolAddress: '11111111111111111111111111111111', actionKind: 'AdmitMember' })
+    },
+    { message: /Missing candidateWallet/ }
+  )
+
+  await assert.rejects(
+    async () => {
+      await executeAction('create_proposal', { poolAddress: '11111111111111111111111111111111', actionKind: 'UnknownAction' })
+    },
+    { message: /Unsupported proposal action kind/ }
+  )
 })
 
 test('executeAction escalates on invalid wallet names', async () => {

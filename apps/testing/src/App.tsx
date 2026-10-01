@@ -62,6 +62,10 @@ export function App() {
     proposerWalletName: 'creator',
     actionKind: 'SetSpenderLimit',
     targetWalletName: 'member2',
+    targetMemberAddress: '',
+    candidateWalletName: 'member2',
+    candidateWalletAddress: '',
+    inviterWalletName: 'creator',
     cap: 100,
     requestAddress: '',
     newVoteThreshold: 5001,
@@ -561,6 +565,26 @@ export function App() {
                 <table className="data-table">
                   <tbody>
                     <tr>
+                      <td>Status & Admission</td>
+                      <td>
+                        {selectedPool.isClosing ? <span className="badge red" style={{ marginRight: '6px' }}>⚠️ CLOSING</span> : <span className="badge green" style={{ marginRight: '6px' }}>ACTIVE</span>}
+                        {selectedPool.isLocked ? <span className="badge red" style={{ marginRight: '6px' }}>🔒 LOCKED ({selectedPool.lockedConsecutiveCycles ?? 0}c)</span> : <span className="badge green" style={{ marginRight: '6px' }}>🔓 UNLOCKED</span>}
+                        <span className="badge blue">{selectedPool.admissionMode}</span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Quorum Health</td>
+                      <td>
+                        <strong>{selectedPool.fundedMemberCount}</strong> funded / <strong>{selectedPool.votingMemberCount}</strong> voting (Min quorum: {selectedPool.minQuorumMembers} members, {selectedPool.minQuorumBps / 100}%) &bull; Auto-close: {selectedPool.autoCloseCyclesThreshold > 0 ? `${selectedPool.autoCloseCyclesThreshold} cycles` : 'Off'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>Capital Accounting</td>
+                      <td>
+                        Conferred: <strong>{selectedPool.totalConferredCapital}</strong> &bull; Non-Conferred: <strong>{selectedPool.totalNonConferredCapital}</strong> &bull; Escrowed: <strong>{selectedPool.totalEscrowedSurplus}</strong>
+                      </td>
+                    </tr>
+                    <tr>
                       <td>Vote Threshold</td>
                       <td>{selectedPool.voteThreshold} votes</td>
                     </tr>
@@ -799,39 +823,134 @@ export function App() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Wallet</th>
+                <th>Wallet & Status</th>
                 <th>Role</th>
-                <th>Spend Limit</th>
-                <th>Funded</th>
+                <th>Funded (Streak)</th>
+                <th>Surplus / Escrow</th>
                 <th>Deposited</th>
-                <th>Alias Ver</th>
-                <th>Allowance Used</th>
+                <th>Vouched By (Depth)</th>
+                <th>Mature Voter</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {poolMembers.length > 0 ? (
-                poolMembers.map(m => (
-                  <tr key={m.address}>
-                    <td className="mono" title={m.wallet}>{m.wallet.slice(0, 6)}…{m.wallet.slice(-4)}</td>
-                    <td>
-                      {m.role === 'Admin' ? (
-                        <span className="badge orange">Admin</span>
-                      ) : m.role === 'Spender' ? (
-                        <span className="badge green">Spender</span>
-                      ) : (
-                        <span className="badge blue">Member</span>
-                      )}
-                    </td>
-                    <td><strong>{m.spendLimit ?? '$0.00'}</strong></td>
-                    <td>{m.isFunded ? <span className="badge green">YES</span> : <span className="badge red">NO</span>}</td>
-                    <td>{m.depositedTotal}</td>
-                    <td>v{m.aliasVersion}</td>
-                    <td>{m.actionAllowanceUsed}</td>
-                  </tr>
-                ))
+                poolMembers.map(m => {
+                  const walletEntry = status?.wallets ? Object.values(status.wallets).find(w => w.publicKey === m.wallet) : null
+                  const walletName = walletEntry ? walletEntry.name : null
+
+                  return (
+                    <tr key={m.address}>
+                      <td>
+                        <div className="mono" title={m.wallet}>{m.wallet.slice(0, 6)}…{m.wallet.slice(-4)}</div>
+                        <div style={{ marginTop: '2px' }}>
+                          {m.status === 'Active' && <span className="badge green">Active</span>}
+                          {m.status === 'Leaving' && <span className="badge orange">Leaving</span>}
+                          {m.status === 'Exited' && <span className="badge red">Exited</span>}
+                          {m.status === 'Evicted' && <span className="badge purple">Evicted</span>}
+                          {m.isPaused && <span className="badge orange" style={{ marginLeft: '4px' }}>Paused</span>}
+                        </div>
+                      </td>
+                      <td>
+                        {m.role === 'Admin' ? (
+                          <span className="badge orange">Admin</span>
+                        ) : m.role === 'Spender' ? (
+                          <span className="badge green">Spender</span>
+                        ) : (
+                          <span className="badge blue">Member</span>
+                        )}
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                          Cap: {m.spendLimit ?? '$0.00'}
+                        </div>
+                      </td>
+                      <td>
+                        <div>{m.isFunded ? <span className="badge green">YES</span> : <span className="badge red">NO</span>}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>Streak: {m.streak ?? 0}c</div>
+                      </td>
+                      <td>
+                        <div>Surplus: <strong>{m.surplusAmount}</strong></div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Escrow: {m.claimableSurplusEscrow}</div>
+                      </td>
+                      <td>{m.depositedTotal}</td>
+                      <td>
+                        <div className="mono">{m.vouchedBy ? `${m.vouchedBy.slice(0, 6)}…` : 'Genesis'}</div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Depth: {m.lineageDepth}</div>
+                      </td>
+                      <td>
+                        {m.isMaturedVoter ? <span className="badge green">Mature</span> : <span className="badge blue">Maturing</span>}
+                      </td>
+                      <td>
+                        <div className="form-row" style={{ flexWrap: 'wrap', gap: '4px' }}>
+                          {walletName && (
+                            <>
+                              <button
+                                className="btn small"
+                                disabled={loading}
+                                title="Toggle rollover pause flag"
+                                onClick={() =>
+                                  void runAction(
+                                    'set_paused',
+                                    { poolAddress: selectedPoolAddress, walletName, paused: !m.isPaused },
+                                    `${m.isPaused ? 'Unpause' : 'Pause'} Rollover for ${walletName}`
+                                  )
+                                }
+                              >
+                                {m.isPaused ? 'Unpause' : 'Pause'}
+                              </button>
+                              <button
+                                className="btn small"
+                                disabled={loading || m.status === 'Exited' || m.status === 'Evicted'}
+                                title="Leave the pool"
+                                onClick={() =>
+                                  void runAction(
+                                    'leave_pool',
+                                    { poolAddress: selectedPoolAddress, walletName },
+                                    `Leave Pool for ${walletName}`
+                                  )
+                                }
+                              >
+                                Leave
+                              </button>
+                              {m.status === 'Evicted' && (
+                                <button
+                                  className="btn small primary"
+                                  disabled={loading}
+                                  onClick={() =>
+                                    void runAction(
+                                      'claim_eviction_refund',
+                                      { poolAddress: selectedPoolAddress, walletName },
+                                      `Claim Eviction Refund for ${walletName}`
+                                    )
+                                  }
+                                >
+                                  Claim Eviction Refund
+                                </button>
+                              )}
+                              {selectedPool?.isClosing && (
+                                <button
+                                  className="btn small primary"
+                                  disabled={loading}
+                                  onClick={() =>
+                                    void runAction(
+                                      'claim_closure_refund',
+                                      { poolAddress: selectedPoolAddress, walletName },
+                                      `Claim Closure Refund for ${walletName}`
+                                    )
+                                  }
+                                >
+                                  Claim Closure Refund
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
               ) : (
                 <tr>
-                  <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No members found for this pool.</td>
+                  <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)' }}>No members found for this pool.</td>
                 </tr>
               )}
             </tbody>
@@ -864,6 +983,9 @@ export function App() {
               <option value="SetSpenderLimit">Set Spender Limit</option>
               <option value="ApproveWithdrawal">Approve Withdrawal</option>
               <option value="ConfigurationModification">Configuration Modification</option>
+              <option value="ClosePool">Close Pool</option>
+              <option value="EvictMember">Evict Member</option>
+              <option value="AdmitMember">Admit Member</option>
             </select>
           </div>
 
@@ -903,6 +1025,48 @@ export function App() {
                   </option>
                 ))}
               </select>
+            </div>
+          ) : proposalArgs.actionKind === 'ClosePool' ? (
+            <div style={{ background: 'rgba(218, 54, 51, 0.15)', border: '1px solid #da3633', borderRadius: '6px', padding: '10px 14px', marginBottom: '14px', fontSize: '13px' }}>
+              <strong style={{ color: '#f85149' }}>⚠️ Close Pool Proposal:</strong>
+              <div style={{ marginTop: '4px', color: '#c9d1d9' }}>
+                Initiates graceful pool shutdown. Once passed and executed, halts cycles, snapshots capital and vault basis, and enables members to claim pro-rata surplus refunds.
+              </div>
+            </div>
+          ) : proposalArgs.actionKind === 'EvictMember' ? (
+            <div className="form-group">
+              <label>Target Member to Evict</label>
+              <select
+                value={proposalArgs.targetWalletName}
+                onChange={e => setProposalArgs({ ...proposalArgs, targetWalletName: e.target.value })}
+              >
+                <option value="member2">Member 2</option>
+                <option value="creator">Demo Creator</option>
+              </select>
+            </div>
+          ) : proposalArgs.actionKind === 'AdmitMember' ? (
+            <div className="form-row">
+              <div className="form-group">
+                <label>Candidate Wallet</label>
+                <select
+                  value={proposalArgs.candidateWalletName}
+                  onChange={e => setProposalArgs({ ...proposalArgs, candidateWalletName: e.target.value })}
+                >
+                  <option value="member2">Member 2</option>
+                  <option value="quote-authority">Quote Authority</option>
+                  <option value="administrator">Administrator</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Inviter / Vouched By</label>
+                <select
+                  value={proposalArgs.inviterWalletName}
+                  onChange={e => setProposalArgs({ ...proposalArgs, inviterWalletName: e.target.value })}
+                >
+                  <option value="creator">Demo Creator</option>
+                  <option value="member2">Member 2</option>
+                </select>
+              </div>
             </div>
           ) : (
             <div className="form-row">
@@ -1007,6 +1171,8 @@ export function App() {
                   proposerWalletName: proposalArgs.proposerWalletName,
                   actionKind: proposalArgs.actionKind,
                   targetWalletName: proposalArgs.targetWalletName,
+                  candidateWalletName: proposalArgs.candidateWalletName,
+                  inviterWalletName: proposalArgs.inviterWalletName,
                   cap: proposalArgs.cap,
                   requestAddress: proposalArgs.requestAddress,
                   voteThreshold: proposalArgs.newVoteThreshold,
@@ -1071,7 +1237,7 @@ export function App() {
                       </div>
                     </td>
                     <td>
-                      <div className="form-row">
+                      <div className="form-row" style={{ flexWrap: 'wrap', gap: '4px' }}>
                         {p.state === 'Queued' && (
                           <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic', marginRight: '8px' }}>
                             Opens in Cycle {p.votingCycle} (deadline Cycle {p.deadlineCycle})
@@ -1163,6 +1329,51 @@ export function App() {
                             }
                           >
                             Execute Config Modification
+                          </button>
+                        )}
+                        {p.state === 'Executable' && p.actionType === 'ClosePool' && (
+                          <button
+                            className="btn small primary"
+                            disabled={loading}
+                            onClick={() =>
+                              void runAction(
+                                'execute_close_pool',
+                                { poolAddress: selectedPoolAddress, proposalAddress: p.address, callerWalletName: 'creator' },
+                                `Execute Close Pool for #${p.id}`
+                              )
+                            }
+                          >
+                            Execute Close Pool
+                          </button>
+                        )}
+                        {p.state === 'Executable' && p.actionType === 'EvictMember' && (
+                          <button
+                            className="btn small primary"
+                            disabled={loading}
+                            onClick={() =>
+                              void runAction(
+                                'execute_evict_member',
+                                { poolAddress: selectedPoolAddress, proposalAddress: p.address, callerWalletName: 'creator' },
+                                `Execute Evict Member for #${p.id}`
+                              )
+                            }
+                          >
+                            Execute Evict Member
+                          </button>
+                        )}
+                        {p.state === 'Executable' && p.actionType === 'AdmitMember' && (
+                          <button
+                            className="btn small primary"
+                            disabled={loading}
+                            onClick={() =>
+                              void runAction(
+                                'execute_admit_member',
+                                { poolAddress: selectedPoolAddress, proposalAddress: p.address, payerWalletName: 'creator' },
+                                `Execute Admit Member for #${p.id}`
+                              )
+                            }
+                          >
+                            Execute Admit Member
                           </button>
                         )}
                       </div>

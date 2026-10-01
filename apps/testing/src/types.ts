@@ -54,6 +54,18 @@ export interface PoolInfo {
   pendingSpenderLimitExecutionMode: ExecutionMode
   pendingWithdrawalExecutionMode: ExecutionMode
   pendingConfigModificationExecutionMode: ExecutionMode
+  isClosing: boolean
+  isLocked: boolean
+  admissionMode: 'InviteVouched' | 'Open'
+  fundedMemberCount: number
+  votingMemberCount: number
+  minQuorumMembers: number
+  minQuorumBps: number
+  autoCloseCyclesThreshold: number
+  totalConferredCapital: string
+  totalNonConferredCapital: string
+  totalEscrowedSurplus: string
+  lockedConsecutiveCycles?: number
 }
 
 export type ExecutionMode = 'on_deadline' | 'threshold_met'
@@ -73,6 +85,14 @@ export interface MemberInfo {
   spendLimit?: string
   spentCurrentCycle?: string
   isPaused?: boolean
+  status: 'Active' | 'Leaving' | 'Exited' | 'Evicted'
+  surplusAmount: string
+  claimableSurplusEscrow: string
+  lineageDepth: number
+  vouchedBy?: string | null
+  isMaturedVoter: boolean
+  vouchedCount?: number
+  streak?: number
 }
 
 export interface ProposalInfo {
@@ -80,8 +100,11 @@ export interface ProposalInfo {
   pool: string
   id: number
   proposer: string
-  actionType: 'SetSpenderLimit' | 'ApproveWithdrawal' | 'ConfigurationModification' | 'Other'
+  actionType: 'SetSpenderLimit' | 'ApproveWithdrawal' | 'ConfigurationModification' | 'ClosePool' | 'EvictMember' | 'AdmitMember' | 'Other'
   actionDetails: string
+  targetMember?: string
+  candidateWallet?: string
+  vouchedBy?: string
   yesVotes: number
   noVotes: number
   votingCycle: number
