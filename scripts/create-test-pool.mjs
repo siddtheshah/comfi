@@ -18,7 +18,7 @@ const argumentValue = (name) => {
   return undefined;
 };
 const rpcUrl = (argumentValue('rpc-url') ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899').trim();
-const programId = new PublicKey('bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY');
+const programId = new PublicKey('3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP');
 const localnetDirectory = resolve(root, '.localnet');
 const statePath = resolve(localnetDirectory, 'state.json');
 const publicOutputPath = resolve(root, 'localnet.json');
@@ -130,7 +130,7 @@ if (!poolAccount) {
   const [vault] = PublicKey.findProgramAddressSync([pool.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()], associatedTokenProgram);
   const [creatorMember] = PublicKey.findProgramAddressSync([Buffer.from('member'), pool.toBuffer(), creator.publicKey.toBuffer()], programId);
   await program.methods.createPool({
-    memberCap: 24, minimumDeposit: new BN(10n * oneUsdc), memberObligationAmount: new BN(10n * oneUsdc), initialDeposit: new BN(100n * oneUsdc), enrollmentFee: new BN(1n * oneUsdc),
+    memberCap: 24, minimumDeposit: new BN(10n * oneUsdc), memberObligationAmount: new BN(10n * oneUsdc), initialDeposit: new BN(20n * oneUsdc), enrollmentFee: new BN(1n * oneUsdc),
     voteThreshold: 5001, votingPeriodSeconds: new BN(604800), timelockSeconds: new BN(86400), cycleDurationSeconds: new BN(2592000),
     actionAllowancePerCycle: new BN(5n * oneUsdc), maxSponsoredActionCharge: new BN(1n * oneUsdc), creatorAliasHash: Array(32).fill(0), creatorEncryptionPublicKey: Array(32).fill(0),
     testingEnabled: true,

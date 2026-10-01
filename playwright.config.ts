@@ -10,7 +10,7 @@ export default defineConfig({
     env: {
       VITE_WALLET_MODE: 'mock',
       VITE_SOLANA_RPC: 'http://127.0.0.1:8899',
-      VITE_PROGRAM_ID: 'bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY',
+      VITE_PROGRAM_ID: '3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP',
       VITE_MOCK_WALLET_PUBLIC_KEY: 'GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB',
     },
   },

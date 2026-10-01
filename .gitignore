@@ -8,6 +8,7 @@ coverage/
 target/
 test-ledger/
 .localnet/
+.localnet-tools/
 localnet.json
 # Generated Devnet fixture state may contain keypair material. Keep only the
 # public template under fixtures/devnet in version control.

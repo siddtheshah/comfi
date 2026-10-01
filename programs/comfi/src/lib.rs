@@ -6,8 +6,8 @@ pub mod pool;
 pub use deployer::*;
 pub use pool::*;
 
-// Devnet/localnet program ID derived from target/deploy/comfi-keypair.json.
-declare_id!("bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY");
+// Localnet program ID derived from programs/comfi/localnet-keypair.json.
+declare_id!("3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP");
 
 #[program]
 pub mod comfi {
@@ -266,4 +266,3 @@ pub enum ComfiError {
     #[msg("Candidate member is already enrolled in the pool.")]
     MemberAlreadyExists,
 }
-

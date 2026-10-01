@@ -19,18 +19,13 @@ SOLANA_BIN_DIR="${SOLANA_BIN_DIR:-}"
 ANCHOR_BIN_DIR="${ANCHOR_BIN_DIR:-}"
 NODE_BIN="${NODE_BIN:-}"
 
-if [ -n "$SOLANA_BIN_DIR" ]; then
-  export PATH="$SOLANA_BIN_DIR:$PATH"
-fi
-if [ -n "$ANCHOR_BIN_DIR" ]; then
-  export PATH="$ANCHOR_BIN_DIR:$PATH"
-fi
-if [ -d "$HOME/.cargo/bin" ]; then
-  export PATH="$HOME/.cargo/bin:$PATH"
-fi
+# Fresh clones do not need a global Solana or Anchor installation. Explicit
+# directories remain supported for developers who already have the CLIs.
+# shellcheck source=ensure-localnet-tools.sh
+. "$SCRIPT_DIR/ensure-localnet-tools.sh"
 
 # Resolve Solana binaries
-if [ -n "$SOLANA_BIN_DIR" ] && [ -x "$SOLANA_BIN_DIR/solana" ]; then
+if [ -x "$SOLANA_BIN_DIR/solana" ]; then
   SOLANA="$SOLANA_BIN_DIR/solana"
   SOLANA_KEYGEN="$SOLANA_BIN_DIR/solana-keygen"
   SOLANA_TEST_VALIDATOR="$SOLANA_BIN_DIR/solana-test-validator"
@@ -38,24 +33,18 @@ elif command -v solana >/dev/null 2>&1; then
   SOLANA="$(command -v solana)"
   SOLANA_KEYGEN="$(command -v solana-keygen)"
   SOLANA_TEST_VALIDATOR="$(command -v solana-test-validator)"
-elif [ -x "$HOME/.local/share/solana/install/active_release/bin/solana" ]; then
-  SOLANA="$HOME/.local/share/solana/install/active_release/bin/solana"
-  SOLANA_KEYGEN="$HOME/.local/share/solana/install/active_release/bin/solana-keygen"
-  SOLANA_TEST_VALIDATOR="$HOME/.local/share/solana/install/active_release/bin/solana-test-validator"
 else
-  echo "Error: solana CLI not found. Please set SOLANA_BIN_DIR in .env" >&2
+  echo "Error: solana CLI not found after localnet tool setup." >&2
   exit 1
 fi
 
 # Resolve Anchor binary
-if [ -n "$ANCHOR_BIN_DIR" ] && [ -x "$ANCHOR_BIN_DIR/anchor" ]; then
+if [ -x "$ANCHOR_BIN_DIR/anchor" ]; then
   ANCHOR="$ANCHOR_BIN_DIR/anchor"
 elif command -v anchor >/dev/null 2>&1; then
   ANCHOR="$(command -v anchor)"
-elif [ -x "$HOME/.cargo/bin/anchor" ]; then
-  ANCHOR="$HOME/.cargo/bin/anchor"
 else
-  echo "Error: anchor CLI not found. Please set ANCHOR_BIN_DIR in .env" >&2
+  echo "Error: anchor CLI not found after localnet tool setup." >&2
   exit 1
 fi
 
@@ -169,6 +158,17 @@ echo "Funding payer account: $PAYER_PUBKEY"
 
 echo "Building and deploying Anchor program..."
 cd "$WORKSPACE_DIR"
+# The pool bootstrapper imports workspace dependencies. Use npm ci for a
+# deterministic install on fresh clones; skip it when the required packages
+# are already present.
+if [ ! -d "$WORKSPACE_DIR/node_modules/@coral-xyz/anchor" ] || [ ! -d "$WORKSPACE_DIR/node_modules/@solana/web3.js" ]; then
+  echo "Installing npm workspace dependencies..."
+  npm ci
+fi
+# Anchor otherwise creates a random target/deploy keypair on a clean clone.
+# Keep the localnet program address stable and in sync with declare_id!.
+mkdir -p "$WORKSPACE_DIR/target/deploy"
+install -m 0600 "$WORKSPACE_DIR/programs/comfi/localnet-keypair.json" "$WORKSPACE_DIR/target/deploy/comfi-keypair.json"
 # This script is exclusively for the isolated local test environment. The
 # pool initializer below requests testing_enabled, so deploy the matching
 # feature-gated binary rather than the production binary.
