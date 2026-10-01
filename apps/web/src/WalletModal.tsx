@@ -95,6 +95,13 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
           </button>
           <button
             type="button"
+            className={`wallet-mode-tab ${walletMode === 'backpack' ? 'active' : ''}`}
+            onClick={() => { setImportError(null); setWalletMode('backpack') }}
+          >
+            🎒 Backpack
+          </button>
+          <button
+            type="button"
             className={`wallet-mode-tab ${walletMode === 'in-browser' ? 'active' : ''}`}
             onClick={() => { setImportError(null); setWalletMode('in-browser') }}
           >
@@ -293,6 +300,42 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
               {wallet.isConnecting ? 'Connecting…' : wallet.connected ? 'Phantom connected' : 'Connect Phantom'}
             </button>
           </div>
+        ) : walletMode === 'backpack' ? (
+          <div className="mock-wallet-view backpack-wallet-view">
+            <h3>Backpack browser wallet</h3>
+            {!wallet.backpackAvailable && (
+              <p>
+                Install <a href="https://backpack.app/download" target="_blank" rel="noreferrer">Backpack</a> and reload this page to connect.
+              </p>
+            )}
+            <p>App RPC: <code>{wallet.endpoint}</code></p>
+            <div className="backpack-rpc-guide">
+              <h4>Native Custom RPC Configuration</h4>
+              <p>
+                Backpack natively supports custom RPC endpoints without browser flag workarounds.
+                To configure Backpack for this app ({wallet.backpackRpcConfig.networkName}):
+              </p>
+              <ol className="backpack-steps-list">
+                {wallet.backpackRpcConfig.setupSteps.map((step, idx) => (
+                  <li key={idx}>{step}</li>
+                ))}
+              </ol>
+              <p className="backpack-rpc-note">
+                {wallet.backpackRpcConfig.isCustomOrLocalnet
+                  ? 'Connecting to localnet or custom RPC allows full local simulation without devnet airdrop limits.'
+                  : 'Backpack will submit transactions directly to the selected network.'}
+              </p>
+            </div>
+            <p>ComFi cannot alter your extension settings. Connecting shares your public address; it does not sign a transaction.</p>
+            <button
+              type="button"
+              className="primary"
+              disabled={!wallet.backpackAvailable || wallet.isConnecting || wallet.connected}
+              onClick={() => runWalletAction(wallet.connect)}
+            >
+              {wallet.isConnecting ? 'Connecting…' : wallet.connected ? 'Backpack connected' : 'Connect Backpack'}
+            </button>
+          </div>
         ) : (
           /* Mock Wallet View */
           <div className="mock-wallet-view">
@@ -315,14 +358,16 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
           </div>
         )}
 
-        {importError && walletMode === 'phantom' && !wallet.connectionError && <p role="alert" className="import-error-msg">{importError}</p>}
+        {importError && (walletMode === 'phantom' || walletMode === 'backpack') && !wallet.connectionError && (
+          <p role="alert" className="import-error-msg">{importError}</p>
+        )}
 
         {/* Modal Footer */}
         <div className="wallet-modal-footer">
           <button
             type="button"
             className="disconnect-btn"
-            disabled={wallet.isConnecting || (walletMode === 'phantom' && !wallet.phantomAvailable)}
+            disabled={wallet.isConnecting || (walletMode === 'phantom' && !wallet.phantomAvailable) || (walletMode === 'backpack' && !wallet.backpackAvailable)}
             onClick={() => runWalletAction(wallet.connected ? wallet.disconnect : wallet.connect)}
           >
             {wallet.connected ? 'Disconnect' : 'Connect Wallet'}

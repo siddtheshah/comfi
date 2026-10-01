@@ -2,6 +2,13 @@ import { createContext, type PropsWithChildren, useCallback, useContext, useEffe
 import { Keypair } from '@solana/web3.js'
 import { getPhantomProvider, PhantomSession, type PhantomWindow } from './phantom-wallet'
 import {
+  getBackpackProvider,
+  BackpackSession,
+  type BackpackWindow,
+  type BackpackRpcConfig,
+  getBackpackRpcConfig,
+} from './backpack-wallet'
+import {
   exportKeypair,
   fetchSolBalance,
   fetchUsdcBalance,
@@ -19,7 +26,7 @@ function requireEnv(key: string, value: string | undefined): string {
   return value
 }
 
-export type WalletMode = 'mock' | 'in-browser' | 'phantom'
+export type WalletMode = 'mock' | 'in-browser' | 'phantom' | 'backpack'
 
 export type InBrowserWalletState = {
   keypair: Keypair
@@ -48,6 +55,8 @@ export type WalletState = {
   disconnect: () => Promise<void>
   isConnecting: boolean
   phantomAvailable: boolean
+  backpackAvailable: boolean
+  backpackRpcConfig: BackpackRpcConfig
   connectionError: string | null
   walletLabel: string
   walletMode: WalletMode
@@ -69,11 +78,15 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
   const [connected, setConnected] = useState(true)
 
   const [phantomPublicKey, setPhantomPublicKey] = useState<string>()
+  const [backpackPublicKey, setBackpackPublicKey] = useState<string>()
   const [isConnecting, setIsConnecting] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const connectionRevision = useRef(0)
   const phantomSession = useMemo(() => new PhantomSession(), [])
   const phantomProvider = getPhantomProvider(window as PhantomWindow)
+  const backpackSession = useMemo(() => new BackpackSession(), [])
+  const backpackProvider = getBackpackProvider(window as BackpackWindow)
+  const backpackRpcConfig = useMemo(() => getBackpackRpcConfig(endpoint), [endpoint])
 
   useEffect(() => {
     if (walletMode !== 'phantom') return
@@ -84,50 +97,69 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     }
   }, [walletMode, phantomProvider, phantomSession])
 
+  useEffect(() => {
+    if (walletMode !== 'backpack') return
+    backpackSession.attach(backpackProvider, setBackpackPublicKey)
+    return () => {
+      connectionRevision.current++
+      backpackSession.detach()
+    }
+  }, [walletMode, backpackProvider, backpackSession])
+
   const setWalletMode = useCallback((mode: WalletMode) => {
     if (mode === walletMode) return
     connectionRevision.current++
     // Invalidate an extension approval immediately, before React runs effect cleanup.
     phantomSession.detach()
+    backpackSession.detach()
     setPhantomPublicKey(undefined)
+    setBackpackPublicKey(undefined)
     setConnectionError(null)
     setIsConnecting(false)
     updateWalletMode(mode)
-    setConnected(mode !== 'phantom')
-  }, [phantomSession, walletMode])
+    setConnected(mode !== 'phantom' && mode !== 'backpack')
+  }, [phantomSession, backpackSession, walletMode])
 
   const connect = useCallback(async () => {
     setConnectionError(null)
-    if (walletMode !== 'phantom') {
+    if (walletMode !== 'phantom' && walletMode !== 'backpack') {
       setConnected(true)
       return
     }
     const revision = ++connectionRevision.current
     setIsConnecting(true)
     try {
-      await phantomSession.connect()
+      if (walletMode === 'phantom') {
+        await phantomSession.connect()
+      } else if (walletMode === 'backpack') {
+        await backpackSession.connect()
+      }
     } catch (error: unknown) {
       if (revision === connectionRevision.current) setConnectionError(error instanceof Error ? error.message : String(error))
       throw error
     } finally {
       if (revision === connectionRevision.current) setIsConnecting(false)
     }
-  }, [walletMode, phantomSession])
+  }, [walletMode, phantomSession, backpackSession])
 
   const disconnect = useCallback(async () => {
     setConnectionError(null)
-    if (walletMode !== 'phantom') {
+    if (walletMode !== 'phantom' && walletMode !== 'backpack') {
       setConnected(false)
       return
     }
     const revision = ++connectionRevision.current
     try {
-      await phantomSession.disconnect()
+      if (walletMode === 'phantom') {
+        await phantomSession.disconnect()
+      } else if (walletMode === 'backpack') {
+        await backpackSession.disconnect()
+      }
     } catch (error: unknown) {
       if (revision === connectionRevision.current) setConnectionError(error instanceof Error ? error.message : String(error))
       throw error
     }
-  }, [walletMode, phantomSession])
+  }, [walletMode, phantomSession, backpackSession])
 
   // In-browser keypair state
   const [keypair, setKeypair] = useState<Keypair>(() => getOrCreateInBrowserKeypair())
@@ -286,16 +318,29 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
 
   const activePublicKey = useMemo(() => {
     if (walletMode === 'phantom') return phantomPublicKey
+    if (walletMode === 'backpack') return backpackPublicKey
     if (!connected) return undefined
     return walletMode === 'in-browser' ? keypair.publicKey.toBase58() : mockPublicKey
-  }, [connected, walletMode, keypair, mockPublicKey, phantomPublicKey])
+  }, [connected, walletMode, keypair, mockPublicKey, phantomPublicKey, backpackPublicKey])
 
   const wallet = useMemo<WalletState>(() => ({
-    connected: walletMode === 'phantom' ? Boolean(phantomPublicKey) : connected,
+    connected: walletMode === 'phantom'
+      ? Boolean(phantomPublicKey)
+      : walletMode === 'backpack'
+        ? Boolean(backpackPublicKey)
+        : connected,
     isConnecting,
     phantomAvailable: Boolean(phantomProvider),
+    backpackAvailable: Boolean(backpackProvider),
+    backpackRpcConfig,
     connectionError,
-    walletLabel: walletMode === 'phantom' ? 'Phantom' : walletMode === 'mock' ? 'Mock wallet' : 'ComFi Wallet',
+    walletLabel: walletMode === 'phantom'
+      ? 'Phantom'
+      : walletMode === 'backpack'
+        ? 'Backpack'
+        : walletMode === 'mock'
+          ? 'Mock wallet'
+          : 'ComFi Wallet',
     endpoint,
     publicKey: activePublicKey,
     connect,
@@ -307,7 +352,24 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
       publicKey: mockPublicKey,
       endpoint,
     },
-  }), [connected, endpoint, activePublicKey, walletMode, inBrowserWallet, mockPublicKey, isConnecting, phantomProvider, connectionError, connect, disconnect, setWalletMode, phantomPublicKey])
+  }), [
+    connected,
+    endpoint,
+    activePublicKey,
+    walletMode,
+    inBrowserWallet,
+    mockPublicKey,
+    isConnecting,
+    phantomProvider,
+    backpackProvider,
+    backpackRpcConfig,
+    connectionError,
+    connect,
+    disconnect,
+    setWalletMode,
+    phantomPublicKey,
+    backpackPublicKey,
+  ])
 
   return <WalletContext.Provider value={wallet}>{children}</WalletContext.Provider>
 }

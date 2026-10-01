@@ -208,7 +208,13 @@ export function App() {
       </header>
       {wallet.connected && (
         <div className="localnet-banner" data-testid="localnet-wallet">
-          {wallet.walletMode === 'mock' ? 'Localnet mock wallet connected' : wallet.walletMode === 'phantom' ? 'Phantom wallet connected' : 'ComFi In-Browser wallet connected'} · {wallet.endpoint}
+          {wallet.walletMode === 'mock'
+            ? 'Localnet mock wallet connected'
+            : wallet.walletMode === 'phantom'
+              ? 'Phantom wallet connected'
+              : wallet.walletMode === 'backpack'
+                ? 'Backpack wallet connected'
+                : 'ComFi In-Browser wallet connected'} · {wallet.endpoint}
         </div>
       )}
       <WalletModal isOpen={walletModalOpen} onClose={() => setWalletModalOpen(false)} />

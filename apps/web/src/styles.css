@@ -109,3 +109,10 @@
 
 .phantom-wallet-view h3{font:600 17px 'Playfair Display',serif;margin:0;color:#1c2920}
 .phantom-wallet-view p{font-size:12px;line-height:1.5;color:#506255;margin:0}
+
+.backpack-wallet-view h3{font:600 17px 'Playfair Display',serif;margin:0;color:#1c2920}
+.backpack-wallet-view p{font-size:12px;line-height:1.5;color:#506255;margin:0}
+.backpack-rpc-guide{background:#f0f4ee;border:1px solid #d2ded0;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.backpack-rpc-guide h4{font-size:12px;font-weight:700;color:#243328;margin:0}
+.backpack-steps-list{margin:0;padding-left:18px;font-size:11px;line-height:1.6;color:#394c3e}
+.backpack-rpc-note{font-size:11px;font-style:italic;color:#596d5e;margin:0}
