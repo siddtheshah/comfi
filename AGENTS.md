@@ -10,6 +10,8 @@ Rules and task claiming protocol for subagents working in the `comfi` repository
 
 - **Testing & Verification**: [`skills/comfi-testing/SKILL.md`](./skills/comfi-testing/SKILL.md) — Testing invariants, console simulator, and command reference.
 
+- **Code Review**: [`skills/comfi-code-review/SKILL.md`](./skills/comfi-code-review/SKILL.md) — Independent, unbiased read-only subagent review protocol before final commit.
+
 ---
 
 ## 2. Reference Skills

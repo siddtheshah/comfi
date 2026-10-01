@@ -71,6 +71,7 @@ This skill provides step-by-step execution workflows for discovering, claiming, 
    - Run tests after every change: `npm test`
    - Zero failure evasion: Do not use `try-catch` to suppress genuine errors; escalate on invalid parameters.
    - Run typechecks: `npm run typecheck`
+3. Request independent, read-only code review before final commit ([`comfi-code-review`](../comfi-code-review/SKILL.md)). Proceed to Commit 2 only upon receiving `VERDICT: APPROVED`.
 
 ### Phase 4: Commit 2 — Completion & Status Update
 
