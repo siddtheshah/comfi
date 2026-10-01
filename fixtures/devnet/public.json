@@ -1,0 +1,18 @@
+{
+  "cluster": "devnet",
+  "rpcUrl": "https://api.devnet.solana.com",
+  "programId": "bBVF974y98aLPaj17NcAFzYSoCENZwaN1rAvt3HfXTY",
+  "programData": "6YnjNLg1SE9K4ggWsyT6ejPU1s8XFmozCyrw8232btbm",
+  "upgradeAuthority": "Cu5th5dsqqZ3hQ1MAfNPjwktgb4ktQ4z7yuD5Yvwu14f",
+  "globalConfig": "BVVfYV2AD4KsGWTF3zge1wfH9sb54he1M83UBWazwrNX",
+  "testMint": "HGwKgUvAsm1tdoujxCF7AViityt7gjPnTcqi4B5d5qtM",
+  "treasuryAuthority": "Cu5th5dsqqZ3hQ1MAfNPjwktgb4ktQ4z7yuD5Yvwu14f",
+  "treasuryTokenAccount": "5LywXjKyDpBeYwAXz5A9GcPTAjy9GS6wVp7KUb8Q6xAf",
+  "quoteAuthority": "ARUqRS7phiw35GvB3qmFyRhDVv3XSXurFBEbSZkBoZfA",
+  "members": [],
+  "transactions": {
+    "createMint": "5Q5rjTwqMViuhM78rv5qNyKNENZ941mr91GRRSrMhmVGkQ57yYuqntb56bY8AJiy19YAYgTgPxEuxdSEpRRJTs2d",
+    "createTreasuryTokenAccount": "3dTSNU3UQMHmhXfXpAP1D3RxmRAtc25hXNcbKFWBAuNjLnUPLnL1rBgxFuSWaZLK3AXZdfsakNT3omnKF1wGMoSU",
+    "initializeGlobalConfig": "wBqDDA8zCVuafaPe1ZhdtFMq2Toxgb5tGgLWasq8KZQZXhPXEUjCyr2rM5LkLKAJ5L34Ufib5teFiMjNpUAVgx5"
+  }
+}

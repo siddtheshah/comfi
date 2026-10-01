@@ -14,7 +14,15 @@ USDC or mainnet keys.
 | ProgramData account | `6YnjNLg1SE9K4ggWsyT6ejPU1s8XFmozCyrw8232btbm` |
 | Upgrade authority | `Cu5th5dsqqZ3hQ1MAfNPjwktgb4ktQ4z7yuD5Yvwu14f` |
 | Program binary length | 586,888 bytes |
-| GlobalConfig | Not initialized |
+| GlobalConfig | `BVVfYV2AD4KsGWTF3zge1wfH9sb54he1M83UBWazwrNX` |
+| Test mint | `HGwKgUvAsm1tdoujxCF7AViityt7gjPnTcqi4B5d5qtM` |
+| Treasury authority | `Cu5th5dsqqZ3hQ1MAfNPjwktgb4ktQ4z7yuD5Yvwu14f` |
+| Treasury token account | `5LywXjKyDpBeYwAXz5A9GcPTAjy9GS6wVp7KUb8Q6xAf` |
+| Quote authority | `ARUqRS7phiw35GvB3qmFyRhDVv3XSXurFBEbSZkBoZfA` |
+
+[`public.json`](public.json) is the reusable public manifest for this Devnet
+fixture set. It contains no key material. The corresponding quote-authority
+keypair remains only in the ignored `fixtures/devnet/runtime/` directory.
 
 The deployed binary is the normal build. It excludes the development-only
 `test_*` instructions. Pool tests can use real, short timing parameters, or the
@@ -42,9 +50,12 @@ and quote authority. Verify every address before submitting that transaction.
 
 ## Public versus private state
 
-Commit only public addresses and transaction signatures. Start from
-[`public.example.json`](public.example.json) and write the real, public manifest
-to `fixtures/devnet/runtime/public.json` after setup.
+Commit only public addresses and transaction signatures. The active Devnet
+fixture set is recorded in [`public.json`](public.json); use
+[`public.example.json`](public.example.json) only as a schema template for a
+separate fixture set. A runtime copy may be written to
+`fixtures/devnet/runtime/public.json` during setup, but it is not the canonical
+shared manifest.
 
 Do **not** commit or paste any of these:
 
