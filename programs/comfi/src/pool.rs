@@ -102,26 +102,26 @@ pub struct JoinPool<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
     #[account(seeds = [b"global"], bump = global.bump)]
-    pub global: Account<'info, GlobalConfig>,
+    pub global: Box<Account<'info, GlobalConfig>>,
     #[account(
         mut,
         has_one = global,
         constraint = !pool.is_closing @ ComfiError::PoolIsClosing,
         constraint = vault.key() == pool.vault @ ComfiError::InvalidVault
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
     #[account(
         mut,
         constraint = user_usdc.owner == user.key() @ ComfiError::Unauthorized,
         constraint = user_usdc.mint == global.usdc_mint @ ComfiError::WrongMint
     )]
-    pub user_usdc: Account<'info, TokenAccount>,
+    pub user_usdc: Box<Account<'info, TokenAccount>>,
     #[account(
         mut,
         address = pool.vault @ ComfiError::InvalidVault,
         constraint = vault.mint == global.usdc_mint @ ComfiError::WrongMint
     )]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: Box<Account<'info, TokenAccount>>,
     #[account(
         init,
         payer = user,
@@ -129,7 +129,7 @@ pub struct JoinPool<'info> {
         seeds = [b"member", pool.key().as_ref(), user.key().as_ref()],
         bump
     )]
-    pub member: Account<'info, Member>,
+    pub member: Box<Account<'info, Member>>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -139,14 +139,14 @@ pub struct Deposit<'info> {
     #[account(mut)]
     pub member_wallet: Signer<'info>,
     #[account(seeds = [b"global"], bump = global.bump)]
-    pub global: Account<'info, GlobalConfig>,
+    pub global: Box<Account<'info, GlobalConfig>>,
     #[account(
         mut,
         has_one = global,
         constraint = !pool.is_closing @ ComfiError::PoolIsClosing,
         constraint = vault.key() == pool.vault @ ComfiError::InvalidVault
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
     #[account(
         mut,
         seeds = [b"member", pool.key().as_ref(), member_wallet.key().as_ref()],
@@ -154,15 +154,15 @@ pub struct Deposit<'info> {
         has_one = pool,
         constraint = member.wallet == member_wallet.key() @ ComfiError::Unauthorized
     )]
-    pub member: Account<'info, Member>,
+    pub member: Box<Account<'info, Member>>,
     #[account(
         mut,
         constraint = source_usdc.owner == member_wallet.key() @ ComfiError::Unauthorized,
         constraint = source_usdc.mint == global.usdc_mint @ ComfiError::WrongMint
     )]
-    pub source_usdc: Account<'info, TokenAccount>,
+    pub source_usdc: Box<Account<'info, TokenAccount>>,
     #[account(mut, address = pool.vault @ ComfiError::InvalidVault)]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -414,13 +414,13 @@ pub struct ClaimClosureRefund<'info> {
     #[account(mut)]
     pub member_wallet: Signer<'info>,
     #[account(seeds = [b"global"], bump = global.bump)]
-    pub global: Account<'info, GlobalConfig>,
+    pub global: Box<Account<'info, GlobalConfig>>,
     #[account(
         mut,
         has_one = global,
         constraint = vault.key() == pool.vault @ ComfiError::InvalidVault
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
     #[account(
         mut,
         seeds = [b"member", pool.key().as_ref(), member_wallet.key().as_ref()],
@@ -428,19 +428,19 @@ pub struct ClaimClosureRefund<'info> {
         has_one = pool,
         constraint = member.wallet == member_wallet.key() @ ComfiError::Unauthorized
     )]
-    pub member: Account<'info, Member>,
+    pub member: Box<Account<'info, Member>>,
     #[account(
         mut,
         address = pool.vault @ ComfiError::InvalidVault,
         constraint = vault.mint == global.usdc_mint @ ComfiError::WrongMint
     )]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: Box<Account<'info, TokenAccount>>,
     #[account(
         mut,
         constraint = member_usdc.owner == member_wallet.key() @ ComfiError::Unauthorized,
         constraint = member_usdc.mint == global.usdc_mint @ ComfiError::WrongMint
     )]
-    pub member_usdc: Account<'info, TokenAccount>,
+    pub member_usdc: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
 }
 
