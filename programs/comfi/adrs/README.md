@@ -19,6 +19,7 @@ Architecture Decision Records (ADRs) capture important architectural decisions a
 | ADR | Title | Status | Date |
 | --- | --- | --- | --- |
 | [0001](0001-fair-closure-algorithm.md) | Fair Closure Algorithm | Implemented | 2026-09-23 |
+| [0002](0002-low-quorum-pool-locking.md) | Low Quorum Pool Locking and Auto-Closure Mechanism | Proposed | 2026-10-01 |
 
 ## ADR Template
 
