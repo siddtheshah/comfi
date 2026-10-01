@@ -22,7 +22,7 @@
 - [ ] Research and integrate browser wallet support for localnet (`http://127.0.0.1:8899`), devnet, and testnet:
   - [ ] Support Phantom wallet (`window.solana`) with network switching guidance (Settings -> Developer Settings -> Change Network).
   - [ ] Support Backpack wallet (`window.backpack`) with native custom RPC configuration.
-  - [ ] Implement built-in ComFi In-Browser Web Wallet (persistent browser keypair with 1-click generation, import/export, address copy, SOL/USDC balance display, and localnet/devnet airdrop faucet).
+  - [ ] [Claimed: Subagent-Web-Wallet | Deadline: 2026-10-01T16:00:00Z] Implement built-in ComFi In-Browser Web Wallet (persistent browser keypair with 1-click generation, import/export, address copy, SOL/USDC balance display, and localnet/devnet airdrop faucet).
 - [ ] Add interactive network switcher in the web app navbar (`Localnet`, `Devnet`, `Testnet`) with connection health indicator and dynamic RPC configuration.
 - [ ] Enable wallet provider selector allowing seamless toggle between In-Browser Web Wallet, Phantom, and Backpack.
 
