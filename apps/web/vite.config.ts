@@ -128,6 +128,14 @@ export default defineConfig(({ mode }) => {
   }
   return {
     envDir: workspaceRoot,
+    resolve: {
+      alias: {
+        buffer: 'buffer/',
+      },
+    },
+    define: {
+      global: 'globalThis',
+    },
     plugins: [react(), mockWalletPoolApi(rpcUrl, programId)],
   }
 })

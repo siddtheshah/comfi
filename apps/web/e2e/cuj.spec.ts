@@ -92,3 +92,40 @@ test('member can view on-chain pools and inspect smart contract parameters', asy
   await expect(page.getByText('24 members (23 slots open)')).toBeVisible()
 })
 
+test('user can open ComFi in-browser wallet manager, switch modes, and manage keys', async ({ page }) => {
+  await page.goto('/')
+
+  // Open wallet modal via quick button
+  await page.getByRole('button', { name: /ComFi Wallet/i }).click()
+  await expect(page.getByRole('heading', { name: 'ComFi Wallet Manager' })).toBeVisible()
+
+  // Switch to in-browser wallet tab
+  await page.getByRole('button', { name: /In-Browser Wallet/i }).click()
+  await expect(page.getByText('Active Wallet Address')).toBeVisible()
+  await expect(page.getByText('SOL Balance')).toBeVisible()
+  await expect(page.getByText('USDC Balance')).toBeVisible()
+
+  // Test copy address
+  await page.getByRole('button', { name: /Copy Address/i }).click()
+  await expect(page.getByRole('button', { name: /Copied/i })).toBeVisible()
+
+  // Test export secret key
+  await page.getByRole('button', { name: /Export Secret Key/i }).click()
+  await expect(page.getByText('Base58 Private Key')).toBeVisible()
+  await expect(page.getByText('JSON Array Format')).toBeVisible()
+
+  // Test generate new keypair
+  await page.getByRole('button', { name: /1-Click New Keypair/i }).click()
+  await expect(page.getByRole('button', { name: /Confirm Overwrite/i })).toBeVisible()
+  await page.getByRole('button', { name: /Confirm Overwrite/i }).click()
+  await expect(page.getByText('New in-browser wallet generated successfully!')).toBeVisible()
+
+  // Close modal
+  await page.getByRole('button', { name: 'Done' }).click()
+  await expect(page.getByRole('heading', { name: 'ComFi Wallet Manager' })).not.toBeVisible()
+
+  // Verify banner reflects in-browser wallet
+  await expect(page.getByTestId('localnet-wallet')).toContainText('ComFi In-Browser wallet connected')
+})
+
+

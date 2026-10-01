@@ -2,6 +2,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { activity, demoPools, members, type PoolItem } from './data'
 import { fetchOnChainPools, onChainPoolToPoolItem } from './solana'
 import { useWallet } from './wallet'
+import { WalletModal } from './WalletModal'
 
 type View = 'overview' | 'pool' | 'proposal' | 'withdrawal'
 type Filter = 'all' | 'onchain' | 'demo'
@@ -18,6 +19,7 @@ export function App() {
   const [notice, setNotice] = useState('')
   const [creatingPool, setCreatingPool] = useState(false)
   const [initializing, setInitializing] = useState(false)
+  const [walletModalOpen, setWalletModalOpen] = useState(false)
 
   const allPools = useMemo(() => {
     return [...onChainPools, ...demoPools]
@@ -160,8 +162,57 @@ export function App() {
       <div className="sidebar-bottom"><button className="help"><Icon>?</Icon>Help & support</button><button className="profile"><span className="avatar you">YT</span><span><b>Yasmine T.</b><small>Personal settings</small></span><span>›</span></button></div>
     </aside>
     <main>
-      <header className="topbar"><button className="mobile-menu" onClick={() => setMenu(!menu)} aria-label="Open menu">☰</button><div className="crumb">{view === 'overview' ? <><span>Good morning, Yasmine</span><strong>Sunday, July 26</strong></> : <button className="back" onClick={() => setView('overview')}>← My pools</button>}</div><div className="top-actions"><button className="bell" onClick={() => setNotice('You’re all caught up.')}>♧<i /></button>{wallet.connected ? <button className="wallet-status" data-testid="wallet-status" title={wallet.publicKey} onClick={wallet.disconnect}>Mock wallet · {wallet.publicKey?.slice(0, 4)}…{wallet.publicKey?.slice(-4)}</button> : <button className="primary" data-testid="connect-wallet" onClick={wallet.connect}>Connect mock wallet</button>}<button className="avatar you">YT</button></div></header>
-      {wallet.connected && <div className="localnet-banner" data-testid="localnet-wallet">Localnet mock wallet connected · {wallet.endpoint}</div>}
+      <header className="topbar">
+        <button className="mobile-menu" onClick={() => setMenu(!menu)} aria-label="Open menu">☰</button>
+        <div className="crumb">
+          {view === 'overview' ? (
+            <>
+              <span>Good morning, Yasmine</span>
+              <strong>Sunday, July 26</strong>
+            </>
+          ) : (
+            <button className="back" onClick={() => setView('overview')}>← My pools</button>
+          )}
+        </div>
+        <div className="top-actions">
+          <button className="bell" onClick={() => setNotice('You’re all caught up.')}>♧<i /></button>
+          <button
+            className="wallet-quick-btn"
+            onClick={() => setWalletModalOpen(true)}
+            title="Open ComFi Web Wallet (Keypair, Balances, Faucets)"
+          >
+            ⚡ ComFi Wallet
+          </button>
+          {wallet.connected ? (
+            <button
+              className="wallet-status"
+              data-testid="wallet-status"
+              title={`Click to open ComFi Wallet Manager (${wallet.publicKey})`}
+              onClick={() => setWalletModalOpen(true)}
+            >
+              {wallet.walletMode === 'mock' ? 'Mock wallet' : 'ComFi Wallet'} · {wallet.publicKey?.slice(0, 4)}…{wallet.publicKey?.slice(-4)}
+            </button>
+          ) : (
+            <button
+              className="primary"
+              data-testid="connect-wallet"
+              onClick={() => {
+                wallet.connect()
+                setWalletModalOpen(true)
+              }}
+            >
+              Connect mock wallet
+            </button>
+          )}
+          <button className="avatar you">YT</button>
+        </div>
+      </header>
+      {wallet.connected && (
+        <div className="localnet-banner" data-testid="localnet-wallet">
+          {wallet.walletMode === 'mock' ? 'Localnet mock wallet connected' : 'ComFi In-Browser wallet connected'} · {wallet.endpoint}
+        </div>
+      )}
+      <WalletModal isOpen={walletModalOpen} onClose={() => setWalletModalOpen(false)} />
       {notice && <div className="toast" role="status">{notice}<button onClick={closeNotice}>×</button></div>}
       {view === 'overview' && (
         <Overview
