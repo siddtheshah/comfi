@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js'
+import { PublicKey, type Transaction } from '@solana/web3.js'
 
 export type PhantomPublicKey = { toBase58: () => string }
 type AccountListener = (publicKey: PhantomPublicKey | null) => void
@@ -9,6 +9,7 @@ export interface PhantomProvider {
   publicKey?: PhantomPublicKey | null
   connect: () => Promise<{ publicKey: PhantomPublicKey }>
   disconnect: () => Promise<void>
+  signTransaction?: (transaction: Transaction) => Promise<Transaction>
   on: (event: 'accountChanged' | 'disconnect', listener: AccountListener | DisconnectListener) => void
   removeListener: (event: 'accountChanged' | 'disconnect', listener: AccountListener | DisconnectListener) => void
 }

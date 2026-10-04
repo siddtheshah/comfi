@@ -6,6 +6,7 @@ import { WalletModal } from './WalletModal'
 import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
 import { CopilotPanel } from './CopilotPanel'
+import { GovernanceView } from './GovernanceView'
 
 type View = 'overview' | 'pool'
 const Icon = ({ children }: { children: string }) => <span className="icon" aria-hidden="true">{children}</span>
@@ -407,7 +408,7 @@ function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
               </div>
               <div className="chain-spec">
                 <small>Voting Threshold</small>
-                <strong>{pool.voteThreshold} affirmative votes</strong>
+                <strong>{((pool.voteThreshold ?? 0) / 100).toFixed(2)}% approval</strong>
               </div>
               <div className="chain-spec">
                 <small>Creator wallet</small>
@@ -422,6 +423,7 @@ function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
         )}
 
         <PoolMetricsView pool={pool} />
+        <GovernanceView key={pool.address} address={pool.chain.address} />
         <div className="section-head compact"><h2>Activity</h2></div>
         <p>Activity history is not connected yet.</p>
       </div>
@@ -430,7 +432,7 @@ function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
         <div className="action-card">
           <span className="eyebrow">COMMUNITY DECISIONS</span>
           <h3>Have a say in<br />what’s next.</h3>
-          <p>{pool.proposals} proposals have been created. Lifecycle status and voting are not connected yet.</p>
+          <p>{pool.proposals} proposals have been created. Review lifecycle status, vote, and execute proposals in the governance view.</p>
         </div>
         <div className="members-card">
           <div className="section-head compact">

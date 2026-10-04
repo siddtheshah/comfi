@@ -32,12 +32,12 @@
   - [x] Decode financial accounting: vault balance, total conferred capital, total non-conferred capital, surplus, escrowed surplus.
   - [x] Decode quorum health: participation rates, lock status (`isLocked`), consecutive locked cycles, auto-close thresholds, and warning alerts.
   - [x] Decode admission mode (`InviteVouched` vs `Open`) and voting maturation cycle rules.
-- [ ] [Claimed: Codex-Web-Governance | Deadline: 2026-10-04T22:30:00Z] Implement Comprehensive Governance & Proposals View:
-  - [ ] Proposals list with real-time lifecycle status badges (`Queued`, `Open`, `Executable`, `Executed`, `Rejected`).
-  - [ ] Support all 6 proposal types: `SetSpenderLimit`, `ApproveWithdrawal`, `ConfigurationModification`, `ClosePool`, `EvictMember`, `AdmitMember`.
-  - [ ] Interactive Voting modal with voting power breakdown (funded status, streak, voter maturation).
-  - [ ] 1-Click Proposal Execution for eligible proposals meeting threshold or deadline requirements.
-  - [ ] "Create Proposal" dialog supporting all proposal types.
+- [x] [Completed: Codex-Web-Governance] Implement Comprehensive Governance & Proposals View:
+  - [x] Proposals list with real-time lifecycle status badges (`Queued`, `Open`, `Executable`, `Executed`, `Rejected`).
+  - [x] Support all 6 proposal types: `SetSpenderLimit`, `ApproveWithdrawal`, `ConfigurationModification`, `ClosePool`, `EvictMember`, `AdmitMember`.
+  - [x] Interactive Voting modal with voting power breakdown (funded status, streak, voter maturation).
+  - [x] 1-Click Proposal Execution for eligible proposals meeting threshold or deadline requirements.
+  - [x] "Create Proposal" dialog supporting all proposal types.
 - [ ] Implement Membership & History View:
   - [ ] Member directory showing roles, status (`Active`, `Leaving`, `Exited`, `Evicted`), streak, funded status, and pause status.
   - [ ] Vouch lineage visualizer showing invitation depth and vouched-by chain.

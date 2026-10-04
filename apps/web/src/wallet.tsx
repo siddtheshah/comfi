@@ -1,5 +1,5 @@
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Keypair } from '@solana/web3.js'
+import { Connection, Keypair, Transaction } from '@solana/web3.js'
 import { checkRpcHealth, initialNetwork, networkEndpoints, validateNetwork, validateRpcEndpoint, type SolanaNetwork } from './network'
 import { getPhantomProvider, PhantomSession, type PhantomWindow } from './phantom-wallet'
 import {
@@ -68,6 +68,7 @@ export type WalletState = {
   walletLabel: string
   walletMode: WalletMode
   setWalletMode: (mode: WalletMode) => void
+  sendTransaction: (transaction: Transaction) => Promise<string>
   inBrowserWallet: InBrowserWalletState
   mockWallet: {
     publicKey: string
@@ -374,6 +375,32 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     return walletMode === 'in-browser' ? keypair.publicKey.toBase58() : mockPublicKey
   }, [connected, walletMode, keypair, mockPublicKey, phantomPublicKey, backpackPublicKey])
 
+  const sendTransaction = useCallback(async (transaction: Transaction): Promise<string> => {
+    if (!activePublicKey) throw new Error('Connect a wallet before signing a transaction.')
+    if (walletMode === 'mock') throw new Error('Select ComFi Wallet, Phantom or Backpack to sign governance transactions.')
+    const source = `${endpoint}:${activePublicKey}:${walletMode}`
+    const connection = new Connection(endpoint, 'confirmed')
+    const latest = await connection.getLatestBlockhash('confirmed')
+    transaction.recentBlockhash = latest.blockhash
+    transaction.feePayer = new (await import('@solana/web3.js')).PublicKey(activePublicKey)
+    const expectedMessage = transaction.serializeMessage()
+    let signed = transaction
+    if (walletMode === 'in-browser') transaction.sign(keypair)
+    else {
+      const provider = walletMode === 'phantom' ? phantomProvider : backpackProvider
+      if (!provider?.signTransaction) throw new Error('The selected extension cannot sign transactions.')
+      signed = await provider.signTransaction(transaction)
+    }
+    if (source !== transactionSource.current) throw new Error('Wallet or network changed during transaction approval. Retry on the selected network.')
+    if (!expectedMessage.equals(signed.serializeMessage())) throw new Error('Wallet changed the transaction message.')
+    const signature = await connection.sendRawTransaction(signed.serialize())
+    const result = await connection.confirmTransaction({ ...latest, signature }, 'confirmed')
+    if (result.value.err) throw new Error(`Transaction failed: ${JSON.stringify(result.value.err)}`)
+    return signature
+  }, [activePublicKey, endpoint, walletMode, keypair, phantomProvider, backpackProvider])
+  const transactionSource = useRef('')
+  transactionSource.current = `${endpoint}:${activePublicKey ?? ''}:${walletMode}`
+
   const wallet = useMemo<WalletState>(() => ({
     connected: walletMode === 'phantom'
       ? Boolean(phantomPublicKey)
@@ -405,6 +432,7 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     walletMode,
     setWalletMode,
     inBrowserWallet,
+    sendTransaction,
     mockWallet: {
       publicKey: mockPublicKey,
       endpoint,
@@ -432,6 +460,7 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     setWalletMode,
     phantomPublicKey,
     backpackPublicKey,
+    sendTransaction,
   ])
 
   return <WalletContext.Provider value={wallet}>{children}</WalletContext.Provider>

@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js'
+import { PublicKey, type Transaction } from '@solana/web3.js'
 
 export type BackpackPublicKey = { toBase58: () => string }
 type AccountListener = (publicKey: BackpackPublicKey | null) => void
@@ -9,6 +9,7 @@ export interface BackpackProvider {
   publicKey?: BackpackPublicKey | null
   connect: () => Promise<{ publicKey?: BackpackPublicKey } | void>
   disconnect: () => Promise<void>
+  signTransaction?: (transaction: Transaction) => Promise<Transaction>
   on: (event: 'accountChanged' | 'disconnect', listener: AccountListener | DisconnectListener) => void
   removeListener: (event: 'accountChanged' | 'disconnect', listener: AccountListener | DisconnectListener) => void
   connection?: { rpcEndpoint?: string }
