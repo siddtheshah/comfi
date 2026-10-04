@@ -49,8 +49,8 @@
   - [ ] Historical spend distributions and direct member benefit attribution.
 
 ## 4. Member Invitation & Webhook-Like Onboarding Pipeline (`apps/web`)
-- [ ] Implement "Create Pool" modal with admission mode selection (`InviteVouched` or `Open`), member obligation, cycle duration, and quorum parameters.
-- [ ] Implement "Invite Members" workflow:
+- [ ] [Claimed: Subagent-Member-Invitation | Deadline: 2026-10-04T18:30:00Z] Implement "Create Pool" modal with admission mode selection (`InviteVouched` or `Open`), member obligation, cycle duration, and quorum parameters.
+- [ ] [Claimed: Subagent-Member-Invitation | Deadline: 2026-10-04T18:30:00Z] Implement "Invite Members" workflow:
   - [ ] Generate invitation payload and sharable link/email message containing pool address and inviter identity.
   - [ ] Provide recipient acceptance view where the invitee connects their wallet or submits their wallet address.
   - [ ] Implement automated webhook-style listener that detects the recipient's wallet submission and dispatches an `AdmitMember` governance proposal on behalf of the inviter.
