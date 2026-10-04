@@ -28,7 +28,7 @@
 
 ## 3. Comprehensive Pool Understanding Web App (`apps/web`)
 - [x] [Completed: Codex-Pool-Cleanup] Remove default demo pools from the web app and show only pools from the selected network.
-- [ ] Enhance on-chain decoding in `apps/web/src/solana.ts` for complete pool metrics:
+- [ ] [Claimed: Codex-Pool-Metrics | Deadline: 2026-10-04T15:11:34Z] Enhance on-chain decoding in `apps/web/src/solana.ts` for complete pool metrics:
   - [ ] Decode financial accounting: vault balance, total conferred capital, total non-conferred capital, surplus, escrowed surplus.
   - [ ] Decode quorum health: participation rates, lock status (`isLocked`), consecutive locked cycles, auto-close thresholds, and warning alerts.
   - [ ] Decode admission mode (`InviteVouched` vs `Open`) and voting maturation cycle rules.
