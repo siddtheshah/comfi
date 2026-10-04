@@ -5,6 +5,7 @@ import { useWallet } from './wallet'
 import { WalletModal } from './WalletModal'
 import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
+import { CopilotPanel } from './CopilotPanel'
 
 type View = 'overview' | 'pool' | 'proposal' | 'withdrawal'
 const Icon = ({ children }: { children: string }) => <span className="icon" aria-hidden="true">{children}</span>
@@ -26,6 +27,7 @@ export function App() {
   const [creatingPool, setCreatingPool] = useState(false)
   const [initializing, setInitializing] = useState(false)
   const [walletModalOpen, setWalletModalOpen] = useState(false)
+  const [copilotOpen, setCopilotOpen] = useState(false)
 
   const loadOnChainPools = useCallback(async (selectAddress?: string) => {
     const request = ++poolRequest.current
@@ -154,6 +156,7 @@ export function App() {
       <nav>
         <button className={view === 'overview' ? 'nav-active' : ''} onClick={() => { setView('overview'); setMenu(false) }}><Icon>⌂</Icon>My pools</button>
         <button data-testid="start-pool" disabled={creatingPool || initializing} onClick={() => { void createPool(); setMenu(false) }}><Icon>＋</Icon>Start a pool</button>
+        <button data-testid="side-copilot-btn" onClick={() => { setCopilotOpen(true); setMenu(false) }}><Icon>🤖</Icon>ComFi Copilot</button>
       </nav>
       <div className="side-pools">
         <p>Your spaces</p>
@@ -185,6 +188,14 @@ export function App() {
         <div className="top-actions">
           <NetworkSwitcher />
           <button className="bell" onClick={() => setNotice('You’re all caught up.')}>♧<i /></button>
+          <button
+            className="copilot-toggle-btn"
+            data-testid="copilot-toggle-btn"
+            onClick={() => setCopilotOpen(true)}
+            title="Open ComFi Delegated AI Pool Assistant"
+          >
+            🤖 Copilot
+          </button>
           <button
             className="wallet-quick-btn"
             onClick={() => setWalletModalOpen(true)}
@@ -227,6 +238,22 @@ export function App() {
         </div>
       )}
       <WalletModal isOpen={walletModalOpen} onClose={() => setWalletModalOpen(false)} />
+      <CopilotPanel
+        isOpen={copilotOpen}
+        onClose={() => setCopilotOpen(false)}
+        selectedPool={selected}
+        networkName={NETWORK_LABELS[wallet.network]}
+        walletConnected={wallet.connected}
+        walletAddress={wallet.publicKey}
+        onExecuteProposal={async (id) => {
+          setNotice(`Proposal #${id} executed by ComFi Copilot.`)
+          await loadOnChainPools()
+        }}
+        onRollCycle={async () => {
+          setNotice('Cycle roll transaction dispatched by ComFi Copilot.')
+          await loadOnChainPools()
+        }}
+      />
       {poolError && <div className="pool-error" role="alert">Could not load pools on {NETWORK_LABELS[wallet.network]}: {poolError}</div>}
       {notice && <div className="toast" role="status">{notice}<button onClick={closeNotice}>×</button></div>}
       {view === 'overview' && (

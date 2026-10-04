@@ -57,19 +57,19 @@
   - [ ] Notification and tracking card showing pending invite approvals and admission execution status.
 
 ## 5. Browser-Based Delegated AI Pool Assistant (ComFi Copilot) (`apps/web`)
-- [ ] [Claimed: Subagent-ComFi-Copilot | Deadline: 2026-10-04T16:30:00Z] Design and implement an in-browser AI Assistant panel for autonomous and delegated pool management.
-- [ ] Provide user-configurable risk & autonomy settings:
-  - [ ] **Tier 1: Advisory Mode (Low Risk / Zero Autonomy)** - Proactively monitors pool metrics, flags quorum drops, highlights executable proposals, and recommends votes without executing transactions.
-  - [ ] **Tier 2: Supervised Automation (Medium Risk / Semi-Autonomous)** - Auto-votes on recurring routine proposals matching user rules, auto-rolls overdue cycles, prompts for approval on large spends, evictions, or config modifications.
-  - [ ] **Tier 3: Autonomous Delegation (High Risk / Full Autonomy)** - Automatically cranks cycle rolls, executes passed proposals, and auto-vouches verified invited candidate addresses via the webhook pipeline.
-- [ ] Add granular capability toggles:
-  - [ ] Auto-roll cycle when deadline passes
-  - [ ] Auto-execute passed proposals
-  - [ ] Auto-vouch invited candidates from webhook responses
-  - [ ] Auto-vote YES on vouched candidates in user's lineage
-  - [ ] Auto-claim surplus or refund upon pool closure
-- [ ] Real-time AI decision and audit log showing rationale, confidence score, and timestamped actions.
-- [ ] Interactive conversational interface allowing natural language queries ("What is our quorum status?", "Are there pending proposals to vote on?", "Execute passed proposals").
+- [x] [Completed: Subagent-ComFi-Copilot] Design and implement an in-browser AI Assistant panel for autonomous and delegated pool management.
+- [x] [Completed: Subagent-ComFi-Copilot] Provide user-configurable risk & autonomy settings:
+  - [x] **Tier 1: Advisory Mode (Low Risk / Zero Autonomy)** - Proactively monitors pool metrics, flags quorum drops, highlights executable proposals, and recommends votes without executing transactions.
+  - [x] **Tier 2: Supervised Automation (Medium Risk / Semi-Autonomous)** - Auto-votes on recurring routine proposals matching user rules, auto-rolls overdue cycles, prompts for approval on large spends, evictions, or config modifications.
+  - [x] **Tier 3: Autonomous Delegation (High Risk / Full Autonomy)** - Automatically cranks cycle rolls, executes passed proposals, and auto-vouches verified invited candidate addresses via the webhook pipeline.
+- [x] [Completed: Subagent-ComFi-Copilot] Add granular capability toggles:
+  - [x] Auto-roll cycle when deadline passes
+  - [x] Auto-execute passed proposals
+  - [x] Auto-vouch invited candidates from webhook responses
+  - [x] Auto-vote YES on vouched candidates in user's lineage
+  - [x] Auto-claim surplus or refund upon pool closure
+- [x] [Completed: Subagent-ComFi-Copilot] Real-time AI decision and audit log showing rationale, confidence score, and timestamped actions.
+- [x] [Completed: Subagent-ComFi-Copilot] Interactive conversational interface allowing natural language queries ("What is our quorum status?", "Are there pending proposals to vote on?", "Execute passed proposals").
 
 ## 6. Verification & End-to-End Testing
 - [ ] Run full workspace unit tests (`npm test`) ensuring all test suites pass without evading failure scenarios.
