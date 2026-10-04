@@ -32,7 +32,7 @@
   - [x] Decode financial accounting: vault balance, total conferred capital, total non-conferred capital, surplus, escrowed surplus.
   - [x] Decode quorum health: participation rates, lock status (`isLocked`), consecutive locked cycles, auto-close thresholds, and warning alerts.
   - [x] Decode admission mode (`InviteVouched` vs `Open`) and voting maturation cycle rules.
-- [ ] Implement Comprehensive Governance & Proposals View:
+- [ ] [Claimed: Codex-Web-Governance | Deadline: 2026-10-04T22:30:00Z] Implement Comprehensive Governance & Proposals View:
   - [ ] Proposals list with real-time lifecycle status badges (`Queued`, `Open`, `Executable`, `Executed`, `Rejected`).
   - [ ] Support all 6 proposal types: `SetSpenderLimit`, `ApproveWithdrawal`, `ConfigurationModification`, `ClosePool`, `EvictMember`, `AdmitMember`.
   - [ ] Interactive Voting modal with voting power breakdown (funded status, streak, voter maturation).
