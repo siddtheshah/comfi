@@ -37,14 +37,6 @@ export type PoolItem = {
   cycleStartedAt?: number
 }
 
-export const demoPools: PoolItem[] = [
-  { id: 'neighbors', icon: '✦', name: 'Maple Street Mutual Aid', role: 'Member', status: 'Up to date', balance: '$4,860.20', funds: '18 of 24', nextDate: 'Aug 1', proposals: 2, requests: 1, cap: 24, slots: 6, accent: 'coral' },
-  { id: 'garden', icon: '♣', name: 'Eastside Community Garden', role: 'Coordinator', status: 'Up to date', balance: '$1,273.80', funds: '12 of 16', nextDate: 'Aug 5', proposals: 1, requests: 0, cap: 16, slots: 4, accent: 'lime' },
-  { id: 'parents', icon: '☻', name: 'Room 204 Family Fund', role: 'Member', status: 'Contribution due', balance: '$892.00', funds: '9 of 15', nextDate: 'Today', proposals: 0, requests: 0, cap: 15, slots: 2, accent: 'sky' },
-]
-
-export const pools = demoPools
-
 export const activity: Activity[] = [
   { initials: 'JR', who: 'Jordan R.', action: 'added to the fund', detail: 'August contribution', amount: '+ $25.00', time: 'Today, 9:42 AM', tone: 'in' },
   { initials: 'MS', who: 'Maya S.', action: 'requested a payment', detail: 'Food pantry supplies', amount: '$148.52', time: 'Yesterday', tone: 'out' },

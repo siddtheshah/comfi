@@ -1,5 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { activity, demoPools, members, type PoolItem } from './data'
+import { activity, members, type PoolItem } from './data'
 import { fetchOnChainPools, onChainPoolToPoolItem } from './solana'
 import { useWallet } from './wallet'
 import { WalletModal } from './WalletModal'
@@ -7,7 +7,6 @@ import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
 
 type View = 'overview' | 'pool' | 'proposal' | 'withdrawal'
-type Filter = 'all' | 'onchain' | 'demo'
 const Icon = ({ children }: { children: string }) => <span className="icon" aria-hidden="true">{children}</span>
 
 export function App() {
@@ -21,23 +20,12 @@ export function App() {
   const onChainPools = poolSnapshot.source === poolSource ? poolSnapshot.pools : []
   const [poolError, setPoolError] = useState<string | null>(null)
   const [loadingPools, setLoadingPools] = useState(false)
-  const [filter, setFilter] = useState<Filter>('all')
-  const [selected, setSelected] = useState<PoolItem>(demoPools[0])
+  const [selected, setSelected] = useState<PoolItem | null>(null)
   const [menu, setMenu] = useState(false)
   const [notice, setNotice] = useState('')
   const [creatingPool, setCreatingPool] = useState(false)
   const [initializing, setInitializing] = useState(false)
   const [walletModalOpen, setWalletModalOpen] = useState(false)
-
-  const allPools = useMemo(() => {
-    return [...onChainPools, ...demoPools]
-  }, [onChainPools])
-
-  const visiblePools = useMemo(() => {
-    if (filter === 'onchain') return onChainPools
-    if (filter === 'demo') return demoPools
-    return allPools
-  }, [filter, onChainPools, allPools])
 
   const loadOnChainPools = useCallback(async (selectAddress?: string) => {
     const request = ++poolRequest.current
@@ -72,7 +60,7 @@ export function App() {
               if (match) setSelected(match)
             } else {
               setSelected(prev => {
-                if (prev.onChain) {
+                if (prev) {
                   const refreshed = items.find(i => i.id === prev.id)
                   return refreshed ?? prev
                 }
@@ -96,7 +84,7 @@ export function App() {
           if (match) setSelected(match)
         } else {
           setSelected(prev => {
-            if (prev.onChain) {
+            if (prev) {
               const refreshed = items.find(i => i.id === prev.id)
               return refreshed ?? prev
             }
@@ -119,9 +107,9 @@ export function App() {
   }, [loadOnChainPools, poolSource])
 
   useEffect(() => { refreshPools() }, [refreshPools])
-  useEffect(() => { setSelected(demoPools[0]); setView('overview') }, [wallet.network, wallet.endpoint, wallet.programId])
+  useEffect(() => { setSelected(null); setView('overview') }, [wallet.network, wallet.endpoint, wallet.programId])
 
-  const goPool = (pool = selected) => { setSelected(pool); setView('pool'); setMenu(false) }
+  const goPool = (pool: PoolItem) => { setSelected(pool); setView('pool'); setMenu(false) }
   const submit = (event: FormEvent, label: string) => { event.preventDefault(); setNotice(`${label} saved for review.`); setView('pool') }
   const closeNotice = () => setNotice('')
 
@@ -169,8 +157,8 @@ export function App() {
       </nav>
       <div className="side-pools">
         <p>Your spaces</p>
-        {allPools.map(pool => (
-          <button key={pool.id} onClick={() => goPool(pool)} className={selected.id === pool.id && view === 'pool' ? 'side-selected' : ''}>
+        {onChainPools.map(pool => (
+          <button key={pool.id} onClick={() => goPool(pool)} className={selected?.id === pool.id && view === 'pool' ? 'side-selected' : ''}>
             <b className={`pool-glyph ${pool.accent}`}>{pool.icon}</b>
             <span>
               {pool.name}
@@ -244,10 +232,8 @@ export function App() {
       {view === 'overview' && (
         <Overview
           networkName={NETWORK_LABELS[wallet.network]}
-          pools={visiblePools}
+          pools={onChainPools}
           onChainCount={onChainPools.length}
-          filter={filter}
-          onFilterChange={setFilter}
           onRefresh={refreshPools}
           loadingPools={loadingPools}
           onSelect={goPool}
@@ -257,7 +243,7 @@ export function App() {
           initializing={initializing}
         />
       )}
-      {view === 'pool' && <Pool networkName={NETWORK_LABELS[wallet.network]} pool={selected} onProposal={() => setView('proposal')} onWithdrawal={() => setView('withdrawal')} />}
+      {view === 'pool' && selected && <Pool networkName={NETWORK_LABELS[wallet.network]} pool={selected} onProposal={() => setView('proposal')} onWithdrawal={() => setView('withdrawal')} />}
       {view === 'proposal' && <Proposal onCancel={() => setView('pool')} onSubmit={(e) => submit(e, 'Proposal')} />}
       {view === 'withdrawal' && <Withdrawal onCancel={() => setView('pool')} onSubmit={(e) => submit(e, 'Payment request')} />}
     </main>
@@ -268,8 +254,6 @@ function Overview({
   networkName,
   pools,
   onChainCount,
-  filter,
-  onFilterChange,
   onRefresh,
   loadingPools,
   onSelect,
@@ -281,8 +265,6 @@ function Overview({
   networkName: string
   pools: PoolItem[]
   onChainCount: number
-  filter: Filter
-  onFilterChange: (f: Filter) => void
   onRefresh: () => void
   loadingPools: boolean
   onSelect: (pool: PoolItem) => void
@@ -350,17 +332,13 @@ function Overview({
         <p>{onChainCount > 0 ? `${onChainCount} verified pool${onChainCount > 1 ? 's' : ''} active on Solana backend` : 'Communities you’re part of'}</p>
       </div>
       <div className="section-tools">
-        <div className="filter-tabs">
-          <button className={filter === 'all' ? 'active' : ''} onClick={() => onFilterChange('all')}>All ({pools.length})</button>
-          <button className={filter === 'onchain' ? 'active' : ''} onClick={() => onFilterChange('onchain')}>On-chain ({onChainCount})</button>
-          <button className={filter === 'demo' ? 'active' : ''} onClick={() => onFilterChange('demo')}>Demo</button>
-        </div>
         <button className="refresh-btn" disabled={loadingPools} onClick={onRefresh} title="Query live state from chain backend">
           ↻ {loadingPools ? 'Updating…' : 'Refresh'}
         </button>
       </div>
     </div>
 
+    {pools.length === 0 && <p data-testid="pool-empty-state">{loadingPools ? 'Loading pools…' : `No pools found on ${networkName}. Start a pool or switch networks to find one.`}</p>}
     <div className="pool-grid">
       {pools.map(pool => (
         <button className="pool-card" data-testid={`pool-${pool.id}`} key={pool.id} onClick={() => onSelect(pool)}>

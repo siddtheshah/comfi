@@ -1,4 +1,26 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
+
+async function showTestPool(page: Page) {
+  await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [{
+    address: 'H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M',
+    id: 0,
+    creator: 'GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB',
+    memberCap: 24,
+    memberCount: 1,
+    balance: '$100.00',
+  }] } }))
+}
+
+test('an empty network shows no default pools or demo filter', async ({ page }) => {
+  await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [] } }))
+  await page.goto('/')
+  await expect(page.getByTestId('pool-empty-state')).toContainText('No pools found on Localnet.')
+  await expect(page.locator('.pool-card')).toHaveCount(0)
+  await expect(page.locator('.side-pools button')).toHaveCount(0)
+  await expect(page.getByText(/Maple Street Mutual Aid|Eastside Community Garden|Room 204 Family Fund/)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Demo', exact: true })).toHaveCount(0)
+  await expect(page.locator('.summary-grid article').first()).toContainText('$0.00')
+})
 
 test('localnet mock wallet exposes the selected test identity', async ({ page }) => {
   await page.goto('/')
@@ -25,9 +47,10 @@ test('mock wallet can initialize the localnet deployer before pool creation', as
 })
 
 test('member can review a pool and begin a proposal', async ({ page }) => {
+  await showTestPool(page)
   await page.goto('/')
-  await page.getByTestId('pool-neighbors').click()
-  await expect(page.getByRole('heading', { name: 'Maple Street Mutual Aid' })).toBeVisible()
+  await page.getByTestId('pool-pool-0').click()
+  await expect(page.getByRole('heading', { name: 'Community Pool #0' })).toBeVisible()
   await page.getByRole('button', { name: /View proposals/ }).click()
   await expect(page.getByRole('heading', { name: /Bring an idea/ })).toBeVisible()
   await page.getByPlaceholder('e.g. Increase the garden supply limit').fill('Buy a shared tool shed')
@@ -37,8 +60,9 @@ test('member can review a pool and begin a proposal', async ({ page }) => {
 })
 
 test('member can begin a payment request', async ({ page }) => {
+  await showTestPool(page)
   await page.goto('/')
-  await page.getByTestId('pool-neighbors').click()
+  await page.getByTestId('pool-pool-0').click()
   await page.getByRole('button', { name: /Request a payment/ }).click()
   await expect(page.getByRole('heading', { name: 'Payment details' })).toBeVisible()
   await page.getByPlaceholder('0.00').fill('25.00')
@@ -80,6 +104,9 @@ test('member can view on-chain pools and inspect smart contract parameters', asy
   await page.goto('/')
   const poolCard = page.getByTestId('pool-pool-0')
   await expect(poolCard).toBeVisible()
+  await expect(page.locator('.pool-card')).toHaveCount(1)
+  await expect(page.locator('.side-pools button')).toHaveCount(1)
+  await expect(page.locator('.summary-grid article').first()).toContainText('$100.00')
   await expect(poolCard).toContainText('Community Pool #0')
   await expect(poolCard).toContainText('$100.00')
   await expect(poolCard).toContainText('On-chain')
