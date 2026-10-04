@@ -77,4 +77,4 @@
 - [x] [Completed: Codex-Localnet] Verify localnet compatibility and document instructions for running localnet tests and browser wallet setup.
 
 ## 7. Standalone User Accounts
-- [ ] [Claimed: Codex-UserAccount | Deadline: 2026-10-05T02:01:25Z] Begin standalone UserAccount implementation according to ADRs 0005/0006; add account-creator deployment and single-account workflow scripts with a passkey mock, without pool integration.
+- [x] [Completed: Codex-UserAccount] Begin standalone UserAccount implementation according to ADRs 0005/0006; add account-creator deployment and single-account workflow scripts with a passkey mock, without pool integration.

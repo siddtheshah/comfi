@@ -172,8 +172,8 @@ install -m 0600 "$WORKSPACE_DIR/programs/comfi/localnet-keypair.json" "$WORKSPAC
 # This script is exclusively for the isolated local test environment. The
 # pool initializer below requests testing_enabled, so deploy the matching
 # feature-gated binary rather than the production binary.
-"$ANCHOR" build -- --features testing
-"$ANCHOR" deploy --provider.cluster localnet --provider.wallet "$PAYER"
+"$ANCHOR" build --program-name comfi -- --features testing
+"$ANCHOR" deploy --program-name comfi --provider.cluster localnet --provider.wallet "$PAYER"
 
 echo "Initializing localnet state and funding test wallet..."
 # Pass arguments rather than relying on environment propagation: NODE may be

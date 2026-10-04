@@ -60,3 +60,5 @@ What mathematical and state invariants must hold?
 ## Implementation References
 Links to source files, account definitions, and instruction handlers implementing the decision.
 ```
+
+The standalone localnet bootstrap implementation is documented in [UserAccount](../../user-account/README.md). It does not complete ADRs 0005/0006 or change pool authorization.

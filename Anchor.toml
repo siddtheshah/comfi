@@ -8,11 +8,12 @@ resolution = true
 
 [programs.localnet]
 comfi = "3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP"
+user_account = "7FHwv2r8R8avPiqq7ZaAUx3XYozt36F1zFfoNMHZeJ57"
 
 [provider]
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [workspace]
-members = ["programs/comfi"]
+members = ["programs/comfi", "programs/user-account"]
 types = "target/types"

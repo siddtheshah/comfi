@@ -12,14 +12,19 @@
     "dev:testing": "npm run dev --workspace=@comfi/testing",
     "build": "npm run build --workspace=@comfi/web",
     "build:testing": "npm run build --workspace=@comfi/testing",
-    "test": "npm run test:localnet-tools && npm run build --workspace=@comfi/sponsor-api && npm run test --workspaces --if-present",
+    "test": "npm run test:user-account && npm run test:localnet-tools && npm run build --workspace=@comfi/sponsor-api && npm run test --workspaces --if-present",
     "test:localnet-tools": "bash scripts/test-localnet-tools.sh",
     "typecheck": "npm run typecheck --workspace=@comfi/web && npm run build --workspace=@comfi/sponsor-api && npm run check --workspace=@comfi/sponsor-api && npm run typecheck --workspace=@comfi/testing",
     "localnet:start": "bash scripts/localnet-start.sh",
     "localnet:setup": "bash scripts/localnet-setup.sh",
     "localnet:create-test-pool": "node scripts/create-test-pool.mjs",
     "keeper:crank": "node scripts/crank-keeper.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:user-account": "node --test scripts/user-account/client.test.mjs",
+    "user-account:test-deploy": "bash scripts/user-account/test-deployment.sh deployment",
+    "user-account:test-workflow": "bash scripts/user-account/test-deployment.sh workflow",
+    "user-account:create": "node scripts/user-account/create-single-account.mjs",
+    "user-account:test-production": "bash scripts/user-account/test-deployment.sh production"
   },
   "engines": {
     "node": ">=22"

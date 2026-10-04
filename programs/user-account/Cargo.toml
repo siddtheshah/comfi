@@ -1,0 +1,22 @@
+[package]
+name = "user-account"
+version = "0.1.0"
+description = "Standalone localnet UserAccount bootstrap for ADRs 0005 and 0006"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "user_account"
+
+[features]
+default = []
+testing = []
+no-entrypoint = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = "1.1.2"
+solana-instructions-sysvar = "3.0.1"
+solana-sha256-hasher = "3.1.0"
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic"] }

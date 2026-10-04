@@ -1,5 +1,5 @@
 [workspace]
-members = ["programs/comfi"]
+members = ["programs/comfi", "programs/user-account"]
 resolver = "2"
 
 [profile.release]
