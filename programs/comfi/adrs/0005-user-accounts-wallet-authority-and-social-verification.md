@@ -4,6 +4,12 @@
 
 Proposed — 2026-10-04
 
+Authorization amendment: [ADR 0006](0006-passkey-user-account-administration-and-withdrawal-tickets.md)
+proposes linked-wallet plus registered-passkey approval for User Account
+administration and withdrawal-ticket issuance. When implementing that proposal,
+its protected-action policy takes precedence over this draft's wallet-only
+management rules; stable identities, wallet integration, SIWS, and SAS remain.
+
 This ADR is a design draft. It does not describe implemented functionality or
 authorize a deployment. Users link wallets through the UI and select one
 for signing and payment. There is no privileged primary wallet or separate
