@@ -183,4 +183,111 @@ test('user can open ComFi in-browser wallet manager, switch modes, and manage ke
   await expect(page.getByTestId('localnet-wallet')).toContainText('ComFi In-Browser wallet connected')
 })
 
+test('user can open Create Pool modal and configure admission mode, obligation, and quorum parameters', async ({ page }) => {
+  await page.route('**/__comfi/mock-wallet/create-pool', async route => {
+    await route.fulfill({ json: { pool: 'H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M' } })
+  })
+  await page.goto('/')
+
+  // Click customize pool button
+  await page.getByTestId('open-create-pool').click()
+  await expect(page.getByRole('heading', { name: 'Create a Community Pool' })).toBeVisible()
+
+  // Verify admission mode toggles
+  await expect(page.getByTestId('mode-invite-vouched')).toBeVisible()
+  await expect(page.getByTestId('mode-open')).toBeVisible()
+  await page.getByTestId('mode-open').click()
+  await expect(page.getByTestId('mode-open')).toHaveClass(/selected/)
+
+  // Switch back to InviteVouched
+  await page.getByTestId('mode-invite-vouched').click()
+  await expect(page.getByTestId('mode-invite-vouched')).toHaveClass(/selected/)
+
+  // Change parameters
+  await page.getByTestId('create-pool-obligation-input').fill('25')
+  await page.getByTestId('create-pool-min-deposit-input').fill('50')
+  await page.getByTestId('create-pool-duration-select').selectOption('14')
+  await page.getByTestId('create-pool-cap-input').fill('36')
+  await page.getByTestId('create-pool-threshold-select').selectOption('6000')
+  await page.getByTestId('create-pool-min-members-input').fill('3')
+
+  // Submit modal
+  await page.getByTestId('create-pool-modal-submit').click()
+  await expect(page.getByRole('status')).toContainText('Pool deployed on localnet: H3hT…pm9M.')
+  await expect(page.getByRole('heading', { name: 'Create a Community Pool' })).not.toBeVisible()
+})
+
+test('member can invite candidates, generate sharable payload, and track invitations', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await showTestPool(page)
+  await page.goto('/')
+
+  // Enter test pool
+  await page.getByTestId('pool-pool-0').click()
+  await expect(page.getByRole('heading', { name: 'Community Pool #0' })).toBeVisible()
+
+  // Open invite modal via hero button
+  await page.getByTestId('invite-members-hero-btn').click()
+  await expect(page.getByRole('heading', { name: 'Invite New Member' })).toBeVisible()
+
+  // Fill in candidate information
+  await page.getByTestId('invitee-name-field').fill('Maya S.')
+  await page.getByTestId('invitee-note-field').fill('Welcome to our mutual aid pool!')
+
+  // Generate invitation
+  await page.getByTestId('generate-invite-submit').click()
+  await expect(page.getByRole('heading', { name: 'Invitation Ready to Share' })).toBeVisible()
+
+  // Verify sharable URL and email message generated
+  const shareInput = page.getByTestId('share-url-input')
+  await expect(shareInput).toBeVisible()
+  const shareUrl = await shareInput.inputValue()
+  expect(shareUrl).toContain('?invite=')
+
+  await expect(page.getByTestId('email-message-textarea')).toContainText('Maya S.')
+  await expect(page.getByTestId('email-message-textarea')).toContainText('AdmitMember governance proposal')
+
+  // Copy link and message
+  await page.getByTestId('copy-invite-link').click()
+  await expect(page.getByText('Copied link to clipboard!')).toBeVisible()
+
+  await page.getByTestId('copy-invite-email').click()
+  await expect(page.getByText('Copied message to clipboard!')).toBeVisible()
+
+  // Close invite modal
+  await page.getByTestId('invite-done-btn').click()
+
+  // Verify invitation appears in the tracking card
+  const trackingCard = page.getByTestId('invite-tracking-card')
+  await expect(trackingCard).toBeVisible()
+  await expect(trackingCard.getByText('Maya S.')).toBeVisible()
+  await expect(trackingCard.getByText('Pending Recipient')).toBeVisible()
+
+  // Test recipient acceptance simulation via tracking card
+  await page.getByTestId('simulate-accept-btn').click()
+  await expect(page.getByRole('heading', { name: 'Join Community Pool' })).toBeVisible()
+
+  // Use connected wallet
+  await page.getByTestId('recipient-wallet-input').fill('BVVfYV2AD4KsGWTF3zge1wfH9sb54he1M83UBWazwrNX')
+  await page.getByTestId('accept-invite-submit').click()
+
+  // Verify automated webhook execution step
+  await expect(page.getByRole('heading', { name: 'Wallet Submitted & Proposal Dispatched!' })).toBeVisible()
+  await expect(page.getByText('Automated Webhook Triggered')).toBeVisible()
+  await expect(page.getByText(/AdmitMember Governance Proposal Dispatched/)).toBeVisible()
+
+  // Close success modal
+  await page.getByTestId('close-success-btn').click()
+
+  // Verify tracking card shows proposal queued and allows admission execution
+  await expect(trackingCard.getByText(/Proposal #\d+ Queued/)).toBeVisible()
+  await expect(page.getByTestId('execute-admit-btn')).toBeVisible()
+
+  // Execute admission
+  await page.getByTestId('execute-admit-btn').click()
+  await expect(page.getByText(/admitted successfully!/i)).toBeVisible()
+  await expect(trackingCard.locator('.admitted-check-tag')).toBeVisible()
+})
+
+
 

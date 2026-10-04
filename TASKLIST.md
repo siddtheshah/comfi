@@ -49,12 +49,12 @@
   - [ ] Historical spend distributions and direct member benefit attribution.
 
 ## 4. Member Invitation & Webhook-Like Onboarding Pipeline (`apps/web`)
-- [ ] [Claimed: Subagent-Member-Invitation | Deadline: 2026-10-04T18:30:00Z] Implement "Create Pool" modal with admission mode selection (`InviteVouched` or `Open`), member obligation, cycle duration, and quorum parameters.
-- [ ] [Claimed: Subagent-Member-Invitation | Deadline: 2026-10-04T18:30:00Z] Implement "Invite Members" workflow:
-  - [ ] Generate invitation payload and sharable link/email message containing pool address and inviter identity.
-  - [ ] Provide recipient acceptance view where the invitee connects their wallet or submits their wallet address.
-  - [ ] Implement automated webhook-style listener that detects the recipient's wallet submission and dispatches an `AdmitMember` governance proposal on behalf of the inviter.
-  - [ ] Notification and tracking card showing pending invite approvals and admission execution status.
+- [x] [Completed: Subagent-Member-Invitation] Implement "Create Pool" modal with admission mode selection (`InviteVouched` or `Open`), member obligation, cycle duration, and quorum parameters.
+- [x] [Completed: Subagent-Member-Invitation] Implement "Invite Members" workflow:
+  - [x] Generate invitation payload and sharable link/email message containing pool address and inviter identity.
+  - [x] Provide recipient acceptance view where the invitee connects their wallet or submits their wallet address.
+  - [x] Implement automated webhook-style listener that detects the recipient's wallet submission and dispatches an `AdmitMember` governance proposal on behalf of the inviter.
+  - [x] Notification and tracking card showing pending invite approvals and admission execution status.
 
 ## 5. Browser-Based Delegated AI Pool Assistant (ComFi Copilot) (`apps/web`)
 - [x] [Completed: Subagent-ComFi-Copilot] Design and implement an in-browser AI Assistant panel for autonomous and delegated pool management.

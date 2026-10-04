@@ -129,17 +129,35 @@ if (!poolAccount) {
   const associatedTokenProgram = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
   const [vault] = PublicKey.findProgramAddressSync([pool.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()], associatedTokenProgram);
   const [creatorMember] = PublicKey.findProgramAddressSync([Buffer.from('member'), pool.toBuffer(), creator.publicKey.toBuffer()], programId);
+  const parsedCap = parseInt(argumentValue('member-cap') ?? process.env.COMFI_MEMBER_CAP ?? '24', 10);
+  const parsedMinDeposit = BigInt(Math.floor(parseFloat(argumentValue('min-deposit') ?? process.env.COMFI_MIN_DEPOSIT ?? '10') * 1e6));
+  const parsedObligation = BigInt(Math.floor(parseFloat(argumentValue('obligation') ?? process.env.COMFI_MEMBER_OBLIGATION ?? '10') * 1e6));
+  const parsedThreshold = parseInt(argumentValue('vote-threshold') ?? process.env.COMFI_VOTE_THRESHOLD ?? '5001', 10);
+  const parsedCycleDuration = parseInt(argumentValue('cycle-duration') ?? process.env.COMFI_CYCLE_DURATION ?? '2592000', 10);
+  const parsedExecMode = argumentValue('exec-mode') ?? process.env.COMFI_EXEC_MODE ?? 'on_deadline';
+  const execModeArg = parsedExecMode === 'threshold_met' ? { thresholdMet: {} } : { onDeadline: {} };
+
   await program.methods.createPool({
-    memberCap: 24, minimumDeposit: new BN(10n * oneUsdc), memberObligationAmount: new BN(10n * oneUsdc), initialDeposit: new BN(20n * oneUsdc), enrollmentFee: new BN(1n * oneUsdc),
-    voteThreshold: 5001, votingPeriodSeconds: new BN(604800), timelockSeconds: new BN(86400), cycleDurationSeconds: new BN(2592000),
-    actionAllowancePerCycle: new BN(5n * oneUsdc), maxSponsoredActionCharge: new BN(1n * oneUsdc), creatorAliasHash: Array(32).fill(0), creatorEncryptionPublicKey: Array(32).fill(0),
+    memberCap: parsedCap,
+    minimumDeposit: new BN(parsedMinDeposit.toString()),
+    memberObligationAmount: new BN(parsedObligation.toString()),
+    initialDeposit: new BN(20n * oneUsdc),
+    enrollmentFee: new BN(1n * oneUsdc),
+    voteThreshold: parsedThreshold,
+    votingPeriodSeconds: new BN(604800),
+    timelockSeconds: new BN(86400),
+    cycleDurationSeconds: new BN(parsedCycleDuration),
+    actionAllowancePerCycle: new BN(5n * oneUsdc),
+    maxSponsoredActionCharge: new BN(1n * oneUsdc),
+    creatorAliasHash: Array(32).fill(0),
+    creatorEncryptionPublicKey: Array(32).fill(0),
     testingEnabled: true,
     spenderLimitDeadlineCycles: new BN(1),
     withdrawalDeadlineCycles: new BN(1),
     configModificationDeadlineCycles: new BN(2),
-    spenderLimitExecutionMode: { onDeadline: {} },
-    withdrawalExecutionMode: { onDeadline: {} },
-    configModificationExecutionMode: { onDeadline: {} },
+    spenderLimitExecutionMode: execModeArg,
+    withdrawalExecutionMode: execModeArg,
+    configModificationExecutionMode: execModeArg,
   }).accounts({ creator: creator.publicKey, global, creatorUsdc: creatorUsdc.address, treasuryUsdc: treasury.address, pool, vault, usdcMint: mint, creatorMember }).signers([creator]).rpc();
   poolAccount = await program.account.pool.fetch(pool);
 }

@@ -25,4 +25,7 @@ export type PoolItem = {
   timelockSeconds?: number
   currentCycle?: number
   cycleStartedAt?: number
+  admissionMode?: 'InviteVouched' | 'Open'
+  memberObligationAmount?: string
+  cycleDurationSeconds?: number
 }

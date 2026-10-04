@@ -7,6 +7,12 @@ import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
 import { CopilotPanel } from './CopilotPanel'
 import { GovernanceView } from './GovernanceView'
+import { CreatePoolModal } from './CreatePoolModal'
+import { InviteMembersModal } from './InviteMembersModal'
+import { InviteAcceptanceView } from './InviteAcceptanceView'
+import { InviteTrackingCard } from './InviteTrackingCard'
+import { onInvitationWebhook } from './invitation-engine'
+import type { CreatePoolModalParams } from './invitation-types'
 
 type View = 'overview' | 'pool'
 const Icon = ({ children }: { children: string }) => <span className="icon" aria-hidden="true">{children}</span>
@@ -29,6 +35,10 @@ export function App() {
   const [initializing, setInitializing] = useState(false)
   const [walletModalOpen, setWalletModalOpen] = useState(false)
   const [copilotOpen, setCopilotOpen] = useState(false)
+  const [createPoolModalOpen, setCreatePoolModalOpen] = useState(false)
+  const [inviteModalOpen, setInviteModalOpen] = useState(false)
+  const [inviteAcceptOpen, setInviteAcceptOpen] = useState(false)
+  const [inviteAcceptToken, setInviteAcceptToken] = useState('')
 
   const loadOnChainPools = useCallback(async (selectAddress?: string) => {
     const request = ++poolRequest.current
@@ -99,19 +109,62 @@ export function App() {
   useEffect(() => { refreshPools() }, [refreshPools])
   useEffect(() => { setSelected(null); setView('overview') }, [wallet.network, wallet.endpoint, wallet.programId])
 
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search)
+      const token = urlParams.get('invite')
+      if (token) {
+        setInviteAcceptToken(token)
+        setInviteAcceptOpen(true)
+      } else if (window.location.hash.includes('invite=')) {
+        const match = window.location.hash.match(/invite=([^&]+)/)
+        if (match && match[1]) {
+          setInviteAcceptToken(decodeURIComponent(match[1]))
+          setInviteAcceptOpen(true)
+        }
+      }
+    }
+
+    const unsubWebhook = onInvitationWebhook((event) => {
+      setNotice(`⚡ Automated Webhook: Recipient ${event.candidateWallet.slice(0, 4)}…${event.candidateWallet.slice(-4)} submitted wallet. AdmitMember proposal dispatched on behalf of inviter!`)
+      void loadOnChainPools()
+    })
+
+    return () => {
+      unsubWebhook()
+    }
+  }, [loadOnChainPools])
+
   const goPool = (pool: PoolItem) => { setSelected(pool); setView('pool'); setMenu(false) }
 
   const closeNotice = () => setNotice('')
 
-  const createPool = async () => {
+  const createPool = async (customParams?: CreatePoolModalParams) => {
     if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
     if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setCreatingPool(true)
     try {
-      const response = await fetch('/__comfi/mock-wallet/create-pool', { method: 'POST' })
+      const body = customParams ? JSON.stringify({
+        memberCap: customParams.memberCap,
+        memberObligationAmount: customParams.memberObligationAmount,
+        minimumDeposit: customParams.minimumDeposit,
+        cycleDurationSeconds: customParams.cycleDurationDays * 86400,
+        voteThresholdBps: customParams.voteThresholdBps,
+        minQuorumMembers: customParams.minQuorumMembers,
+        autoCloseCyclesThreshold: customParams.autoCloseCyclesThreshold,
+        executionMode: customParams.executionMode,
+        admissionMode: customParams.admissionMode,
+      }) : undefined
+
+      const response = await fetch('/__comfi/mock-wallet/create-pool', {
+        method: 'POST',
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body,
+      })
       const result = await response.json() as { pool?: string; error?: string }
       if (!response.ok || result.error || !result.pool) throw new Error(result.error ?? 'Localnet pool creation failed.')
       setNotice(`Pool deployed on localnet: ${result.pool.slice(0, 4)}…${result.pool.slice(-4)}.`)
+      setCreatePoolModalOpen(false)
       // Refresh on-chain pools and select the newly deployed pool
       await loadOnChainPools(result.pool)
     } catch (error) {
@@ -138,12 +191,18 @@ export function App() {
     }
   }
 
+  const onStartPool = () => {
+    if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
+    if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
+    setCreatePoolModalOpen(true)
+  }
+
   return <div className="app-shell">
     <aside className={menu ? 'sidebar open' : 'sidebar'}>
       <button className="brand" onClick={() => setView('overview')}><span className="brand-mark">c</span><span>comfi</span></button>
       <nav>
         <button className={view === 'overview' ? 'nav-active' : ''} onClick={() => { setView('overview'); setMenu(false) }}><Icon>⌂</Icon>My pools</button>
-        <button data-testid="start-pool" disabled={creatingPool || initializing} onClick={() => { void createPool(); setMenu(false) }}><Icon>＋</Icon>Start a pool</button>
+        <button data-testid="start-pool" disabled={creatingPool || initializing} onClick={() => { onStartPool(); setMenu(false) }}><Icon>＋</Icon>Start a pool</button>
         <button data-testid="side-copilot-btn" onClick={() => { setCopilotOpen(true); setMenu(false) }}><Icon>🤖</Icon>ComFi Copilot</button>
       </nav>
       <div className="side-pools">
@@ -182,6 +241,17 @@ export function App() {
             title="Open ComFi Delegated AI Pool Assistant"
           >
             🤖 Copilot
+          </button>
+          <button
+            className="wallet-quick-btn"
+            data-testid="open-accept-invite-btn"
+            onClick={() => {
+              setInviteAcceptToken('')
+              setInviteAcceptOpen(true)
+            }}
+            title="Accept Community Pool Invitation"
+          >
+            📬 Accept Invite
           </button>
           <button
             className="wallet-quick-btn"
@@ -233,6 +303,35 @@ export function App() {
         walletAddress={wallet.publicKey}
 
       />
+      <CreatePoolModal
+        isOpen={createPoolModalOpen}
+        onClose={() => setCreatePoolModalOpen(false)}
+        onSubmit={createPool}
+        creating={creatingPool}
+      />
+      <InviteMembersModal
+        isOpen={inviteModalOpen}
+        onClose={() => setInviteModalOpen(false)}
+        poolAddress={selected?.address ?? ''}
+        poolName={selected?.name ?? ''}
+        inviterAddress={wallet.publicKey ?? ''}
+        admissionMode={selected?.admissionMode ?? 'InviteVouched'}
+        memberObligationAmount={selected?.memberObligationAmount}
+        cycleDurationDays={selected?.cycleDurationSeconds ? Math.round(selected.cycleDurationSeconds / 86400) : undefined}
+        onInviteCreated={(invite) => {
+          setNotice(`Invitation created for ${invite.candidateName ?? 'prospective member'}!`)
+        }}
+      />
+      <InviteAcceptanceView
+        isOpen={inviteAcceptOpen}
+        onClose={() => setInviteAcceptOpen(false)}
+        token={inviteAcceptToken}
+        connectedWalletAddress={wallet.publicKey}
+        onAccepted={(rec, res) => {
+          setNotice(`⚡ Automated Webhook: AdmitMember proposal #${res.proposalId} dispatched for ${rec.candidateWallet?.slice(0, 4)}…${rec.candidateWallet?.slice(-4)}!`)
+          void loadOnChainPools()
+        }}
+      />
       {poolError && <div className="pool-error" role="alert">Could not load pools on {NETWORK_LABELS[wallet.network]}: {poolError}</div>}
       {notice && <div className="toast" role="status">{notice}<button onClick={closeNotice}>×</button></div>}
       {view === 'overview' && (
@@ -245,12 +344,24 @@ export function App() {
           onSelect={goPool}
           onInitialize={initialize}
           onStart={createPool}
+          onOpenCreateModal={onStartPool}
           creatingPool={creatingPool}
           initializing={initializing}
         />
       )}
-      {view === 'pool' && selected && <Pool networkName={NETWORK_LABELS[wallet.network]} pool={selected} />}
-
+      {view === 'pool' && selected && (
+        <Pool
+          networkName={NETWORK_LABELS[wallet.network]}
+          pool={selected}
+          walletAddress={wallet.publicKey}
+          onInvite={() => setInviteModalOpen(true)}
+          onOpenAccept={(tok) => {
+            setInviteAcceptToken(tok)
+            setInviteAcceptOpen(true)
+          }}
+          onRefreshPools={loadOnChainPools}
+        />
+      )}
     </main>
   </div>
 }
@@ -264,6 +375,7 @@ function Overview({
   onSelect,
   onInitialize,
   onStart,
+  onOpenCreateModal,
   creatingPool,
   initializing,
 }: {
@@ -275,6 +387,7 @@ function Overview({
   onSelect: (pool: PoolItem) => void
   onInitialize: () => void
   onStart: () => void
+  onOpenCreateModal?: () => void
   creatingPool: boolean
   initializing: boolean
 }) {
@@ -291,6 +404,11 @@ function Overview({
         <button className="outline localnet-init" data-testid="initialize-localnet" disabled={initializing || creatingPool} onClick={() => void onInitialize()}>
           {initializing ? 'Initializing…' : 'Initialize localnet'}
         </button>
+        {onOpenCreateModal && (
+          <button className="outline" data-testid="open-create-pool" disabled={creatingPool || initializing} onClick={onOpenCreateModal}>
+            Customize Pool ⚙
+          </button>
+        )}
         <button className="primary" data-testid="create-pool" disabled={creatingPool || initializing} onClick={() => void onStart()}>
           {creatingPool ? 'Deploying on localnet…' : <>Start a pool <span>→</span></>}
         </button>
@@ -367,7 +485,23 @@ function Overview({
   </section>
 }
 
-function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
+function Pool({
+  networkName,
+  pool,
+  walletAddress,
+  onInvite,
+  onOpenAccept,
+  onRefreshPools,
+}: {
+  networkName: string
+  pool: PoolItem
+  walletAddress?: string
+  onInvite?: () => void
+  onOpenAccept?: (token: string) => void
+  onRefreshPools?: () => void
+}) {
+  const [activeTab, setActiveTab] = useState<'overview' | 'invites' | 'activity' | 'people' | 'rules'>('overview')
+
   return <section className="page pool-page">
     <div className="pool-title">
       <b className={`pool-glyph hero-glyph ${pool.accent}`}>{pool.icon}</b>
@@ -388,8 +522,18 @@ function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
         <strong>{pool.balance}</strong>
         {pool.vault ? <span className="vault-note">Vault: {pool.vault.slice(0, 6)}…{pool.vault.slice(-6)}</span> : <span>Updated a few moments ago</span>}
       </div>
+      <div className="balance-actions">
+        {onInvite && <button className="outline" data-testid="invite-members-hero-btn" onClick={onInvite}>＋ Invite Members</button>}
+      </div>
     </div>
 
+    <div className="tabs">
+      <button className={activeTab === 'overview' ? 'tab-active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
+      <button className={activeTab === 'invites' ? 'tab-active' : ''} data-testid="tab-invites" onClick={() => setActiveTab('invites')}>Invitations & Onboarding</button>
+      <button className={activeTab === 'activity' ? 'tab-active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
+      <button className={activeTab === 'people' ? 'tab-active' : ''} onClick={() => setActiveTab('people')}>People <i>{pool.funds.split(' ')[0]}</i></button>
+      <button className={activeTab === 'rules' ? 'tab-active' : ''} onClick={() => setActiveTab('rules')}>Rules</button>
+    </div>
 
     <div className="pool-content">
       <div>
@@ -408,11 +552,19 @@ function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
               </div>
               <div className="chain-spec">
                 <small>Voting Threshold</small>
-                <strong>{((pool.voteThreshold ?? 0) / 100).toFixed(2)}% approval</strong>
+                <strong>{pool.voteThreshold} affirmative votes</strong>
               </div>
               <div className="chain-spec">
-                <small>Creator wallet</small>
-                <strong title={pool.creator}>{pool.creator ? `${pool.creator.slice(0, 6)}…${pool.creator.slice(-6)}` : 'Unavailable'}</strong>
+                <small>Admission Mode</small>
+                <strong>{pool.admissionMode === 'InviteVouched' ? 'Invite & Vouched' : 'Open'}</strong>
+              </div>
+              <div className="chain-spec">
+                <small>Cycle Duration</small>
+                <strong>{pool.cycleDurationSeconds ? `${Math.round(pool.cycleDurationSeconds / 86400)} days` : '30 days'}</strong>
+              </div>
+              <div className="chain-spec">
+                <small>Creator & Admin</small>
+                <strong title={pool.creator}>{pool.creator ? `${pool.creator.slice(0, 6)}…${pool.creator.slice(-6)}` : 'Deployer'}</strong>
               </div>
               <div className="chain-spec">
                 <small>Capacity Limit</small>
@@ -423,7 +575,19 @@ function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
         )}
 
         <PoolMetricsView pool={pool} />
-        <GovernanceView key={pool.address} address={pool.chain.address} />
+        {pool.chain?.address && <GovernanceView key={pool.address} address={pool.chain.address} />}
+
+        {(activeTab === 'overview' || activeTab === 'invites') && (
+          <InviteTrackingCard
+            poolAddress={pool.address ?? ''}
+            poolName={pool.name}
+            inviterAddress={walletAddress}
+            onOpenInviteModal={onInvite ?? (() => {})}
+            onOpenAcceptModal={onOpenAccept}
+            onAdmissionExecuted={onRefreshPools}
+          />
+        )}
+
         <div className="section-head compact"><h2>Activity</h2></div>
         <p>Activity history is not connected yet.</p>
       </div>

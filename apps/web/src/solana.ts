@@ -410,5 +410,8 @@ export function onChainPoolToPoolItem(pool: OnChainPool, currentWalletPubkey?: s
     currentCycle: Number(pool.currentCycle),
     cycleStartedAt: Number(pool.cycleStartedAt),
     chain: pool,
+    cycleDurationSeconds: Number(pool.cycleDurationSeconds),
+    memberObligationAmount: pool.memberObligationAmountAtomic ? `$${(Number(pool.memberObligationAmountAtomic) / 1e6).toFixed(2)}` : undefined,
+    admissionMode: (pool as any).admissionMode ?? 'InviteVouched',
   }
 }

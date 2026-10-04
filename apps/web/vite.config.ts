@@ -14,37 +14,51 @@ function mockWalletPoolApi(rpcUrl: string, programIdStr: string): Plugin {
     configureServer(server) {
       const run = (path: string, operation: 'initialize' | 'next') => server.middlewares.use(path, (request, response, next) => {
         if (request.method !== 'POST') return next()
-        void (async () => {
-          response.setHeader('content-type', 'application/json')
-          try {
-            const program = await new Connection(rpcUrl, 'confirmed').getAccountInfo(programId)
-            if (!program?.executable) {
-              response.statusCode = 412
-              return response.end(JSON.stringify({ error: 'ComFi is not deployed to this localnet. Run the localnet deployment command, then retry initialization.' }))
-            }
-            const child = spawn(process.execPath, [resolve(workspaceRoot, 'scripts/create-test-pool.mjs')], {
-              cwd: workspaceRoot,
-              env: { ...process.env, COMFI_LOCALNET_RPC: rpcUrl, COMFI_POOL_MODE: operation },
-            })
-            let output = ''
-            let error = ''
-            child.stdout.on('data', (chunk) => { output += chunk })
-            child.stderr.on('data', (chunk) => { error += chunk })
-            child.on('close', (code) => {
-              if (code !== 0) {
-                response.statusCode = 422
-                const message = error.includes('has not been initialized')
-                  ? 'Initialize the localnet deployer before creating a pool.'
-                  : `Localnet ${operation} failed. Check the Vite terminal for details.`
-                return response.end(JSON.stringify({ error: message }))
+        let body = ''
+        request.on('data', (chunk) => { body += chunk })
+        request.on('end', () => {
+          void (async () => {
+            response.setHeader('content-type', 'application/json')
+            try {
+              const program = await new Connection(rpcUrl, 'confirmed').getAccountInfo(programId)
+              if (!program?.executable) {
+                response.statusCode = 412
+                return response.end(JSON.stringify({ error: 'ComFi is not deployed to this localnet. Run the localnet deployment command, then retry initialization.' }))
               }
-              response.end(output)
-            })
-          } catch {
-            response.statusCode = 503
-            response.end(JSON.stringify({ error: `Cannot reach localnet at ${rpcUrl}. Start the validator and deploy ComFi first.` }))
-          }
-        })()
+              const envOverrides: Record<string, string> = {}
+              if (body && body.trim().startsWith('{')) {
+                const params = JSON.parse(body)
+                if (params.memberCap) envOverrides.COMFI_MEMBER_CAP = String(params.memberCap)
+                if (params.memberObligationAmount) envOverrides.COMFI_MEMBER_OBLIGATION = String(params.memberObligationAmount)
+                if (params.minimumDeposit) envOverrides.COMFI_MIN_DEPOSIT = String(params.minimumDeposit)
+                if (params.cycleDurationSeconds) envOverrides.COMFI_CYCLE_DURATION = String(params.cycleDurationSeconds)
+                if (params.voteThresholdBps || params.voteThreshold) envOverrides.COMFI_VOTE_THRESHOLD = String(params.voteThresholdBps ?? params.voteThreshold)
+                if (params.executionMode) envOverrides.COMFI_EXEC_MODE = String(params.executionMode)
+              }
+              const child = spawn(process.execPath, [resolve(workspaceRoot, 'scripts/create-test-pool.mjs')], {
+                cwd: workspaceRoot,
+                env: { ...process.env, COMFI_LOCALNET_RPC: rpcUrl, COMFI_POOL_MODE: operation, ...envOverrides },
+              })
+              let output = ''
+              let error = ''
+              child.stdout.on('data', (chunk) => { output += chunk })
+              child.stderr.on('data', (chunk) => { error += chunk })
+              child.on('close', (code) => {
+                if (code !== 0) {
+                  response.statusCode = 422
+                  const message = error.includes('has not been initialized')
+                    ? 'Initialize the localnet deployer before creating a pool.'
+                    : `Localnet ${operation} failed. Check the Vite terminal for details.`
+                  return response.end(JSON.stringify({ error: message }))
+                }
+                response.end(output)
+              })
+            } catch {
+              response.statusCode = 503
+              response.end(JSON.stringify({ error: `Cannot reach localnet at ${rpcUrl}. Start the validator and deploy ComFi first.` }))
+            }
+          })()
+        })
       })
       run('/__comfi/mock-wallet/initialize', 'initialize')
       run('/__comfi/mock-wallet/create-pool', 'next')

@@ -254,3 +254,777 @@
 .proposal-executable { background: #e5e0ff; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 .governance-view .outline, .governance-dialog .outline { color: #26332c; background: #fff; }
+
+/* Group 4: Member Invitation & Onboarding Pipeline Styling */
+.create-pool-modal-card,
+.invite-modal-card,
+.invite-accept-modal-card {
+  background: #ffffff;
+  border: 1px solid #dbe2dc;
+  border-radius: 18px;
+  max-width: 620px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 26px;
+  box-shadow: 0 24px 48px rgba(18, 30, 23, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.create-pool-form,
+.create-invite-form,
+.accept-form,
+.decode-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-label {
+  font: 600 13px 'Playfair Display', serif;
+  color: #1a2920;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: #647568;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #405244;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field-label small {
+  font-size: 10px;
+  font-weight: 400;
+  color: #728276;
+}
+
+.text-input,
+.select-input,
+.textarea-input {
+  width: 100%;
+  border: 1px solid #d0dad1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px 12px;
+  font-size: 13px;
+  color: #1c2b21;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.text-input:focus,
+.select-input:focus,
+.textarea-input:focus {
+  border-color: #40684c;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(64, 104, 76, 0.12);
+}
+
+.text-mono {
+  font-family: 'DM Mono', monospace;
+  font-size: 12px;
+}
+
+.mode-selection-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.mode-card {
+  border: 2px solid #e1e7e0;
+  border-radius: 11px;
+  padding: 14px;
+  background: #fbfcf9;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.16s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mode-card:hover {
+  background: #ffffff;
+  border-color: #9cb19f;
+  transform: translateY(-1px);
+}
+
+.mode-card.selected {
+  border-color: #2b5636;
+  background: #f4faf4;
+  box-shadow: 0 3px 10px rgba(43, 86, 54, 0.1);
+}
+
+.mode-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mode-card-header strong {
+  font-size: 12px;
+  color: #1a2a20;
+}
+
+.mode-card p {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #556658;
+  margin: 0;
+}
+
+.mode-card code {
+  font: 10px 'DM Mono', monospace;
+  background: #e9f0e8;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.form-grid-3 {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr;
+  gap: 12px;
+}
+
+.modal-actions-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid #e4eae2;
+  margin-top: 4px;
+}
+
+.primary-small {
+  background: #26332c;
+  color: #ffffff;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  transition: 0.15s;
+}
+
+.primary-small:hover {
+  background: #3c5044;
+}
+
+.secondary-btn {
+  background: #edf3ec;
+  color: #274730;
+  border: 1px solid #cbddcc;
+  border-radius: 7px;
+  padding: 7px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  width: fit-content;
+  transition: 0.15s;
+}
+
+.secondary-btn:hover {
+  background: #dfecdf;
+}
+
+.outline-small {
+  border: 1px solid #b3c5b5;
+  background: #ffffff;
+  color: #374f3c;
+  border-radius: 7px;
+  padding: 6px 11px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.outline-small:hover {
+  background: #f2f6f1;
+}
+
+/* Pool context header inside invite modal */
+.pool-invite-context {
+  background: #f7faf7;
+  border: 1px solid #e2ebe1;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.context-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.context-item small {
+  font: 10px 'DM Mono', monospace;
+  color: #728575;
+  text-transform: uppercase;
+}
+
+.context-item strong {
+  font-size: 12px;
+  color: #1f2f24;
+}
+
+.form-info-box {
+  background: #edf7ef;
+  border: 1px solid #cce5d0;
+  border-radius: 9px;
+  padding: 10px 13px;
+}
+
+.form-info-box p {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #275232;
+  margin: 0;
+}
+
+.copy-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.copy-input-row input {
+  flex: 1;
+}
+
+.result-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.result-check {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #2a8844;
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 16px;
+  flex: 0 0 auto;
+}
+
+.result-header h3 {
+  font: 600 18px 'Playfair Display', serif;
+  color: #1a2a20;
+  margin: 0;
+}
+
+.result-header p {
+  font-size: 12px;
+  color: #5c6e61;
+  margin: 2px 0 0;
+}
+
+.result-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Recipient Acceptance View */
+.invite-hero-banner {
+  background: #eaf3e7;
+  border: 1px solid #c7ddc3;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.invite-hero-icon {
+  font-size: 26px;
+}
+
+.invite-hero-banner h3 {
+  font: 600 17px 'Playfair Display', serif;
+  color: #1a2a20;
+  margin: 0;
+}
+
+.invite-hero-banner p {
+  font-size: 12px;
+  color: #49614f;
+  margin: 2px 0 0;
+}
+
+.invite-details-card {
+  background: #fbfcf9;
+  border: 1px solid #e2e8e0;
+  border-radius: 10px;
+  padding: 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-item.full-width {
+  grid-column: 1 / -1;
+}
+
+.detail-item small {
+  font: 10px 'DM Mono', monospace;
+  color: #708474;
+  text-transform: uppercase;
+}
+
+.pda-code {
+  font: 11px 'DM Mono', monospace;
+  background: #ecf2eb;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: #213527;
+  width: fit-content;
+}
+
+.invite-note-text {
+  font-size: 12px;
+  font-style: italic;
+  color: #3b5040;
+  margin: 2px 0 0;
+}
+
+.connected-wallet-pill {
+  background: #f0f7ee;
+  border: 1px solid #bedbbd;
+  border-radius: 8px;
+  padding: 9px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: #234d2d;
+  margin-bottom: 8px;
+}
+
+.use-wallet-btn {
+  background: #2a5735;
+  color: #ffffff;
+  padding: 4px 9px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.webhook-pipeline-explainer {
+  background: #f7faf7;
+  border: 1px solid #d9e6d8;
+  border-radius: 9px;
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.webhook-badge {
+  font: 10px 'DM Mono', monospace;
+  font-weight: 700;
+  color: #265934;
+}
+
+.webhook-pipeline-explainer p {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #556c59;
+  margin: 0;
+}
+
+.webhook-pipeline-explainer code {
+  font: 10px 'DM Mono', monospace;
+  background: #e5efe4;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* Submission success progress card */
+.proposal-dispatched-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.pipeline-step {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: #fbfcf9;
+  border: 1px solid #e1e7e0;
+  border-radius: 9px;
+}
+
+.pipeline-step.completed {
+  border-color: #aed6b4;
+  background: #f3f9f3;
+}
+
+.pipeline-step.active {
+  border-color: #7bb586;
+  background: #eef7ee;
+  box-shadow: 0 2px 8px rgba(35, 87, 47, 0.08);
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #d8e5d6;
+  color: #2d4c34;
+  display: grid;
+  place-items: center;
+  font: 11px 'DM Mono', monospace;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.pipeline-step.completed .step-num {
+  background: #2b7a3d;
+  color: #ffffff;
+}
+
+.pipeline-step.active .step-num {
+  background: #264a2f;
+  color: #ffffff;
+}
+
+.pipeline-step strong {
+  font-size: 12px;
+  color: #1c2b20;
+  display: block;
+}
+
+.pipeline-step p {
+  font-size: 11px;
+  color: #5a6d5f;
+  margin: 2px 0 0;
+  line-height: 1.4;
+}
+
+/* Invite Tracking Card (Pool Page) */
+.invite-tracking-card {
+  background: #fffefa;
+  border: 1px solid #e3e3dc;
+  border-radius: 13px;
+  padding: 22px;
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.tracking-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.webhook-indicator {
+  font: 10px 'DM Mono', monospace;
+  color: #286438;
+  background: #e4f3e6;
+  border: 1px solid #c7e5cb;
+  padding: 2px 7px;
+  border-radius: 12px;
+}
+
+.tracking-header h3 {
+  font: 600 20px 'Playfair Display', serif;
+  margin: 0;
+  color: #1a2920;
+}
+
+.tracking-header p {
+  font-size: 12px;
+  color: #6a7b6f;
+  margin: 3px 0 0;
+}
+
+.tracking-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.stat-card {
+  background: #fbfcf9;
+  border: 1px solid #e4eae2;
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+
+.stat-card small {
+  display: block;
+  font: 10px 'DM Mono', monospace;
+  color: #728376;
+  text-transform: uppercase;
+}
+
+.stat-card strong {
+  font: 600 18px 'Playfair Display', serif;
+  color: #1e2e23;
+  margin-top: 2px;
+  display: block;
+}
+
+.text-pending {
+  color: #c05621 !important;
+}
+
+.text-queued {
+  color: #6b46c1 !important;
+}
+
+.text-admitted {
+  color: #276749 !important;
+}
+
+.empty-invitations {
+  text-align: center;
+  padding: 24px;
+  background: #fafbf8;
+  border: 1px dashed #d5ded4;
+  border-radius: 10px;
+  color: #6d7f71;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.empty-invitations p {
+  margin: 0;
+}
+
+.invitations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.invitation-item-card {
+  background: #ffffff;
+  border: 1px solid #e1e7e0;
+  border-radius: 10px;
+  padding: 13px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  transition: 0.15s ease;
+}
+
+.invitation-item-card:hover {
+  border-color: #cbd7cc;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.03);
+}
+
+.invite-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.invite-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.invite-item-head strong {
+  font-size: 13px;
+  color: #1a2a20;
+}
+
+.status-badge {
+  font: 10px 'DM Mono', monospace;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 12px;
+}
+
+.status-badge.pending {
+  background: #fffaf0;
+  color: #c05621;
+  border: 1px solid #fbd38d;
+}
+
+.status-badge.submitted {
+  background: #ebf8ff;
+  color: #2b6cb0;
+  border: 1px solid #bee3f8;
+}
+
+.status-badge.queued,
+.status-badge.voting {
+  background: #faf5ff;
+  color: #6b46c1;
+  border: 1px solid #e9d8fd;
+}
+
+.status-badge.executable {
+  background: #e6fffa;
+  color: #234e52;
+  border: 1px solid #b2f5ea;
+}
+
+.status-badge.admitted {
+  background: #f0fff4;
+  color: #22543d;
+  border: 1px solid #c6f6d5;
+}
+
+.status-badge.revoked,
+.status-badge.expired {
+  background: #f7fafc;
+  color: #718096;
+  border: 1px solid #e2e8f0;
+}
+
+.invite-meta-row {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: #6a7c6f;
+  align-items: center;
+}
+
+.invite-meta-row code {
+  font: 10px 'DM Mono', monospace;
+  background: #eef2ec;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.webhook-dispatch-note {
+  font: 10px 'DM Mono', monospace;
+  color: #235c34;
+  background: #eaf4eb;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+}
+
+.invite-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.btn-tiny {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid #ccd8cd;
+  background: #ffffff;
+  color: #3b5040;
+  transition: 0.12s;
+}
+
+.btn-tiny:hover {
+  background: #f1f5f0;
+}
+
+.btn-action {
+  background: #edf6ee;
+  border-color: #bed7c0;
+  color: #265532;
+}
+
+.btn-action:hover {
+  background: #dcefdc;
+}
+
+.btn-execute {
+  background: #255a33;
+  color: #ffffff;
+  border: none;
+}
+
+.btn-execute:hover {
+  background: #347645;
+}
+
+.btn-danger-tiny {
+  color: #9b2c2c;
+  border-color: #fed7d7;
+  background: #fff5f5;
+}
+
+.btn-danger-tiny:hover {
+  background: #fed7d7;
+}
+
+.admitted-check-tag {
+  font-size: 11px;
+  font-weight: 700;
+  color: #22543d;
+  background: #e6fffa;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+@media (max-width: 720px) {
+  .mode-selection-grid,
+  .form-grid-2,
+  .form-grid-3,
+  .tracking-stats-grid {
+    grid-template-columns: 1fr;
+  }
+  .invite-details-card {
+    grid-template-columns: 1fr;
+  }
+  .invitation-item-card {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
