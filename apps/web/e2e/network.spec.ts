@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 
 function pool(id: number) {
   const data = Buffer.alloc(206)
+  createHash('sha256').update('account:Pool').digest().copy(data, 0, 0, 8)
   data.writeBigUInt64LE(BigInt(id), 40)
   data.writeUInt32LE(24, 112)
   data.writeUInt32LE(1, 116)
@@ -13,7 +15,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [] } }))
   await page.route('**/api.*net.solana.com/**', async route => {
     const method = route.request().postDataJSON().method
-    const result = method === 'getHealth' ? 'ok' : method === 'getProgramAccounts' ? [pool(42)] : { value: { uiAmountString: '1.00' } }
+    const result = method === 'getHealth' ? 'ok' : method === 'getProgramAccounts' ? [pool(42)] : { value: { amount: '1000000' } }
     await route.fulfill({ json: { result } })
   })
   await page.route('http://127.0.0.1:8899/', route => route.fulfill({ json: { result: 'ok' } }))

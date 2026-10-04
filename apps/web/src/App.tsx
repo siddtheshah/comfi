@@ -1,13 +1,13 @@
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { activity, members, type PoolItem } from './data'
-import { fetchOnChainPools, onChainPoolToPoolItem } from './solana'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { PoolItem } from './data'
+import { fetchOnChainPools, onChainPoolToPoolItem, poolFromAccount, formatUsdc, quorumHealth } from './solana'
 import { useWallet } from './wallet'
 import { WalletModal } from './WalletModal'
 import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
 import { CopilotPanel } from './CopilotPanel'
 
-type View = 'overview' | 'pool' | 'proposal' | 'withdrawal'
+type View = 'overview' | 'pool'
 const Icon = ({ children }: { children: string }) => <span className="icon" aria-hidden="true">{children}</span>
 
 export function App() {
@@ -39,38 +39,25 @@ export function App() {
         // First try the Vite local dev endpoint
         const response = await fetch('/__comfi/mock-wallet/pools')
         if (response.ok) {
-          const data = await response.json() as { pools?: any[] }
-          if (data.pools && Array.isArray(data.pools)) {
-            const items: PoolItem[] = data.pools.map((p: any) => onChainPoolToPoolItem({
-              ...p,
-              minimumDepositAtomic: BigInt(p.minimumDepositAtomic ?? '0'),
-              votingPeriodSeconds: BigInt(p.votingPeriodSeconds ?? '0'),
-              timelockSeconds: BigInt(p.timelockSeconds ?? '0'),
-              currentCycle: BigInt(p.currentCycle ?? '0'),
-              cycleDurationSeconds: BigInt(p.cycleDurationSeconds ?? '0'),
-              cycleStartedAt: BigInt(p.cycleStartedAt ?? '0'),
-              actionAllowancePerCycle: BigInt(p.actionAllowancePerCycle ?? '0'),
-              maxSponsoredActionCharge: BigInt(p.maxSponsoredActionCharge ?? '0'),
-              nextRequestId: BigInt(p.nextRequestId ?? '0'),
-              nextProposalId: BigInt(p.nextProposalId ?? '0'),
-              balanceUsdc: p.balance,
-            }, wallet.publicKey))
-            if (!isCurrent()) return []
-            setPoolSnapshot({ source: poolSource, pools: items })
-            if (selectAddress) {
-              const match = items.find(i => i.address === selectAddress)
-              if (match) setSelected(match)
-            } else {
-              setSelected(prev => {
-                if (prev) {
-                  const refreshed = items.find(i => i.id === prev.id)
-                  return refreshed ?? prev
-                }
-                return prev
-              })
-            }
-            return items
+          const data = await response.json() as { pools: { address: string; data: string; vaultBalanceAtomic: string }[] }
+          if (!Array.isArray(data.pools)) throw new Error('Invalid localnet pools response')
+          const items = data.pools.map(p => onChainPoolToPoolItem(poolFromAccount(p.address, p.data, p.vaultBalanceAtomic), wallet.publicKey))
+          items.sort((a, b) => a.chain.id - b.chain.id)
+          if (!isCurrent()) return []
+          setPoolSnapshot({ source: poolSource, pools: items })
+          if (selectAddress) {
+            const match = items.find(i => i.address === selectAddress)
+            if (match) setSelected(match)
+          } else {
+            setSelected(prev => {
+              if (prev) {
+                const refreshed = items.find(i => i.id === prev.id)
+                return refreshed ?? null
+              }
+              return prev
+            })
           }
+          return items
         }
       }
       // Query the selected network directly when the local dev API does not apply.
@@ -88,7 +75,7 @@ export function App() {
           setSelected(prev => {
             if (prev) {
               const refreshed = items.find(i => i.id === prev.id)
-              return refreshed ?? prev
+              return refreshed ?? null
             }
             return prev
           })
@@ -112,7 +99,7 @@ export function App() {
   useEffect(() => { setSelected(null); setView('overview') }, [wallet.network, wallet.endpoint, wallet.programId])
 
   const goPool = (pool: PoolItem) => { setSelected(pool); setView('pool'); setMenu(false) }
-  const submit = (event: FormEvent, label: string) => { event.preventDefault(); setNotice(`${label} saved for review.`); setView('pool') }
+
   const closeNotice = () => setNotice('')
 
   const createPool = async () => {
@@ -170,7 +157,7 @@ export function App() {
           </button>
         ))}
       </div>
-      <div className="sidebar-bottom"><button className="help"><Icon>?</Icon>Help & support</button><button className="profile"><span className="avatar you">YT</span><span><b>Yasmine T.</b><small>Personal settings</small></span><span>›</span></button></div>
+      <div className="sidebar-bottom"><span>{wallet.publicKey ? `${wallet.publicKey.slice(0, 4)}…${wallet.publicKey.slice(-4)}` : 'Wallet disconnected'}</span></div>
     </aside>
     <main>
       <header className="topbar">
@@ -178,8 +165,8 @@ export function App() {
         <div className="crumb">
           {view === 'overview' ? (
             <>
-              <span>Good morning, Yasmine</span>
-              <strong>Sunday, July 26</strong>
+              <span>Community pools</span>
+              <strong>{NETWORK_LABELS[wallet.network]}</strong>
             </>
           ) : (
             <button className="back" onClick={() => setView('overview')}>← My pools</button>
@@ -187,7 +174,6 @@ export function App() {
         </div>
         <div className="top-actions">
           <NetworkSwitcher />
-          <button className="bell" onClick={() => setNotice('You’re all caught up.')}>♧<i /></button>
           <button
             className="copilot-toggle-btn"
             data-testid="copilot-toggle-btn"
@@ -223,7 +209,6 @@ export function App() {
               Connect wallet
             </button>
           )}
-          <button className="avatar you">YT</button>
         </div>
       </header>
       {wallet.connected && (
@@ -245,14 +230,7 @@ export function App() {
         networkName={NETWORK_LABELS[wallet.network]}
         walletConnected={wallet.connected}
         walletAddress={wallet.publicKey}
-        onExecuteProposal={async (id) => {
-          setNotice(`Proposal #${id} executed by ComFi Copilot.`)
-          await loadOnChainPools()
-        }}
-        onRollCycle={async () => {
-          setNotice('Cycle roll transaction dispatched by ComFi Copilot.')
-          await loadOnChainPools()
-        }}
+
       />
       {poolError && <div className="pool-error" role="alert">Could not load pools on {NETWORK_LABELS[wallet.network]}: {poolError}</div>}
       {notice && <div className="toast" role="status">{notice}<button onClick={closeNotice}>×</button></div>}
@@ -270,9 +248,8 @@ export function App() {
           initializing={initializing}
         />
       )}
-      {view === 'pool' && selected && <Pool networkName={NETWORK_LABELS[wallet.network]} pool={selected} onProposal={() => setView('proposal')} onWithdrawal={() => setView('withdrawal')} />}
-      {view === 'proposal' && <Proposal onCancel={() => setView('pool')} onSubmit={(e) => submit(e, 'Proposal')} />}
-      {view === 'withdrawal' && <Withdrawal onCancel={() => setView('pool')} onSubmit={(e) => submit(e, 'Payment request')} />}
+      {view === 'pool' && selected && <Pool networkName={NETWORK_LABELS[wallet.network]} pool={selected} />}
+
     </main>
   </div>
 }
@@ -300,14 +277,7 @@ function Overview({
   creatingPool: boolean
   initializing: boolean
 }) {
-  const totalBalance = useMemo(() => {
-    let sum = 0
-    for (const p of pools) {
-      const parsed = parseFloat(p.balance.replace(/[^0-9.]/g, ''))
-      if (!isNaN(parsed)) sum += parsed
-    }
-    return `$${sum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-  }, [pools])
+  const totalBalance = useMemo(() => formatUsdc(pools.reduce((sum, pool) => sum + pool.chain.vaultBalanceAtomic, 0n)), [pools])
 
   return <section className="page overview">
     <div className="hero">
@@ -338,17 +308,17 @@ function Overview({
       <article>
         <span className="summary-icon lime">✓</span>
         <div>
-          <small>Next contribution</small>
-          <strong>Cycle renewal</strong>
-          <em>Monthly pool distribution</em>
+          <small>Pool health</small>
+          <strong>{pools.filter(p => p.chain.metrics?.isLocked).length} locked pools</strong>
+          <em>{pools.filter(p => p.chain.metrics?.isClosing).length} closing · {pools.filter(p => !p.chain.metrics).length} unavailable</em>
         </div>
       </article>
       <article>
         <span className="summary-icon violet">◌</span>
         <div>
-          <small>Needs your input</small>
-          <strong>0 open proposals</strong>
-          <em>Governance active</em>
+          <small>Governance</small>
+          <strong>Proposals not loaded</strong>
+          <em>Proposal view is not connected yet</em>
         </div>
       </article>
     </div>
@@ -377,7 +347,7 @@ function Overview({
             </div>
           </div>
           <h3>{pool.name}</h3>
-          <p>{pool.role} · {pool.funds} contributing</p>
+          <p>{pool.role} · {pool.funds} members</p>
           {pool.address && <span className="pda-pill" title={pool.address}>PDA: {pool.address.slice(0, 4)}…{pool.address.slice(-4)}</span>}
           <div className="money">
             <div>
@@ -387,8 +357,8 @@ function Overview({
             <span>→</span>
           </div>
           <div className="card-foot">
-            <span>Next date <b>{pool.nextDate}</b></span>
-            <span>{pool.proposals ? `${pool.proposals} open proposal${pool.proposals > 1 ? 's' : ''}` : 'All caught up'}</span>
+            <span>Cycle renewal <b>{pool.nextDate}</b></span>
+            <span>{pool.proposals} proposals created</span>
           </div>
         </button>
       ))}
@@ -396,7 +366,7 @@ function Overview({
   </section>
 }
 
-function Pool({ networkName, pool, onProposal, onWithdrawal }: { networkName: string; pool: PoolItem; onProposal: () => void; onWithdrawal: () => void }) {
+function Pool({ networkName, pool }: { networkName: string; pool: PoolItem }) {
   return <section className="page pool-page">
     <div className="pool-title">
       <b className={`pool-glyph hero-glyph ${pool.accent}`}>{pool.icon}</b>
@@ -406,30 +376,19 @@ function Pool({ networkName, pool, onProposal, onWithdrawal }: { networkName: st
           {pool.onChain && <span className="tag onchain">On-chain ({networkName})</span>}
         </div>
         <h1>{pool.name}</h1>
-        <p>Monthly contributions · {pool.funds} members contributing</p>
+        <p>Cycle {pool.chain.currentCycle.toString()} · {pool.funds} members</p>
         {pool.address && <span className="pda-pill" title={pool.address}>PDA: {pool.address}</span>}
       </div>
-      <button className="more">•••</button>
     </div>
 
     <div className="balance-panel">
       <div>
-        <p>Available to the community (USDC)</p>
+        <p>Vault balance (USDC)</p>
         <strong>{pool.balance}</strong>
         {pool.vault ? <span className="vault-note">Vault: {pool.vault.slice(0, 6)}…{pool.vault.slice(-6)}</span> : <span>Updated a few moments ago</span>}
       </div>
-      <div className="balance-actions">
-        <button className="outline" onClick={() => {}}>Add money</button>
-        <button className="primary" onClick={onWithdrawal}>Request a payment <span>→</span></button>
-      </div>
     </div>
 
-    <div className="tabs">
-      <button className="tab-active">Overview</button>
-      <button>Activity</button>
-      <button>People <i>{pool.funds.split(' ')[0]}</i></button>
-      <button>Rules</button>
-    </div>
 
     <div className="pool-content">
       <div>
@@ -444,15 +403,15 @@ function Pool({ networkName, pool, onProposal, onWithdrawal }: { networkName: st
             <div className="pool-chain-grid">
               <div className="chain-spec">
                 <small>Minimum Deposit</small>
-                <strong>{pool.minimumDeposit ?? '$10.00'}</strong>
+                <strong>{pool.minimumDeposit ?? 'Unavailable'}</strong>
               </div>
               <div className="chain-spec">
                 <small>Voting Threshold</small>
-                <strong>{pool.voteThreshold ?? 2} affirmative votes</strong>
+                <strong>{pool.voteThreshold} affirmative votes</strong>
               </div>
               <div className="chain-spec">
-                <small>Creator & Admin</small>
-                <strong title={pool.creator}>{pool.creator ? `${pool.creator.slice(0, 6)}…${pool.creator.slice(-6)}` : 'Deployer'}</strong>
+                <small>Creator wallet</small>
+                <strong title={pool.creator}>{pool.creator ? `${pool.creator.slice(0, 6)}…${pool.creator.slice(-6)}` : 'Unavailable'}</strong>
               </div>
               <div className="chain-spec">
                 <small>Capacity Limit</small>
@@ -462,44 +421,22 @@ function Pool({ networkName, pool, onProposal, onWithdrawal }: { networkName: st
           </div>
         )}
 
-        <div className="section-head compact">
-          <div>
-            <h2>What’s happening</h2>
-            <p>Everything is visible to pool members</p>
-          </div>
-          <button className="text-button">See all <span>→</span></button>
-        </div>
-        <div className="activity-list">
-          {activity.map((item, index) => (
-            <div className="activity" key={index}>
-              <span className={`avatar ${item.tone}`}>{item.initials}</span>
-              <div>
-                <p><b>{item.who}</b> {item.action}</p>
-                <small>{item.detail} · {item.time}</small>
-              </div>
-              {item.amount && <strong className={item.tone === 'in' ? 'income' : ''}>{item.amount}</strong>}
-            </div>
-          ))}
-        </div>
-        <button className="activity-link">View all activity →</button>
+        <PoolMetricsView pool={pool} />
+        <div className="section-head compact"><h2>Activity</h2></div>
+        <p>Activity history is not connected yet.</p>
       </div>
 
       <div className="right-rail">
         <div className="action-card">
           <span className="eyebrow">COMMUNITY DECISIONS</span>
           <h3>Have a say in<br />what’s next.</h3>
-          <p>There are {pool.proposals} open proposals waiting for your voice.</p>
-          <button className="dark-button" onClick={onProposal}>View proposals <span>→</span></button>
+          <p>{pool.proposals} proposals have been created. Lifecycle status and voting are not connected yet.</p>
         </div>
         <div className="members-card">
           <div className="section-head compact">
             <h3>People</h3>
-            <button className="text-button">See all</button>
           </div>
-          <div className="faces">
-            {members.map((m, i) => <span className={`avatar face f${i}`} key={m[0]}>{m[0]}</span>)}
-            {pool.slots > 0 && <span className="more-faces">+{pool.slots}</span>}
-          </div>
+          <p>Member directory is not connected yet.</p>
           <p>{pool.cap - pool.slots} of {pool.cap} places filled · <b>{pool.slots} open places left</b></p>
         </div>
       </div>
@@ -507,64 +444,56 @@ function Pool({ networkName, pool, onProposal, onWithdrawal }: { networkName: st
   </section>
 }
 
-function Proposal({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (event: FormEvent) => void }) {
-  return <section className="form-page">
-    <div className="form-intro">
-      <button className="back" onClick={onCancel}>← Back to pool</button>
-      <span className="eyebrow">NEW COMMUNITY DECISION</span>
-      <h1>Bring an idea<br />to the group.</h1>
-      <p>Explain the change clearly. Everyone who is up to date can vote.</p>
-      <div className="process">
-        <span>1</span><p><b>Create your proposal</b><small>Set out the decision</small></p>
-        <span>2</span><p><b>Community votes</b><small>Open for 7 days</small></p>
-        <span>3</span><p><b>Put it into action</b><small>After a short pause</small></p>
-      </div>
+function PoolMetricsView({ pool }: { pool: PoolItem }) {
+  const metrics = pool.chain.metrics
+  if (!metrics) return <p role="status">This pool uses a legacy account layout. Accounting, quorum, and admission metrics are unavailable.</p>
+  const health = quorumHealth(metrics, pool.chain.memberCount)
+  const spec = (label: string, value: string) => <div className="chain-spec" key={label}><small>{label}</small><strong>{value}</strong></div>
+  return <div className="pool-metrics">
+    {metrics.isClosing && <p className="pool-warning" role="status">Pool closing. New deposits and proposals are disabled by the contract.</p>}
+    {metrics.isLocked && <p className="pool-warning" role="status">Pool locked: quorum was not met at cycle evaluation. Spending and governance actions are restricted.</p>}
+    {!metrics.isClosing && !metrics.isLocked && !health.satisfied && <p className="pool-warning" role="status">Funded participation is below the configured quorum. The next cycle evaluation may lock the pool.</p>}
+    {!metrics.isClosing && metrics.isLocked && health.cyclesUntilAutoClose !== null && <p className="pool-warning" role="status">Auto-close after {health.cyclesUntilAutoClose.toString()} more consecutive locked cycles.</p>}
+    {metrics.rolloverCursor && <p role="status">Cycle rollover is in progress. Member counts may change as rollover completes.</p>}
+    <h2>Financial accounting</h2>
+    <div className="pool-chain-grid">
+      {spec('Vault balance', pool.balance)}
+      {spec('Total conferred capital', formatUsdc(metrics.totalConferredCapital))}
+      {spec('Non-conferred capital / surplus', formatUsdc(metrics.totalNonConferredCapital))}
+      {spec('Escrowed surplus', formatUsdc(metrics.totalEscrowedSurplus))}
+      {spec('Settled capital', formatUsdc(metrics.totalSettledCapital))}
+      {spec('Member obligation per cycle', formatUsdc(pool.chain.memberObligationAmountAtomic))}
     </div>
-    <form className="form-card" onSubmit={onSubmit}>
-      <h2>What should change?</h2>
-      <label>Proposal type
-        <select defaultValue="">
-          <option value="" disabled>Choose a change</option>
-          <option>Adjust a person’s spending limit</option>
-          <option>Change a contribution rule</option>
-          <option>Add a community role</option>
-          <option>Make room for more members</option>
-        </select>
-      </label>
-      <label>Give your proposal a clear title<input required placeholder="e.g. Increase the garden supply limit" /></label>
-      <label>Why does this matter?<textarea required placeholder="Share the context your community needs to decide." rows={4}/></label>
-      <div className="form-note">◌ Your proposal will be open for 7 days. It needs 60% support to pass.</div>
-      <div className="form-actions">
-        <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
-        <button className="primary" type="submit">Continue <span>→</span></button>
-      </div>
-    </form>
-  </section>
-}
-
-function Withdrawal({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (event: FormEvent) => void }) {
-  return <section className="form-page">
-    <div className="form-intro">
-      <button className="back" onClick={onCancel}>← Back to pool</button>
-      <span className="eyebrow">REQUEST A PAYMENT</span>
-      <h1>Keep every<br />payment clear.</h1>
-      <p>Share who it’s for and why before any money moves.</p>
-      <div className="trust-note"><b>Why this step?</b><p>Requests help the community understand spending and keep a shared record.</p></div>
+    <p>Non-conferred capital includes refundable surplus and unfunded deposits. Conferred capital tracks pool-owned funds. The vault also holds refundable member capital.</p>
+    {metrics.hasSnapshottedClosure && <div className="pool-chain-grid">
+      {spec('Closure vault basis', formatUsdc(metrics.closingVaultBasis))}
+      {spec('Closure non-conferred basis', formatUsdc(metrics.closingNonConferredBasis))}
+      {spec('Closure conferred capital', formatUsdc(metrics.closingConferredPoolCapital))}
+    </div>}
+    <h2>Quorum health</h2>
+    <div className="pool-chain-grid">
+      {spec('Funded participation', `${metrics.fundedMemberCount} / ${pool.chain.memberCount} (${(health.participationBps / 100).toFixed(2)}%)`)}
+      {spec('Matured voting members', metrics.votingMemberCount.toString())}
+      {spec('Minimum funded members', metrics.minQuorumMembers.toString())}
+      {spec('Minimum participation', `${(metrics.minQuorumBps / 100).toFixed(2)}%`)}
+      {spec('Current quorum', health.satisfied ? 'Satisfied' : 'Below minimum')}
+      {spec('Lock status', metrics.isLocked ? 'Locked' : 'Unlocked')}
+      {spec('Consecutive locked cycles', metrics.lockedConsecutiveCycles.toString())}
+      {spec('Auto-close threshold', metrics.autoCloseCyclesThreshold === 0n ? 'Disabled' : `${metrics.autoCloseCyclesThreshold} cycles`)}
     </div>
-    <form className="form-card" onSubmit={onSubmit}>
-      <h2>Payment details</h2>
-      <div className="two-fields">
-        <label>Amount<input required type="number" min="1" step="0.01" placeholder="0.00" /></label>
-        <label>For whom?<input required placeholder="Person or organization" /></label>
-      </div>
-      <label>What is this for?<input required placeholder="e.g. Food pantry supplies" /></label>
-      <label>Tell the community more<textarea required placeholder="Add any helpful context." rows={4}/></label>
-      <label className="upload">＋ <span><b>Add a receipt or document</b><small>Optional · visible only to your pool</small></span><input type="file" /></label>
-      <div className="form-note">◌ This request will be reviewed against the current spending rules.</div>
-      <div className="form-actions">
-        <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
-        <button className="primary" type="submit">Review request <span>→</span></button>
-      </div>
-    </form>
-  </section>
+    <h2>Admission & voting rules</h2>
+    <div className="pool-chain-grid">
+      {spec('Admission mode', metrics.admissionMode)}
+      {spec('Voting maturation', `${metrics.votingMaturationCycles} funded cycles`)}
+      {spec('Proposal execution delay', `${metrics.proposalExecutionDelayCycles} cycles`)}
+      {spec('Cycle duration', `${pool.chain.cycleDurationSeconds} seconds`)}
+      {spec('Voting period', `${pool.chain.votingPeriodSeconds} seconds`)}
+      {spec('Execution timelock', `${pool.chain.timelockSeconds} seconds`)}
+    </div>
+    <p>{metrics.admissionMode === 'InviteVouched' ? 'Admission requires a vouched invitation and governance approval.' : 'Members can join through open admission.'} Voting maturation uses consecutive funded cycles.</p>
+    {pool.chain.hasPendingConfig && <p role="status">Configuration changes are pending. The values above are the active rules.</p>}
+    {metrics.pendingAdmissionMode !== null && <p>Pending admission mode: {metrics.pendingAdmissionMode}</p>}
+    {metrics.pendingVotingMaturationCycles !== null && <p>Pending voting maturation: {metrics.pendingVotingMaturationCycles.toString()} cycles</p>}
+    {metrics.pendingProposalExecutionDelayCycles !== null && <p>Pending execution delay: {metrics.pendingProposalExecutionDelayCycles.toString()} cycles</p>}
+  </div>
 }

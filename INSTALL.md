@@ -176,6 +176,12 @@ http://localhost:5173
    - Minimum deposit requirement (e.g. $10.00 USDC)
    - Voting threshold (e.g. 2 affirmative votes)
    - Capacity limits (e.g. 24 member slots)
+   - Conferred, non-conferred, settled, and escrowed capital
+   - Funded participation, quorum requirements, lock status, and auto-close warnings
+   - Admission mode and voting maturation rules
+   - Closure accounting snapshots when available
+
+   Legacy account metrics and views awaiting integration are labeled unavailable. No sample activity, member identities, or simulated transaction confirmations are displayed.
 4. **Deploy a New Pool**: Click **Start a pool**. The UI deploys an on-chain pool through the local development endpoint, automatically refetches the live chain state, and navigates to the newly created pool.
 5. **Refresh**: Click `↻ Refresh` to fetch the latest on-chain block state. Only pools from the selected network appear; an empty network shows an empty state.
 

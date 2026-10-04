@@ -385,11 +385,11 @@ export async function getPoolDetails(poolAddress: string): Promise<{
 
 export async function executeAction(action: string, payload: any): Promise<any> {
   const wallets = await getLocalWallets()
-  const program = await getProgram()
   const [globalPda] = PublicKey.findProgramAddressSync([Buffer.from('global')], programId)
 
   switch (action) {
     case 'initialize_global': {
+      const program = await getProgram()
       let globalAccount = await program.account.globalConfig.fetchNullable(globalPda)
       if (globalAccount) {
         throw new Error('GlobalConfig has already been initialized.')
@@ -420,6 +420,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
     }
 
     case 'toggle_pause_new_pools': {
+      const program = await getProgram()
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const currentPaused = Boolean(globalAccount.pausedNewPools)
       const nextPaused = payload.paused ?? !currentPaused
@@ -442,6 +443,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         throw new Error(`Invalid wallet name: ${walletName}`)
       }
       const targetWallet = wallets[walletName as keyof typeof wallets]
+      const program = await getProgram()
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
 
@@ -478,6 +480,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         maxSponsoredActionCharge = 1,
       } = payload
 
+      const program = await getProgram()
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
       const treasuryUsdc = globalAccount.treasuryUsdc
@@ -548,6 +551,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!targetWallet) throw new Error(`Invalid walletName: ${walletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       if (poolAccount.isClosing) {
         throw new Error('Pool is closing; new members cannot join')
@@ -598,6 +602,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!targetWallet) throw new Error(`Invalid walletName: ${walletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       if (poolAccount.isClosing) {
         throw new Error('Pool is closing; deposits are blocked')
@@ -639,6 +644,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const encKey = Array(32).fill(0)
       Buffer.from(encryptionKeyText).copy(Buffer.from(encKey))
 
+      const program = await getProgram()
       const tx = await program.methods
         .setAlias(aliasHash, encKey)
         .accounts({
@@ -665,6 +671,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         programId
       )
 
+      const program = await getProgram()
       const tx = await program.methods
         .setPaused(paused)
         .accounts({
@@ -682,6 +689,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const { poolAddress, crankerWallet } = payload
       if (!poolAddress) throw new Error('Missing poolAddress for roll_cycle')
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const currentCycle = new BN(poolAccount.currentCycle.toString())
       const nextCycle = currentCycle.addn(1)
@@ -744,6 +752,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const { poolAddress } = payload
       if (!poolAddress) throw new Error('Missing poolAddress for test_roll_cycle')
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const currentCycle = new BN(poolAccount.currentCycle.toString())
       const nextCycle = currentCycle.addn(1)
@@ -809,6 +818,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!poolAddress) throw new Error('Missing poolAddress for test_advance_cycles')
       if (typeof count !== 'number' || count <= 0) throw new Error(`Invalid count for test_advance_cycles: ${count}`)
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const currentCycle = new BN(poolAccount.currentCycle.toString())
       const nextCycle = currentCycle.addn(count)
@@ -858,6 +868,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (typeof cycle !== 'number' || cycle < 0) throw new Error(`Invalid cycle for test_set_cycle: ${cycle}`)
       const poolPubkey = new PublicKey(poolAddress)
 
+      const program = await getProgram()
       const tx = await program.methods
         .testSetCycle(new BN(cycle))
         .accounts({
@@ -875,6 +886,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const poolPubkey = new PublicKey(poolAddress)
       const proposalPubkey = new PublicKey(proposalAddress)
 
+      const program = await getProgram()
       const tx = await program.methods
         .testFinalizeProposal()
         .accounts({
@@ -898,6 +910,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         programId
       )
 
+      const program = await getProgram()
       const tx = await program.methods
         .testResetMemberAllowance()
         .accounts({
@@ -1019,6 +1032,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
         throw new Error(`Unsupported proposal action kind: ${actionKind}`)
       }
 
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const nextProposalId = new BN(poolAccount.nextProposalId.toString())
 
@@ -1046,6 +1060,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!voter) throw new Error(`Invalid voterWalletName: ${voterWalletName}`)
 
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
       const [voterMemberPda] = PublicKey.findProgramAddressSync([Buffer.from('member'), proposalAccount.pool.toBuffer(), voter.publicKey.toBuffer()], programId)
       const [voteReceiptPda] = PublicKey.findProgramAddressSync([Buffer.from('vote'), proposalPubkey.toBuffer(), voterMemberPda.toBuffer()], programId)
@@ -1069,6 +1084,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const { proposalAddress } = payload
       if (!proposalAddress) throw new Error('Missing proposalAddress for finalize_proposal')
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
 
       const tx = await program.methods
@@ -1089,6 +1105,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!executor) throw new Error(`Invalid executorWalletName: ${executorWalletName}`)
 
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
       const poolAccount = await program.account.pool.fetch(proposalAccount.pool)
 
@@ -1124,6 +1141,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!executor) throw new Error(`Invalid executorWalletName: ${executorWalletName}`)
 
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
 
       if (!proposalAccount.action.configurationModification) {
@@ -1152,6 +1170,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
 
       const poolPubkey = new PublicKey(poolAddress)
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
 
       const tx = await program.methods
@@ -1178,6 +1197,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
 
       const poolPubkey = new PublicKey(poolAddress)
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
       const poolAccount = await program.account.pool.fetch(poolPubkey)
 
@@ -1231,6 +1251,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
 
       const poolPubkey = new PublicKey(poolAddress)
       const proposalPubkey = new PublicKey(proposalAddress)
+      const program = await getProgram()
       const proposalAccount = await program.account.proposal.fetch(proposalPubkey)
 
       if (!proposalAccount.action.admitMember) {
@@ -1269,6 +1290,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!memberWallet) throw new Error(`Invalid walletName: ${walletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
@@ -1303,6 +1325,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!memberWallet) throw new Error(`Invalid walletName: ${walletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
@@ -1337,6 +1360,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!user) throw new Error(`Invalid walletName: ${walletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const globalAccount = await program.account.globalConfig.fetch(globalPda)
       const mint = globalAccount.usdcMint
@@ -1385,6 +1409,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!requester) throw new Error(`Invalid requesterWalletName: ${requesterWalletName}`)
 
       const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
       const poolAccount = await program.account.pool.fetch(poolPubkey)
       const nextRequestId = new BN(poolAccount.nextRequestId.toString())
 
@@ -1421,6 +1446,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       if (!executor) throw new Error(`Invalid executorWalletName: ${executorWalletName}`)
 
       const requestPubkey = new PublicKey(requestAddress)
+      const program = await getProgram()
       const requestAccount = await program.account.withdrawalRequest.fetch(requestPubkey)
       const poolAccount = await program.account.pool.fetch(requestAccount.pool)
 

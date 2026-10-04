@@ -1,5 +1,6 @@
 import { FC, FormEvent, useEffect, useMemo, useState } from 'react'
 import type { PoolItem } from './data'
+import { formatUsdc, quorumHealth } from './solana'
 import type {
   AutonomyTier,
   CapabilityToggles,
@@ -44,7 +45,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
   onRollCycle,
 }) => {
   const [tab, setTab] = useState<Tab>('chat')
-  const [config, setConfig] = useState<CopilotConfig>(() => loadCopilotConfig())
+  const [config, setConfig] = useState<CopilotConfig>(() => ({ ...loadCopilotConfig(), tier: 'advisory' }))
   const [auditLog, setAuditLog] = useState<DecisionAuditEntry[]>(() => loadAuditLog())
   const [queryInput, setQueryInput] = useState('')
   const [messages, setMessages] = useState<CopilotMessage[]>([
@@ -53,7 +54,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
       sender: 'assistant',
       timestamp: Date.now(),
       confidenceScore: 99,
-      text: 'Hello! I am your ComFi Copilot. I monitor pool metrics, evaluate quorum health, and automate routine governance based on your configured autonomy tier. Ask me a question below or configure autonomy settings.',
+      text: 'Hello! I am your ComFi Copilot. I can explain the loaded pool metrics and suggest actions. Transaction signing and proposal data are not connected yet.',
     },
   ])
   const [evaluating, setEvaluating] = useState(false)
@@ -61,41 +62,24 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
 
   // Construct pool snapshot from selectedPool
   const poolSnapshot: CopilotPoolSnapshot | null = useMemo(() => {
-    if (!selectedPool) return null
+    if (!selectedPool?.chain.metrics) return null
+    const chain = selectedPool.chain
+    const metrics = chain.metrics!
     return {
       id: selectedPool.id,
       name: selectedPool.name,
-      address: selectedPool.address,
-      balance: selectedPool.balance,
-      memberCount: selectedPool.cap ? selectedPool.cap - selectedPool.slots : 1,
-      memberCap: selectedPool.cap ?? 10,
-      currentCycle: selectedPool.currentCycle ?? 1,
-      cycleStartedAt: selectedPool.cycleStartedAt,
-      cycleDurationSeconds: 86400, // standard default 24h cycle
-      isLocked: false,
-      isClosing: false,
-      voteThreshold: selectedPool.voteThreshold ?? 3,
-      votingPeriodSeconds: selectedPool.votingPeriodSeconds ?? 86400,
-      proposals: [
-        ...(selectedPool.proposals > 0
-          ? [
-              {
-                id: 1,
-                actionType: 'SetSpenderLimit',
-                actionDetails: 'Authorize cycle budget',
-                state: 'Executable' as const,
-                yesVotes: 3,
-                noVotes: 0,
-                voteThreshold: selectedPool.voteThreshold ?? 3,
-                isPassed: true,
-                isExecutable: true,
-                isRoutine: true,
-              },
-            ]
-          : []),
-      ],
-      totalSurplus: '$0.00',
-      hasPendingRefund: false,
+      address: chain.address,
+      balance: chain.balanceUsdc,
+      memberCount: chain.memberCount,
+      memberCap: chain.memberCap,
+      currentCycle: Number(chain.currentCycle),
+      cycleStartedAt: Number(chain.cycleStartedAt),
+      cycleDurationSeconds: Number(chain.cycleDurationSeconds),
+      isLocked: metrics.isLocked,
+      isClosing: metrics.isClosing,
+      voteThreshold: chain.voteThreshold,
+      votingPeriodSeconds: Number(chain.votingPeriodSeconds),
+      totalSurplus: formatUsdc(metrics.totalNonConferredCapital),
     }
   }, [selectedPool])
 
@@ -106,6 +90,10 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
   }
 
   const setTier = (tier: AutonomyTier) => {
+    if (tier !== 'advisory') {
+      setActionNotice('Automation is unavailable until transaction signing is connected.')
+      return
+    }
     updateConfig({ ...config, tier })
   }
 
@@ -134,7 +122,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
     try {
       const decisions = evaluatePoolGovernance(poolSnapshot, config)
       if (decisions.length === 0) {
-        setActionNotice('All governance metrics are healthy. No actions required.')
+        setActionNotice('No recommendations from the loaded pool metrics. Proposals and member refunds are not loaded.')
       } else {
         let currentLogs = auditLog
         for (const d of decisions) {
@@ -161,7 +149,17 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
       text: trimmed,
     }
 
-    const assistantMsg = processCopilotQuery(trimmed, poolSnapshot, config)
+    const query = trimmed.toLowerCase()
+    const metrics = selectedPool?.chain.metrics
+    let assistantMsg: CopilotMessage
+    if (/proposal|execute|vote|refund|claim|vouch|invite|pending|crank|run/.test(query)) {
+      assistantMsg = { id: `msg-${Date.now()}`, sender: 'assistant', timestamp: Date.now(), text: 'Proposals, member refunds, and transaction signing are not connected yet. No transaction has been submitted.' }
+    } else if (/quorum|participation|locked/.test(query) && metrics && selectedPool) {
+      const health = quorumHealth(metrics, selectedPool.chain.memberCount)
+      assistantMsg = { id: `msg-${Date.now()}`, sender: 'assistant', timestamp: Date.now(), text: `Funded participation: ${metrics.fundedMemberCount} / ${selectedPool.chain.memberCount} (${(health.participationBps / 100).toFixed(2)}%). Minimum: ${metrics.minQuorumMembers} members and ${(metrics.minQuorumBps / 100).toFixed(2)}%. Quorum ${health.satisfied ? 'satisfied' : 'below minimum'}. Pool ${metrics.isClosing ? 'closing' : metrics.isLocked ? 'locked' : 'unlocked'}.` }
+    } else {
+      assistantMsg = processCopilotQuery(trimmed, poolSnapshot, config)
+    }
 
     setMessages(prev => [...prev, userMsg, assistantMsg])
     setQueryInput('')
@@ -176,7 +174,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
         title: `Copilot Query: "${trimmed}"`,
         rationale: assistantMsg.text,
         confidenceScore: assistantMsg.confidenceScore ?? 95,
-        status: config.tier === 'advisory' ? 'recommended' : 'executed',
+        status: 'recommended',
         poolId: poolSnapshot?.id,
         proposalId: assistantMsg.actionSuggestion.proposalId,
       }
@@ -197,6 +195,8 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
         await onRollCycle()
       } else if (suggestion.actionType === 'execute_proposal' && suggestion.proposalId != null && onExecuteProposal) {
         await onExecuteProposal(suggestion.proposalId)
+      } else {
+        throw new Error('Transaction signing is not connected. No transaction has been submitted.')
       }
       const entry: DecisionAuditEntry = {
         id: `audit-exec-${Date.now()}`,
@@ -312,6 +312,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
 
         {/* Content Body */}
         <div className="copilot-body">
+          <p className="copilot-section-desc">Advisory only. Proposals and member refunds are not loaded; transaction signing is not connected.</p>
           {/* TAB 1: Conversational Chat */}
           {tab === 'chat' && (
             <div className="copilot-chat-view">
@@ -331,6 +332,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                       <div className="copilot-msg-action">
                         <button
                           className="copilot-action-exec-btn"
+                          disabled={!onRollCycle && !onExecuteProposal}
                           onClick={() => handleExecuteSuggestion(msg.actionSuggestion!)}
                         >
                           ▶ {msg.actionSuggestion.label}
@@ -454,6 +456,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                   <label className="copilot-toggle-item">
                     <input
                       type="checkbox"
+                      disabled
                       checked={config.toggles.autoRollCycle}
                       onChange={() => toggleCapability('autoRollCycle')}
                     />
@@ -466,6 +469,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                   <label className="copilot-toggle-item">
                     <input
                       type="checkbox"
+                      disabled
                       checked={config.toggles.autoExecutePassedProposals}
                       onChange={() => toggleCapability('autoExecutePassedProposals')}
                     />
@@ -478,6 +482,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                   <label className="copilot-toggle-item">
                     <input
                       type="checkbox"
+                      disabled
                       checked={config.toggles.autoVouchCandidates}
                       onChange={() => toggleCapability('autoVouchCandidates')}
                     />
@@ -490,6 +495,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                   <label className="copilot-toggle-item">
                     <input
                       type="checkbox"
+                      disabled
                       checked={config.toggles.autoVoteLineageYes}
                       onChange={() => toggleCapability('autoVoteLineageYes')}
                     />
@@ -502,6 +508,7 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                   <label className="copilot-toggle-item">
                     <input
                       type="checkbox"
+                      disabled
                       checked={config.toggles.autoClaimSurplusRefund}
                       onChange={() => toggleCapability('autoClaimSurplusRefund')}
                     />
@@ -593,21 +600,18 @@ export const CopilotPanel: FC<CopilotPanelProps> = ({
                   <div className="copilot-insight-card">
                     <small>Cycle Schedule</small>
                     <strong>Cycle #{poolSnapshot.currentCycle}</strong>
-                    <span>Duration: 24h standard rollover</span>
+                    <span>Duration: {poolSnapshot.cycleDurationSeconds} seconds</span>
                   </div>
 
                   <div className="copilot-insight-card">
                     <small>Active Proposals</small>
-                    <strong>{poolSnapshot.proposals?.length ?? 0} Pending</strong>
-                    <span>
-                      {poolSnapshot.proposals?.filter(p => p.state === 'Executable').length ?? 0} ready
-                      for execution
-                    </span>
+                    <strong>Not loaded</strong>
+                    <span>Proposal lifecycle integration is pending.</span>
                   </div>
                 </div>
               ) : (
                 <div className="copilot-empty-state">
-                  <p>No pool selected. Select a pool from the sidebar to inspect metrics.</p>
+                  <p>Select a pool with a current account layout to inspect its metrics.</p>
                 </div>
               )}
             </div>

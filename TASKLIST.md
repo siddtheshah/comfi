@@ -28,10 +28,10 @@
 
 ## 3. Comprehensive Pool Understanding Web App (`apps/web`)
 - [x] [Completed: Codex-Pool-Cleanup] Remove default demo pools from the web app and show only pools from the selected network.
-- [ ] [Claimed: Codex-Pool-Metrics | Deadline: 2026-10-04T15:11:34Z] Enhance on-chain decoding in `apps/web/src/solana.ts` for complete pool metrics:
-  - [ ] Decode financial accounting: vault balance, total conferred capital, total non-conferred capital, surplus, escrowed surplus.
-  - [ ] Decode quorum health: participation rates, lock status (`isLocked`), consecutive locked cycles, auto-close thresholds, and warning alerts.
-  - [ ] Decode admission mode (`InviteVouched` vs `Open`) and voting maturation cycle rules.
+- [x] [Completed: Codex-Pool-Metrics] Enhance on-chain decoding in `apps/web/src/solana.ts` for complete pool metrics:
+  - [x] Decode financial accounting: vault balance, total conferred capital, total non-conferred capital, surplus, escrowed surplus.
+  - [x] Decode quorum health: participation rates, lock status (`isLocked`), consecutive locked cycles, auto-close thresholds, and warning alerts.
+  - [x] Decode admission mode (`InviteVouched` vs `Open`) and voting maturation cycle rules.
 - [ ] Implement Comprehensive Governance & Proposals View:
   - [ ] Proposals list with real-time lifecycle status badges (`Queued`, `Open`, `Executable`, `Executed`, `Rejected`).
   - [ ] Support all 6 proposal types: `SetSpenderLimit`, `ApproveWithdrawal`, `ConfigurationModification`, `ClosePool`, `EvictMember`, `AdmitMember`.

@@ -65,46 +65,16 @@ function mockWalletPoolApi(rpcUrl: string, programIdStr: string): Plugin {
             const pools = await Promise.all(
               accounts.map(async (acc) => {
                 const data = acc.account.data
-                const id = Number(data.readBigUInt64LE(40))
-                const creator = new PublicKey(data.subarray(48, 80)).toBase58()
-                const vault = new PublicKey(data.subarray(80, 112)).toBase58()
-                const memberCap = data.readUInt32LE(112)
-                const memberCount = data.readUInt32LE(116)
-                const minimumDepositAtomic = data.readBigUInt64LE(120).toString()
-                const voteThreshold = data.readUInt32LE(128)
-                const votingPeriodSeconds = data.readBigInt64LE(132).toString()
-                const timelockSeconds = data.readBigInt64LE(140).toString()
-                const currentCycle = data.readBigUInt64LE(148).toString()
-                const cycleDurationSeconds = data.readBigInt64LE(156).toString()
-                const cycleStartedAt = data.readBigInt64LE(164).toString()
-                const nextRequestId = data.readBigUInt64LE(188).toString()
-                const nextProposalId = data.readBigUInt64LE(196).toString()
-
-                const bal = await connection.getTokenAccountBalance(new PublicKey(vault))
-                const num = Number(bal.value.uiAmountString ?? '0')
-                const balance = `$${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-
+                const vault = new PublicKey(data.subarray(80, 112))
+                const bal = await connection.getTokenAccountBalance(vault)
+                // Send the original account bytes; use the same Borsh decoder as direct RPC.
                 return {
                   address: acc.pubkey.toBase58(),
-                  id,
-                  creator,
-                  vault,
-                  memberCap,
-                  memberCount,
-                  minimumDepositAtomic,
-                  voteThreshold,
-                  votingPeriodSeconds,
-                  timelockSeconds,
-                  currentCycle,
-                  cycleDurationSeconds,
-                  cycleStartedAt,
-                  nextRequestId,
-                  nextProposalId,
-                  balance,
+                  data: data.toString('base64'),
+                  vaultBalanceAtomic: bal.value.amount,
                 }
               })
             )
-            pools.sort((a, b) => a.id - b.id)
             response.end(JSON.stringify({ pools }))
           } catch {
             response.statusCode = 503

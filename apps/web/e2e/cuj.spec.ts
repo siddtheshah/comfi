@@ -1,15 +1,23 @@
 import { expect, test, type Page } from '@playwright/test'
 
-async function showTestPool(page: Page) {
+import { poolAddress, poolBytes } from '../test/fixtures/pool'
+
+async function showTestPool(page: Page, options: Parameters<typeof poolBytes>[0] = {}) {
   await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [{
-    address: 'H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M',
-    id: 0,
-    creator: 'GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB',
-    memberCap: 24,
-    memberCount: 1,
-    balance: '$100.00',
+    address: poolAddress,
+    data: poolBytes(options).toString('base64'),
+    vaultBalanceAtomic: '100000000',
   }] } }))
 }
+
+test.beforeEach(async ({ page }) => {
+  await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [] } }))
+  await page.route('http://127.0.0.1:8899/', route => {
+    const method = route.request().postDataJSON().method
+    const result = method === 'getHealth' ? 'ok' : method === 'getBalance' ? { value: 0 } : method === 'getProgramAccounts' ? [] : { value: [] }
+    return route.fulfill({ json: { result } })
+  })
+})
 
 test('an empty network shows no default pools or demo filter', async ({ page }) => {
   await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [] } }))
@@ -46,77 +54,97 @@ test('mock wallet can initialize the localnet deployer before pool creation', as
   await expect(page.getByRole('status')).toContainText('Localnet deployer initialized: BVVf…wrNX.')
 })
 
-test('member can review a pool and begin a proposal', async ({ page }) => {
+test('pool displays live metrics and contains no fabricated activity or actions', async ({ page }) => {
   await showTestPool(page)
-  await page.goto('/')
-  await page.getByTestId('pool-pool-0').click()
-  await expect(page.getByRole('heading', { name: 'Community Pool #0' })).toBeVisible()
-  await page.getByRole('button', { name: /View proposals/ }).click()
-  await expect(page.getByRole('heading', { name: /Bring an idea/ })).toBeVisible()
-  await page.getByPlaceholder('e.g. Increase the garden supply limit').fill('Buy a shared tool shed')
-  await page.getByPlaceholder('Share the context your community needs to decide.').fill('This keeps supplies dry and shared.')
-  await page.getByRole('button', { name: /Continue/ }).click()
-  await expect(page.getByRole('status')).toContainText('Proposal saved for review.')
-})
-
-test('member can begin a payment request', async ({ page }) => {
-  await showTestPool(page)
-  await page.goto('/')
-  await page.getByTestId('pool-pool-0').click()
-  await page.getByRole('button', { name: /Request a payment/ }).click()
-  await expect(page.getByRole('heading', { name: 'Payment details' })).toBeVisible()
-  await page.getByPlaceholder('0.00').fill('25.00')
-  await page.getByPlaceholder('Person or organization').fill('Garden Co-op')
-  await page.getByPlaceholder('e.g. Food pantry supplies').fill('Seeds')
-  await page.getByPlaceholder('Add any helpful context.').fill('Fall planting supplies')
-  await page.getByRole('button', { name: /Review request/ }).click()
-  await expect(page.getByRole('status')).toContainText('Payment request saved for review.')
-})
-
-test('member can view on-chain pools and inspect smart contract parameters', async ({ page }) => {
-  await page.route('**/__comfi/mock-wallet/pools', async route => {
-    await route.fulfill({
-      json: {
-        pools: [
-          {
-            address: 'H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M',
-            id: 0,
-            creator: 'GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB',
-            vault: '2zPrsXu7HHhL8ZVfmzuDsZBQtaZZnjZwwnbGwKpWTD3F',
-            memberCap: 24,
-            memberCount: 1,
-            minimumDepositAtomic: '10000000',
-            voteThreshold: 2,
-            votingPeriodSeconds: '604800',
-            timelockSeconds: '86400',
-            currentCycle: '0',
-            cycleDurationSeconds: '2592000',
-            cycleStartedAt: '1790051252',
-            nextRequestId: '0',
-            nextProposalId: '0',
-            balance: '$100.00',
-          },
-        ],
-      },
-    })
-  })
-
   await page.goto('/')
   const poolCard = page.getByTestId('pool-pool-0')
-  await expect(poolCard).toBeVisible()
-  await expect(page.locator('.pool-card')).toHaveCount(1)
-  await expect(page.locator('.side-pools button')).toHaveCount(1)
-  await expect(page.locator('.summary-grid article').first()).toContainText('$100.00')
-  await expect(poolCard).toContainText('Community Pool #0')
   await expect(poolCard).toContainText('$100.00')
-  await expect(poolCard).toContainText('On-chain')
-
+  await expect(poolCard).toContainText('Locked · Cycle 9')
+  await expect(poolCard).toContainText('5 proposals created')
   await poolCard.click()
-  await expect(page.getByRole('heading', { name: 'Community Pool #0' })).toBeVisible()
-  await expect(page.getByText('On-chain (Localnet)')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Financial accounting' })).toBeVisible()
   await expect(page.getByText('2 affirmative votes')).toBeVisible()
-  await expect(page.getByText('$10.00')).toBeVisible()
-  await expect(page.getByText('24 members (23 slots open)')).toBeVisible()
+  await expect(page.getByText('$10.00', { exact: true })).toBeVisible()
+  await expect(page.getByText('$9,007,199,254.74', { exact: true })).toBeVisible()
+  await expect(page.getByText('1 / 4 (25.00%)', { exact: true })).toBeVisible()
+  await expect(page.getByText('50.01%', { exact: true })).toBeVisible()
+  await expect(page.getByText('InviteVouched', { exact: true })).toBeVisible()
+  await expect(page.getByText('2 funded cycles', { exact: true })).toBeVisible()
+  await expect(page.getByText('Auto-close after 1 more consecutive locked cycles.')).toBeVisible()
+  await expect(page.getByText('Activity history is not connected yet.')).toBeVisible()
+  await expect(page.getByText(/Yasmine|Maya|Jordan|August contribution/)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /View proposals|Request a payment|Add money/ })).toHaveCount(0)
+  await page.screenshot({ path: '/tmp/comfi-metrics-desktop.png', fullPage: true })
+})
+
+test('closing pool shows closure accounting and pending admission rules', async ({ page }) => {
+  await showTestPool(page, { closing: true, locked: false, pending: true, open: true })
+  await page.goto('/')
+  await page.getByTestId('pool-pool-0').click()
+  await expect(page.getByText(/Pool closing. New deposits/)).toBeVisible()
+  await expect(page.getByText('Closure vault basis', { exact: true })).toBeVisible()
+  await expect(page.getByText('Pending voting maturation: 3 cycles')).toBeVisible()
+  await expect(page.getByText('Pending admission mode: Open')).toBeVisible()
+  await expect(page.getByText(/Auto-close after/)).toHaveCount(0)
+})
+
+test('legacy pool metrics stay unavailable', async ({ page }) => {
+  await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [{
+    address: poolAddress, data: poolBytes().subarray(0, 289).toString('base64'), vaultBalanceAtomic: '100000000',
+  }] } }))
+  await page.goto('/')
+  await page.getByTestId('pool-pool-0').click()
+  await expect(page.getByText(/This pool uses a legacy account layout/)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Financial accounting' })).toHaveCount(0)
+})
+
+test('malformed account data surfaces a load error', async ({ page }) => {
+  await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [{
+    address: poolAddress, data: poolBytes().subarray(0, 300).toString('base64'), vaultBalanceAtomic: '100000000',
+  }] } }))
+  await page.goto('/')
+  await expect(page.locator('.pool-error')).toContainText('Truncated pool metrics')
+  await expect(page.locator('.pool-card')).toHaveCount(0)
+})
+
+test('pool metrics fit a mobile viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await showTestPool(page)
+  await page.goto('/')
+  await page.getByTestId('pool-pool-0').click()
+  await expect(page.getByRole('heading', { name: 'Quorum health' })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: '/tmp/comfi-metrics-mobile.png', fullPage: true })
+})
+
+test('Copilot uses decoded metrics and has no fabricated proposals or execution claims', async ({ page }) => {
+  await showTestPool(page)
+  await page.goto('/')
+  await page.getByTestId('pool-pool-0').click()
+  await page.getByTestId('copilot-toggle-btn').click()
+  await page.getByRole('button', { name: /Pool Insights/ }).click()
+  await expect(page.getByText('Duration: 2592000 seconds')).toBeVisible()
+  await expect(page.getByText('Proposal lifecycle integration is pending.')).toBeVisible()
+  await expect(page.getByText('Authorize cycle budget')).toHaveCount(0)
+  await page.getByRole('button', { name: /Assistant/, exact: false }).click()
+  const input = page.getByPlaceholder('Ask Copilot about quorum, proposals, cycle renewals…')
+  await input.fill('What is our quorum status?')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByText(/Funded participation: 1 \/ 4 \(25.00%\)/)).toBeVisible()
+  await input.fill('Execute passed proposals')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByText(/No transaction has been submitted/)).toBeVisible()
+  for (const query of ['What is pending?', 'Crank', 'Run']) {
+    await input.fill(query)
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await expect(page.getByText('Proposals, member refunds, and transaction signing are not connected yet. No transaction has been submitted.', { exact: true }).last()).toBeVisible()
+  }
+  await expect(page.getByText(/There are currently no active or pending proposals|No executable proposals found/)).toHaveCount(0)
+  await expect(page.locator('.copilot-action-exec-btn')).toHaveCount(0)
+  await page.getByRole('button', { name: /Autonomy & Risk/ }).click()
+  await page.getByText('Tier 3: Autonomous Delegation', { exact: true }).click()
+  await expect(page.getByText('Automation is unavailable until transaction signing is connected.')).toBeVisible()
+  await expect(page.locator('.copilot-tier-card.selected')).toContainText('Tier 1: Advisory Mode')
 })
 
 test('user can open ComFi in-browser wallet manager, switch modes, and manage keys', async ({ page }) => {
