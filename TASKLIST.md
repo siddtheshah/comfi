@@ -57,7 +57,7 @@
   - [ ] Notification and tracking card showing pending invite approvals and admission execution status.
 
 ## 5. Browser-Based Delegated AI Pool Assistant (ComFi Copilot) (`apps/web`)
-- [ ] Design and implement an in-browser AI Assistant panel for autonomous and delegated pool management.
+- [ ] [Claimed: Subagent-ComFi-Copilot | Deadline: 2026-10-04T16:30:00Z] Design and implement an in-browser AI Assistant panel for autonomous and delegated pool management.
 - [ ] Provide user-configurable risk & autonomy settings:
   - [ ] **Tier 1: Advisory Mode (Low Risk / Zero Autonomy)** - Proactively monitors pool metrics, flags quorum drops, highlights executable proposals, and recommends votes without executing transactions.
   - [ ] **Tier 2: Supervised Automation (Medium Risk / Semi-Autonomous)** - Auto-votes on recurring routine proposals matching user rules, auto-rolls overdue cycles, prompts for approval on large spends, evictions, or config modifications.
