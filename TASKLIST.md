@@ -27,6 +27,7 @@
 - [ ] Enable wallet provider selector allowing seamless toggle between In-Browser Web Wallet, Phantom, and Backpack.
 
 ## 3. Comprehensive Pool Understanding Web App (`apps/web`)
+- [ ] [Claimed: Codex-Pool-Cleanup | Deadline: 2026-10-04T15:00:00Z] Remove default demo pools from the web app and show only pools from the selected network.
 - [ ] Enhance on-chain decoding in `apps/web/src/solana.ts` for complete pool metrics:
   - [ ] Decode financial accounting: vault balance, total conferred capital, total non-conferred capital, surplus, escrowed surplus.
   - [ ] Decode quorum health: participation rates, lock status (`isLocked`), consecutive locked cycles, auto-close thresholds, and warning alerts.
