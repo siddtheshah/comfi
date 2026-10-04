@@ -23,7 +23,7 @@
   - [x] [Completed: Codex-Phantom] Support Phantom wallet (`window.solana`) with network switching guidance (Settings -> Developer Settings -> Change Network).
   - [x] [Completed: Subagent-Backpack-Wallet] Support Backpack wallet (`window.backpack`) with native custom RPC configuration.
   - [x] [Completed: Subagent-Web-Wallet] Implement built-in ComFi In-Browser Web Wallet (persistent browser keypair with 1-click generation, import/export, address copy, SOL/USDC balance display, and localnet/devnet airdrop faucet).
-- [ ] Add interactive network switcher in the web app navbar (`Localnet`, `Devnet`, `Testnet`) with connection health indicator and dynamic RPC configuration.
+- [ ] [Claimed: Codex-Networks | Deadline: 2026-10-04T09:52:48Z] Add interactive network switcher in the web app navbar (`Localnet`, `Devnet`, `Testnet`) with connection health indicator and dynamic RPC configuration.
 - [ ] Enable wallet provider selector allowing seamless toggle between In-Browser Web Wallet, Phantom, and Backpack.
 
 ## 3. Comprehensive Pool Understanding Web App (`apps/web`)
