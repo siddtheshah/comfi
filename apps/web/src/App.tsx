@@ -1,8 +1,10 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { activity, demoPools, members, type PoolItem } from './data'
 import { fetchOnChainPools, onChainPoolToPoolItem } from './solana'
 import { useWallet } from './wallet'
 import { WalletModal } from './WalletModal'
+import { NetworkSwitcher } from './NetworkSwitcher'
+import { NETWORK_LABELS } from './network'
 
 type View = 'overview' | 'pool' | 'proposal' | 'withdrawal'
 type Filter = 'all' | 'onchain' | 'demo'
@@ -11,7 +13,13 @@ const Icon = ({ children }: { children: string }) => <span className="icon" aria
 export function App() {
   const wallet = useWallet()
   const [view, setView] = useState<View>('overview')
-  const [onChainPools, setOnChainPools] = useState<PoolItem[]>([])
+  const poolSource = `${wallet.network}:${wallet.endpoint}:${wallet.programId}:${wallet.publicKey}`
+  const activeSource = useRef(poolSource)
+  activeSource.current = poolSource
+  const poolRequest = useRef(0)
+  const [poolSnapshot, setPoolSnapshot] = useState<{ source: string; pools: PoolItem[] }>({ source: poolSource, pools: [] })
+  const onChainPools = poolSnapshot.source === poolSource ? poolSnapshot.pools : []
+  const [poolError, setPoolError] = useState<string | null>(null)
   const [loadingPools, setLoadingPools] = useState(false)
   const [filter, setFilter] = useState<Filter>('all')
   const [selected, setSelected] = useState<PoolItem>(demoPools[0])
@@ -32,51 +40,57 @@ export function App() {
   }, [filter, onChainPools, allPools])
 
   const loadOnChainPools = useCallback(async (selectAddress?: string) => {
+    const request = ++poolRequest.current
+    const isCurrent = () => activeSource.current === poolSource && request === poolRequest.current
     setLoadingPools(true)
+    setPoolError(null)
     try {
-      // First try the Vite local dev endpoint
-      const response = await fetch('/__comfi/mock-wallet/pools')
-      if (response.ok) {
-        const data = await response.json() as { pools?: any[] }
-        if (data.pools && Array.isArray(data.pools)) {
-          const items: PoolItem[] = data.pools.map((p: any) => onChainPoolToPoolItem({
-            ...p,
-            minimumDepositAtomic: BigInt(p.minimumDepositAtomic ?? '0'),
-            votingPeriodSeconds: BigInt(p.votingPeriodSeconds ?? '0'),
-            timelockSeconds: BigInt(p.timelockSeconds ?? '0'),
-            currentCycle: BigInt(p.currentCycle ?? '0'),
-            cycleDurationSeconds: BigInt(p.cycleDurationSeconds ?? '0'),
-            cycleStartedAt: BigInt(p.cycleStartedAt ?? '0'),
-            actionAllowancePerCycle: BigInt(p.actionAllowancePerCycle ?? '0'),
-            maxSponsoredActionCharge: BigInt(p.maxSponsoredActionCharge ?? '0'),
-            nextRequestId: BigInt(p.nextRequestId ?? '0'),
-            nextProposalId: BigInt(p.nextProposalId ?? '0'),
-            balanceUsdc: p.balance,
-          }, wallet.publicKey))
-          setOnChainPools(items)
-          if (selectAddress) {
-            const match = items.find(i => i.address === selectAddress)
-            if (match) setSelected(match)
-          } else {
-            setSelected(prev => {
-              if (prev.onChain) {
-                const refreshed = items.find(i => i.id === prev.id)
-                return refreshed ?? prev
-              }
-              return prev
-            })
+      if (wallet.useLocalnetApi) {
+        // First try the Vite local dev endpoint
+        const response = await fetch('/__comfi/mock-wallet/pools')
+        if (response.ok) {
+          const data = await response.json() as { pools?: any[] }
+          if (data.pools && Array.isArray(data.pools)) {
+            const items: PoolItem[] = data.pools.map((p: any) => onChainPoolToPoolItem({
+              ...p,
+              minimumDepositAtomic: BigInt(p.minimumDepositAtomic ?? '0'),
+              votingPeriodSeconds: BigInt(p.votingPeriodSeconds ?? '0'),
+              timelockSeconds: BigInt(p.timelockSeconds ?? '0'),
+              currentCycle: BigInt(p.currentCycle ?? '0'),
+              cycleDurationSeconds: BigInt(p.cycleDurationSeconds ?? '0'),
+              cycleStartedAt: BigInt(p.cycleStartedAt ?? '0'),
+              actionAllowancePerCycle: BigInt(p.actionAllowancePerCycle ?? '0'),
+              maxSponsoredActionCharge: BigInt(p.maxSponsoredActionCharge ?? '0'),
+              nextRequestId: BigInt(p.nextRequestId ?? '0'),
+              nextProposalId: BigInt(p.nextProposalId ?? '0'),
+              balanceUsdc: p.balance,
+            }, wallet.publicKey))
+            if (!isCurrent()) return []
+            setPoolSnapshot({ source: poolSource, pools: items })
+            if (selectAddress) {
+              const match = items.find(i => i.address === selectAddress)
+              if (match) setSelected(match)
+            } else {
+              setSelected(prev => {
+                if (prev.onChain) {
+                  const refreshed = items.find(i => i.id === prev.id)
+                  return refreshed ?? prev
+                }
+                return prev
+              })
+            }
+            return items
           }
-          return items
         }
       }
-
-      // Fallback to direct Solana JSON-RPC
+      // Query the selected network directly when the local dev API does not apply.
       const rpc = wallet.endpoint
-      const programId = import.meta.env.VITE_PROGRAM_ID
+      const programId = wallet.programId
       if (rpc && programId) {
         const raw = await fetchOnChainPools(rpc, programId)
         const items = raw.map(p => onChainPoolToPoolItem(p, wallet.publicKey))
-        setOnChainPools(items)
+        if (!isCurrent()) return []
+        setPoolSnapshot({ source: poolSource, pools: items })
         if (selectAddress) {
           const match = items.find(i => i.address === selectAddress)
           if (match) setSelected(match)
@@ -91,23 +105,28 @@ export function App() {
         }
         return items
       }
-    } catch (err) {
-      console.warn('Could not load on-chain pools from localnet:', err)
     } finally {
-      setLoadingPools(false)
+      if (isCurrent()) setLoadingPools(false)
     }
     return []
-  }, [wallet.endpoint, wallet.publicKey, selected.onChain])
+  }, [poolSource, wallet.endpoint, wallet.publicKey, wallet.programId, wallet.useLocalnetApi])
 
-  useEffect(() => {
-    void loadOnChainPools()
-  }, [loadOnChainPools])
+  const refreshPools = useCallback(() => {
+    const request = poolRequest.current + 1
+    void loadOnChainPools().then(() => {}, error => {
+      if (activeSource.current === poolSource && request === poolRequest.current) setPoolError(error instanceof Error ? error.message : String(error))
+    })
+  }, [loadOnChainPools, poolSource])
+
+  useEffect(() => { refreshPools() }, [refreshPools])
+  useEffect(() => { setSelected(demoPools[0]); setView('overview') }, [wallet.network, wallet.endpoint, wallet.programId])
 
   const goPool = (pool = selected) => { setSelected(pool); setView('pool'); setMenu(false) }
   const submit = (event: FormEvent, label: string) => { event.preventDefault(); setNotice(`${label} saved for review.`); setView('pool') }
   const closeNotice = () => setNotice('')
 
   const createPool = async () => {
+    if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
     if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setCreatingPool(true)
     try {
@@ -125,6 +144,7 @@ export function App() {
   }
 
   const initialize = async () => {
+    if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
     if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setInitializing(true)
     try {
@@ -175,6 +195,7 @@ export function App() {
           )}
         </div>
         <div className="top-actions">
+          <NetworkSwitcher />
           <button className="bell" onClick={() => setNotice('You’re all caught up.')}>♧<i /></button>
           <button
             className="wallet-quick-btn"
@@ -209,7 +230,7 @@ export function App() {
       {wallet.connected && (
         <div className="localnet-banner" data-testid="localnet-wallet">
           {wallet.walletMode === 'mock'
-            ? 'Localnet mock wallet connected'
+            ? `${NETWORK_LABELS[wallet.network]} mock wallet connected`
             : wallet.walletMode === 'phantom'
               ? 'Phantom wallet connected'
               : wallet.walletMode === 'backpack'
@@ -218,14 +239,16 @@ export function App() {
         </div>
       )}
       <WalletModal isOpen={walletModalOpen} onClose={() => setWalletModalOpen(false)} />
+      {poolError && <div className="pool-error" role="alert">Could not load pools on {NETWORK_LABELS[wallet.network]}: {poolError}</div>}
       {notice && <div className="toast" role="status">{notice}<button onClick={closeNotice}>×</button></div>}
       {view === 'overview' && (
         <Overview
+          networkName={NETWORK_LABELS[wallet.network]}
           pools={visiblePools}
           onChainCount={onChainPools.length}
           filter={filter}
           onFilterChange={setFilter}
-          onRefresh={() => void loadOnChainPools()}
+          onRefresh={refreshPools}
           loadingPools={loadingPools}
           onSelect={goPool}
           onInitialize={initialize}
@@ -234,7 +257,7 @@ export function App() {
           initializing={initializing}
         />
       )}
-      {view === 'pool' && <Pool pool={selected} onProposal={() => setView('proposal')} onWithdrawal={() => setView('withdrawal')} />}
+      {view === 'pool' && <Pool networkName={NETWORK_LABELS[wallet.network]} pool={selected} onProposal={() => setView('proposal')} onWithdrawal={() => setView('withdrawal')} />}
       {view === 'proposal' && <Proposal onCancel={() => setView('pool')} onSubmit={(e) => submit(e, 'Proposal')} />}
       {view === 'withdrawal' && <Withdrawal onCancel={() => setView('pool')} onSubmit={(e) => submit(e, 'Payment request')} />}
     </main>
@@ -242,6 +265,7 @@ export function App() {
 }
 
 function Overview({
+  networkName,
   pools,
   onChainCount,
   filter,
@@ -254,6 +278,7 @@ function Overview({
   creatingPool,
   initializing,
 }: {
+  networkName: string
   pools: PoolItem[]
   onChainCount: number
   filter: Filter
@@ -298,7 +323,7 @@ function Overview({
         <div>
           <small>Across your pools</small>
           <strong>{totalBalance}</strong>
-          <em>{onChainCount > 0 ? `${onChainCount} on-chain pool${onChainCount > 1 ? 's' : ''} on localnet` : 'Available for your communities'}</em>
+          <em>{onChainCount > 0 ? `${onChainCount} on-chain pool${onChainCount > 1 ? 's' : ''} on ${networkName}` : 'Available for your communities'}</em>
         </div>
       </article>
       <article>
@@ -366,14 +391,14 @@ function Overview({
   </section>
 }
 
-function Pool({ pool, onProposal, onWithdrawal }: { pool: PoolItem; onProposal: () => void; onWithdrawal: () => void }) {
+function Pool({ networkName, pool, onProposal, onWithdrawal }: { networkName: string; pool: PoolItem; onProposal: () => void; onWithdrawal: () => void }) {
   return <section className="page pool-page">
     <div className="pool-title">
       <b className={`pool-glyph hero-glyph ${pool.accent}`}>{pool.icon}</b>
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <span className="eyebrow">YOUR POOL</span>
-          {pool.onChain && <span className="tag onchain">On-chain (Localnet)</span>}
+          {pool.onChain && <span className="tag onchain">On-chain ({networkName})</span>}
         </div>
         <h1>{pool.name}</h1>
         <p>Monthly contributions · {pool.funds} members contributing</p>

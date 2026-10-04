@@ -96,3 +96,22 @@ wallet and use the local development signer.
 
 Provider API references: [Detecting Phantom](https://docs.phantom.com/solana/detecting-the-provider)
 and [connection lifecycle](https://docs.phantom.com/solana/establishing-a-connection).
+
+### Switching Solana networks
+
+Use the navbar's **Localnet / Devnet / Testnet** selector to change ComFi's RPC
+connection without restarting the app. **RPC settings** lets you override the
+selected network's HTTP(S) endpoint for the current session. Each network keeps
+its own endpoint. The health indicator checks `getHealth` immediately and every
+30 seconds, with a five-second timeout; **Offline** includes the error details.
+Pool reads, wallet balances, and SOL airdrops use the selected connection. The
+mock deployment actions and test USDC faucet require the original localnet RPC.
+
+Optional startup overrides are `VITE_LOCALNET_RPC`, `VITE_DEVNET_RPC`, and
+`VITE_TESTNET_RPC`. `VITE_SOLANA_RPC` remains the initial endpoint. For a custom
+initial hostname, set `VITE_SOLANA_NETWORK` explicitly. Set
+`VITE_DEVNET_PROGRAM_ID` or `VITE_TESTNET_PROGRAM_ID` when ComFi has different
+addresses on those clusters; otherwise the app queries `VITE_PROGRAM_ID`.
+Changing ComFi's network does not change Phantom or Backpack's extension
+settings; match the network there before signing. On-chain pool views reset
+when switching networks so an old network's response cannot replace current data.

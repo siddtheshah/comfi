@@ -54,7 +54,7 @@ test('rejected approval is visible and does not report a connected Phantom walle
   await page.getByRole('button', { name: '⚡ ComFi Wallet', exact: true }).click()
   await page.getByRole('button', { name: 'Phantom', exact: true }).click()
   await page.getByRole('button', { name: 'Connect Phantom', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('User rejected the request.')
+  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('User rejected the request.')
   await expect(page.getByTestId('wallet-status')).toHaveCount(0)
   await page.screenshot({ path: '/tmp/comfi-phantom-verification/rejected.png', fullPage: true })
 })

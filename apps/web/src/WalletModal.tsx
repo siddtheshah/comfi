@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react'
 import { useWallet } from './wallet'
+import { NETWORK_LABELS } from './network'
 
 interface WalletModalProps {
   isOpen: boolean
@@ -75,7 +76,7 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
           <div>
             <div className="wallet-modal-badge">
               <span className="network-dot" />
-              <span>{wallet.endpoint.includes('127.0.0.1') || wallet.endpoint.includes('localhost') ? 'Localnet' : wallet.endpoint.includes('testnet') ? 'Testnet' : wallet.endpoint.includes('devnet') ? 'Devnet' : 'Custom RPC'}</span>
+              <span>{NETWORK_LABELS[wallet.network]}</span>
             </div>
             <h2>ComFi Wallet Manager</h2>
           </div>
@@ -201,7 +202,7 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
                   type="button"
                   className="faucet-btn secondary-faucet"
                   onClick={() => void inBrowserWallet.requestUsdcFaucet(100)}
-                  disabled={inBrowserWallet.isAirdropping}
+                  disabled={inBrowserWallet.isAirdropping || !wallet.useLocalnetApi}
                 >
                   {inBrowserWallet.isAirdropping ? 'Minting…' : '💵 Mint 100 USDC'}
                 </button>

@@ -1,5 +1,6 @@
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Keypair } from '@solana/web3.js'
+import { checkRpcHealth, initialNetwork, networkEndpoints, validateNetwork, validateRpcEndpoint, type SolanaNetwork } from './network'
 import { getPhantomProvider, PhantomSession, type PhantomWindow } from './phantom-wallet'
 import {
   getBackpackProvider,
@@ -50,6 +51,12 @@ export type InBrowserWalletState = {
 export type WalletState = {
   connected: boolean
   endpoint: string
+  network: SolanaNetwork
+  programId: string
+  useLocalnetApi: boolean
+  networkHealth: { status: 'checking' | 'online' | 'offline'; error?: string }
+  setNetwork: (network: SolanaNetwork) => void
+  setRpcEndpoint: (endpoint: string) => void
   publicKey?: string
   connect: () => Promise<void>
   disconnect: () => Promise<void>
@@ -71,7 +78,41 @@ export type WalletState = {
 const WalletContext = createContext<WalletState | undefined>(undefined)
 
 export function MockWalletProvider({ children }: PropsWithChildren) {
-  const endpoint = requireEnv('VITE_SOLANA_RPC', import.meta.env.VITE_SOLANA_RPC)
+  const configuredEndpoint = requireEnv('VITE_SOLANA_RPC', import.meta.env.VITE_SOLANA_RPC)
+  const configuredNetwork = initialNetwork(configuredEndpoint, import.meta.env.VITE_SOLANA_NETWORK)
+  const [network, updateNetwork] = useState<SolanaNetwork>(configuredNetwork)
+  const [endpoints, updateEndpoints] = useState(() => networkEndpoints(configuredEndpoint, configuredNetwork, {
+    localnet: import.meta.env.VITE_LOCALNET_RPC,
+    devnet: import.meta.env.VITE_DEVNET_RPC,
+    testnet: import.meta.env.VITE_TESTNET_RPC,
+  }))
+  const endpoint = endpoints[network]
+  const programId = requireEnv('VITE_PROGRAM_ID',
+    (network === 'devnet' ? import.meta.env.VITE_DEVNET_PROGRAM_ID : network === 'testnet' ? import.meta.env.VITE_TESTNET_PROGRAM_ID : undefined)
+    || import.meta.env.VITE_PROGRAM_ID)
+  const useLocalnetApi = network === 'localnet' && configuredNetwork === 'localnet' && endpoint === configuredEndpoint
+  const [health, setHealth] = useState<{ endpoint: string; status: 'checking' | 'online' | 'offline'; error?: string }>({ endpoint, status: 'checking' })
+  const networkHealth = health.endpoint === endpoint ? health : { status: 'checking' as const }
+  const setNetwork = useCallback((value: SolanaNetwork) => updateNetwork(validateNetwork(value)), [])
+  const setRpcEndpoint = useCallback((value: string) => {
+    const validated = validateRpcEndpoint(value)
+    updateEndpoints(previous => ({ ...previous, [network]: validated }))
+  }, [network])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const check = () => {
+      void checkRpcHealth(endpoint, controller.signal).then(() => {
+        if (!controller.signal.aborted) setHealth({ endpoint, status: 'online' })
+      }, error => {
+        if (!controller.signal.aborted) setHealth({ endpoint, status: 'offline', error: error instanceof Error ? error.message : String(error) })
+      })
+    }
+    setHealth({ endpoint, status: 'checking' })
+    check()
+    const timer = setInterval(check, 30_000)
+    return () => { controller.abort(); clearInterval(timer) }
+  }, [endpoint])
   const mockPublicKey = requireEnv('VITE_MOCK_WALLET_PUBLIC_KEY', import.meta.env.VITE_MOCK_WALLET_PUBLIC_KEY)
 
   const [walletMode, updateWalletMode] = useState<WalletMode>('mock')
@@ -175,24 +216,26 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     setErrorMessage(null)
   }, [])
 
+  const balanceSource = useRef('')
+  balanceSource.current = `${endpoint}:${keypair.publicKey.toBase58()}`
   const refreshBalances = useCallback(async () => {
-    if (!endpoint || !keypair) return
+    const source = `${endpoint}:${keypair.publicKey.toBase58()}`
+    if (source !== balanceSource.current) return
     setIsLoadingBalance(true)
-    clearMessages()
+    setErrorMessage(null)
     try {
       const pubkey = keypair.publicKey.toBase58()
       const sol = await fetchSolBalance(endpoint, pubkey)
-      setSolBalance(sol)
       const usdc = await fetchUsdcBalance(endpoint, pubkey)
-      setUsdcBalance(usdc)
+      if (source === balanceSource.current) { setSolBalance(sol); setUsdcBalance(usdc) }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       console.warn('Could not refresh in-browser wallet balances:', msg)
-      setErrorMessage(msg)
+      if (source === balanceSource.current) setErrorMessage(msg)
     } finally {
-      setIsLoadingBalance(false)
+      if (source === balanceSource.current) setIsLoadingBalance(false)
     }
-  }, [endpoint, keypair, clearMessages])
+  }, [endpoint, keypair])
 
   const generateNew = useCallback(() => {
     clearMessages()
@@ -247,6 +290,7 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
   }, [endpoint, keypair, clearMessages, refreshBalances])
 
   const requestUsdcFaucet = useCallback(async (amount = 100): Promise<void> => {
+    if (!useLocalnetApi) throw new Error('The test USDC faucet requires the configured localnet RPC.')
     clearMessages()
     setIsAirdropping(true)
     try {
@@ -273,7 +317,14 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     } finally {
       setIsAirdropping(false)
     }
-  }, [clearMessages, keypair, refreshBalances])
+  }, [clearMessages, keypair, refreshBalances, useLocalnetApi])
+
+  useEffect(() => {
+    setSolBalance(null)
+    setUsdcBalance(null)
+    setIsLoadingBalance(false)
+    clearMessages()
+  }, [endpoint, clearMessages])
 
   useEffect(() => {
     if (walletMode === 'in-browser' && connected) {
@@ -342,6 +393,12 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
           ? 'Mock wallet'
           : 'ComFi Wallet',
     endpoint,
+    network,
+    programId,
+    useLocalnetApi,
+    networkHealth,
+    setNetwork,
+    setRpcEndpoint,
     publicKey: activePublicKey,
     connect,
     disconnect,
@@ -355,6 +412,12 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
   }), [
     connected,
     endpoint,
+    network,
+    programId,
+    useLocalnetApi,
+    networkHealth,
+    setNetwork,
+    setRpcEndpoint,
     activePublicKey,
     walletMode,
     inBrowserWallet,
