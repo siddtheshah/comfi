@@ -1,6 +1,6 @@
 # Standalone UserAccount bootstrap
 
-This implements the **first localnet-only slice** of ADRs [0005](../comfi/adrs/0005-user-accounts-wallet-authority-and-social-verification.md) and [0006](../comfi/adrs/0006-passkey-user-account-administration-and-withdrawal-tickets.md): a separate `user_account` Anchor program that atomically creates a stable identity, its initial wallet link, and its initial passkey link. It neither calls nor deploys the ComFi pool program.
+This implements a **localnet-only slice** of ADRs [0005](../comfi/adrs/0005-user-accounts-wallet-authority-and-social-verification.md) and [0006](../comfi/adrs/0006-passkey-user-account-administration-and-withdrawal-tickets.md): a separate `user_account` Anchor program that atomically creates a stable identity, its initial wallet link, and its initial authenticator link. The ComFi UI can create an account and submit a profile-reference update using a browser passcode-protected software authenticator. It neither calls nor deploys the ComFi pool program.
 
 Creation requires the initial wallet's Solana transaction signature, an explicit fee payer's signature, validated ES256 enrollment data, and a P-256 possession assertion. The fee payer may differ from the wallet and gains no account permissions. Sequence zero is consumed by successful creation; an existing UserAccount cannot be recreated. No account-closing or authority-reset instructions exist.
 
@@ -44,6 +44,41 @@ The payer must already hold local SOL. The workflow generates a disposable unfun
 
 Links are separate fixed-size accounts; no unbounded credential arrays exist in the UserAccount. Reserved implementation limits are eight wallets and eight passkeys, for the later lifecycle slice. This version only creates one of each. A wallet may bootstrap multiple identities. Identical creation IDs resolve to the same identity regardless of wallet/passkey selection.
 
+## Create and update from the browser
+
+```sh
+# Keep the standalone testing validator running on 127.0.0.1:18899.
+npm run user-account:localnet
+
+# In a second terminal, with the normal .env configured:
+VITE_SOLANA_RPC=http://127.0.0.1:18899 npm run dev
+```
+
+Open **User account** in the sidebar. Select **Use ComFi base wallet**, or connect Phantom/Backpack through **ComFi Wallet**. Fund the base wallet with local SOL (the ComFi wallet's **Request 1 SOL** button is available); it signs and pays transaction fees and account rent. The mock identity cannot create or update a UserAccount.
+
+Choose and confirm a browser passcode of 8–128 characters, then select **Create UserAccount**. The UI verifies the resulting account and both active links from confirmed chain state. Enter a profile label and your passcode, then select **Send test update**. This writes `SHA-256(UTF-8(label))` to the existing `profile_reference` field and increments `next_sequence`. The UI displays the account address, reference, sequence, and confirmed transaction signature. After reloading, choose the same base wallet and **Load account** with your passcode.
+
+The browser generates a random P-256 signing key and encrypts its private JWK, credential ID, and stable user ID with AES-256-GCM. A random 16-byte salt, random 12-byte IV, and PBKDF2-SHA-256 with 600,000 iterations protect the encrypted record. Authenticated associated data binds it to the program, localnet genesis hash, and exact base-wallet address. Only the encrypted record is saved to localStorage. The passcode is cleared after each action, and decrypted keys are scoped to the action. No passcode or authenticator private key is sent to the RPC or Vite server. The pre-existing in-browser base wallet's separate storage policy is unchanged.
+
+The encrypted credential is saved **before** submission. A rejected transaction or uncertain confirmation retains it, so retrying uses the same identity. Existing chain state is checked before retrying creation. Corrupt credentials and wrong passcodes produce errors without replacement. Download the encrypted backup and keep the passcode. In a browser without a saved credential, use **Restore encrypted backup** with the same base wallet/localnet, then load it with its passcode. Restore validates the record and its context and never overwrites an existing credential. There is no passcode reset, credential rotation, or hardware recovery in this slice. A validator reset has a new genesis and therefore a separate account-storage namespace.
+
+This authenticator uses the localnet fixture's exact P-256 proof format. Its WebAuthn-shaped data is software-generated: it does **not** establish a real WebAuthn ceremony, browser-origin verification, hardware possession, or device-level UV. It remains gated by the contract's `testing` feature and the UI's loopback/localnet restriction.
+
+### Profile update authorization
+
+`update_profile` requires a signing wallet whose active WalletLink belongs to the UserAccount, an active PasskeyLink for the same account, and an immediately preceding native P-256 proof. Its canonical approval concatenates `comfi:user-account:update-profile:v1\0`, program ID, the test cluster-domain hash, UserAccount, signing wallet, credential hash, new profile reference, authority revision (`u64`), next sequence (`u64`), and expiry (`i64`). Numbers are little-endian. The WebAuthn-shaped client-data challenge is the SHA-256 of that payload. The program validates expiry, sequence, exact client data, RP hash, flags, and proof before updating anything. Successful updates consume one sequence; replayed, substituted, or unauthorized updates leave state unchanged.
+
+```sh
+# With the standalone validator running, test browser creation, reload,
+# wrong passcode, and update without mocking account transactions:
+npm run test:e2e:user-account
+
+# If needed, select an installed compatible Chromium:
+PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium npm run test:e2e:user-account
+```
+
+`npm run user-account:test-workflow` now also exercises the browser cryptographic client against the deployed program, including nine rejected update/replay cases. Transaction confirmation uses HTTP status polling, so localnet testing does not require WebSocket forwarding.
+
 The narrow **test enrollment policy v1** uses RP ID `localhost`, origin `http://localhost:5173`, ES256/P-256, `attestation: none` semantics, UV and UP, a 32-byte credential ID, zero AAGUID and registration counter, canonical COSE EC2 encoding, and no extensions/backup flags. The program validates the actual curve point, RP hash, flags, CBOR key type/algorithm/curve, and credential length. This makes no device-provenance or hardware-bound claim. Nonzero registration counters, different credential-ID lengths, synced-credential flags, extensions, and arbitrary browser client-data encodings are deliberately unsupported by this first mock fixture.
 
 Client data must be exactly UTF-8 JSON in this order, without whitespace:
@@ -74,8 +109,10 @@ The fixed test cluster domain is not an on-chain genesis check. **Never deploy t
 
 ## Follow-up scope
 
-Wallet/passkey enrollment/removal, revision increments on authority changes, profile updates, SIWS/SAS service consent, browser enrollment, withdrawal-ticket issuance/execution, and pool integration remain unimplemented. No existing pool authorization or payment paths have changed, and this slice does not claim ADR 0006 protection for those paths. The full ADRs remain Proposed. Production policy, broader enrollment support and lifecycle invariants must be implemented and verified before enabling a production account creator.
+Wallet/passkey enrollment/removal, revision increments on authority changes, SIWS/SAS service consent, real WebAuthn browser enrollment, withdrawal-ticket issuance/execution, and pool integration remain unimplemented. No existing pool authorization or payment paths have changed, and this slice does not claim ADR 0006 protection for those paths. The full ADRs remain Proposed. Production policy, broader enrollment support and lifecycle invariants must be implemented and verified before enabling production account operations.
 
 ## Verification
+
+UI extension verified locally on 2026-10-13: 121 Node tests, six Rust tests, workspace typechecks and web build, 27 browser regression tests, and one real localnet browser flow covering creation, reload, wrong-passcode rejection, profile update/readback, backup restore, and mismatched-backup-context rejection. The isolated workflow passed 17 rejected bootstrap cases and nine rejected profile update/replay cases. The ordinary build still rejects bootstrap atomically. Independent review approved the implementation. Chromium was selected with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` in this environment; the downloaded headless shell did not render text or accept typing reliably. Anchor's existing macro configuration warnings and Vite's bundle-size warning remain non-fatal.
 
 Verified locally on 2026-10-04 with the pinned Solana/Anchor tools: 115 Node tests, five Rust tests, workspace typechecks, isolated deployment, successful sponsored creation, 17 rejected creation/replay cases, and ordinary-build LocalnetOnly rejection. The successful signed transaction was 1114 bytes and consumed 43319 compute units. Anchor emits the existing macro-generated unexpected-configuration warnings; build and IDL generation completed successfully. These results cover the mock enrollment/bootstrap policy only.

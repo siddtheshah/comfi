@@ -115,3 +115,16 @@ addresses on those clusters; otherwise the app queries `VITE_PROGRAM_ID`.
 Changing ComFi's network does not change Phantom or Backpack's extension
 settings; match the network there before signing. On-chain pool views reset
 when switching networks so an old network's response cannot replace current data.
+
+### User accounts with a browser passcode
+
+The **User account** sidebar view creates a standalone on-chain identity with
+your selected base wallet and a passcode-encrypted browser authenticator. You
+can then submit a test transaction that updates the account's profile reference.
+This currently runs on localnet only; the mock wallet is unsupported.
+
+Run `npm run user-account:localnet`, then in another terminal start the app with
+`VITE_SOLANA_RPC=http://127.0.0.1:18899 npm run dev`. Select a base wallet, fund it
+with test SOL, and create your account with a passcode. See the
+[UserAccount guide](programs/user-account/README.md#create-and-update-from-the-browser)
+for setup, storage, authorization, and live browser tests.

@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MODE="${1:-workflow}"
-if [[ "$MODE" != deployment && "$MODE" != workflow && "$MODE" != production ]]; then
-  echo 'Expected mode: deployment, workflow, or production' >&2
+if [[ "$MODE" != deployment && "$MODE" != workflow && "$MODE" != production && "$MODE" != ui ]]; then
+  echo 'Expected mode: deployment, workflow, production, or ui' >&2
   exit 1
 fi
 # shellcheck source=../ensure-localnet-tools.sh
@@ -74,6 +74,12 @@ solana --url "$RPC_URL" --keypair "$TEMP_DIR/payer.json" program deploy --use-rp
 solana --url "$RPC_URL" --keypair "$TEMP_DIR/payer.json" program show "$PROGRAM_ID"
 if [[ "$MODE" == workflow ]]; then
   node scripts/user-account/create-single-account.mjs --rpc-url="$RPC_URL" --payer="$TEMP_DIR/payer.json" --negative-tests
+  node scripts/user-account/test-profile.mjs "$RPC_URL"
 elif [[ "$MODE" == production ]]; then
   node scripts/user-account/create-single-account.mjs --expect-disabled --rpc-url="$RPC_URL" --payer="$TEMP_DIR/payer.json"
+elif [[ "$MODE" == ui ]]; then
+  echo "UserAccount localnet is ready at $RPC_URL."
+  echo "In another terminal: VITE_SOLANA_RPC=$RPC_URL npm run dev"
+  echo 'Select User account, choose a base wallet, fund it with test SOL, and create your account. Press Ctrl+C here to stop.'
+  wait "$VALIDATOR_PID"
 fi

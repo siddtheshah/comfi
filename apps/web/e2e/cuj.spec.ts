@@ -265,7 +265,7 @@ test('member can invite candidates, generate sharable payload, and track invitat
 
   // Test recipient acceptance simulation via tracking card
   await page.getByTestId('simulate-accept-btn').click()
-  await expect(page.getByRole('heading', { name: 'Join Community Pool' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Join Community Pool', exact: true })).toBeVisible()
 
   // Use connected wallet
   await page.getByTestId('recipient-wallet-input').fill('BVVfYV2AD4KsGWTF3zge1wfH9sb54he1M83UBWazwrNX')

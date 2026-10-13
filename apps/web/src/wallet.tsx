@@ -1,5 +1,6 @@
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Connection, Keypair, Transaction } from '@solana/web3.js'
+import { confirmWalletTransaction } from './transaction-confirmation'
 import { checkRpcHealth, initialNetwork, networkEndpoints, validateNetwork, validateRpcEndpoint, type SolanaNetwork } from './network'
 import { getPhantomProvider, PhantomSession, type PhantomWindow } from './phantom-wallet'
 import {
@@ -394,8 +395,7 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     if (source !== transactionSource.current) throw new Error('Wallet or network changed during transaction approval. Retry on the selected network.')
     if (!expectedMessage.equals(signed.serializeMessage())) throw new Error('Wallet changed the transaction message.')
     const signature = await connection.sendRawTransaction(signed.serialize())
-    const result = await connection.confirmTransaction({ ...latest, signature }, 'confirmed')
-    if (result.value.err) throw new Error(`Transaction failed: ${JSON.stringify(result.value.err)}`)
+    await confirmWalletTransaction(connection, signature, latest)
     return signature
   }, [activePublicKey, endpoint, walletMode, keypair, phantomProvider, backpackProvider])
   const transactionSource = useRef('')

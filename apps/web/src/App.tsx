@@ -3,6 +3,7 @@ import type { PoolItem } from './data'
 import { fetchOnChainPools, onChainPoolToPoolItem, poolFromAccount, formatUsdc, quorumHealth } from './solana'
 import { useWallet } from './wallet'
 import { WalletModal } from './WalletModal'
+import { UserAccountPanel } from './UserAccountPanel'
 import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
 import { CopilotPanel } from './CopilotPanel'
@@ -14,7 +15,7 @@ import { InviteTrackingCard } from './InviteTrackingCard'
 import { onInvitationWebhook } from './invitation-engine'
 import type { CreatePoolModalParams } from './invitation-types'
 
-type View = 'overview' | 'pool'
+type View = 'overview' | 'pool' | 'account'
 const Icon = ({ children }: { children: string }) => <span className="icon" aria-hidden="true">{children}</span>
 
 export function App() {
@@ -202,6 +203,7 @@ export function App() {
       <button className="brand" onClick={() => setView('overview')}><span className="brand-mark">c</span><span>comfi</span></button>
       <nav>
         <button className={view === 'overview' ? 'nav-active' : ''} onClick={() => { setView('overview'); setMenu(false) }}><Icon>⌂</Icon>My pools</button>
+        <button className={view === 'account' ? 'nav-active' : ''} onClick={() => { setView('account'); setMenu(false) }}><Icon>◎</Icon>User account</button>
         <button data-testid="start-pool" disabled={creatingPool || initializing} onClick={() => { onStartPool(); setMenu(false) }}><Icon>＋</Icon>Start a pool</button>
         <button data-testid="side-copilot-btn" onClick={() => { setCopilotOpen(true); setMenu(false) }}><Icon>🤖</Icon>ComFi Copilot</button>
       </nav>
@@ -223,9 +225,9 @@ export function App() {
       <header className="topbar">
         <button className="mobile-menu" onClick={() => setMenu(!menu)} aria-label="Open menu">☰</button>
         <div className="crumb">
-          {view === 'overview' ? (
+          {view !== 'pool' ? (
             <>
-              <span>Community pools</span>
+              <span>{view === 'account' ? 'User account' : 'Community pools'}</span>
               <strong>{NETWORK_LABELS[wallet.network]}</strong>
             </>
           ) : (
@@ -334,6 +336,7 @@ export function App() {
       />
       {poolError && <div className="pool-error" role="alert">Could not load pools on {NETWORK_LABELS[wallet.network]}: {poolError}</div>}
       {notice && <div className="toast" role="status">{notice}<button onClick={closeNotice}>×</button></div>}
+      {view === 'account' && <UserAccountPanel key={`${wallet.network}:${wallet.endpoint}:${wallet.walletMode}:${wallet.publicKey}`} />}
       {view === 'overview' && (
         <Overview
           networkName={NETWORK_LABELS[wallet.network]}

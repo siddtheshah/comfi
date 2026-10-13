@@ -78,7 +78,8 @@
 
 ## 7. Standalone User Accounts
 - [x] [Completed: Codex-UserAccount] Begin standalone UserAccount implementation according to ADRs 0005/0006; add account-creator deployment and single-account workflow scripts with a passkey mock, without pool integration.
-- [ ] [Claimed: Codex-UserAccount-UI | Deadline: 2026-10-13T06:17:00Z] Create a UserAccount from the ComFi UI using a base wallet and browser passcode-protected authenticator; submit and verify an authenticated on-chain profile field update on localnet.
+- [x] [Completed: Codex-UserAccount-UI] Create a UserAccount from the ComFi UI using a base wallet and browser passcode-protected authenticator; submit and verify an authenticated on-chain profile field update on localnet.
+  - Verified 2026-10-13: 121 Node tests, 6 Rust tests, workspace typechecks/build, 27 browser regression tests, and a real localnet browser create/reload/update/backup-restore flow. Isolated deployment verified creation and profile updates, 17 rejected bootstrap cases, 9 rejected update/replay cases, and ordinary-build bootstrap rejection. Independent review: APPROVED. Production WebAuthn and pool authorization remain follow-up work.
 
 ### Account integration follow-ups from the initial UI audit
 - [ ] Integrate the selected wallet/UserAccount with pool deployment and derive membership from on-chain wallet links and Member accounts; account bootstrap alone does not establish pool authorization.

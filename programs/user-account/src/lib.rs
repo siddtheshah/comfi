@@ -95,6 +95,91 @@ pub mod user_account {
         });
         Ok(())
     }
+
+    pub fn update_profile(ctx: Context<UpdateProfile>, args: UpdateProfileArgs) -> Result<()> {
+        require!(cfg!(feature = "testing"), AccountError::LocalnetOnly);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            args.expires_at > now && args.expires_at <= now + MAX_APPROVAL_SECONDS,
+            AccountError::InvalidExpiry
+        );
+        require!(
+            args.sequence == ctx.accounts.user.next_sequence,
+            AccountError::InvalidSequence
+        );
+        let payload = profile_payload(
+            ctx.accounts.user.key(),
+            ctx.accounts.wallet.key(),
+            &ctx.accounts.passkey.credential_hash,
+            &args.profile_reference,
+            ctx.accounts.user.authority_revision,
+            args.sequence,
+            args.expires_at,
+        );
+        require!(
+            args.client_data_json == client_data("webauthn.get", &hash(&payload).to_bytes()),
+            AccountError::InvalidClientData
+        );
+        let auth = &args.assertion_authenticator_data;
+        require!(
+            auth[..32] == hash(RP_ID.as_bytes()).to_bytes(),
+            AccountError::InvalidRpId
+        );
+        require!(auth[32] == 0x05, AccountError::InvalidFlags);
+        let mut message = auth.to_vec();
+        message.extend_from_slice(&hash(&args.client_data_json).to_bytes());
+        verify_precompile(
+            &ctx.accounts.instructions.to_account_info(),
+            &ctx.accounts.passkey.public_key,
+            &message,
+        )?;
+        let user = &mut ctx.accounts.user;
+        user.next_sequence = user
+            .next_sequence
+            .checked_add(1)
+            .ok_or(AccountError::SequenceOverflow)?;
+        user.profile_reference = args.profile_reference;
+        emit!(ProfileUpdated {
+            user: user.key(),
+            profile_reference: user.profile_reference,
+            sequence: args.sequence
+        });
+        Ok(())
+    }
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct UpdateProfileArgs {
+    pub profile_reference: [u8; 32],
+    pub sequence: u64,
+    pub expires_at: i64,
+    pub assertion_authenticator_data: [u8; 37],
+    pub client_data_json: Vec<u8>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateProfile<'info> {
+    pub wallet: Signer<'info>,
+    #[account(mut, seeds = [b"user", user.user_id.as_ref()], bump = user.bump)]
+    pub user: Account<'info, UserAccount>,
+    #[account(seeds = [b"wallet", user.key().as_ref(), wallet.key().as_ref()],
+        bump = wallet_link.bump, has_one = user, has_one = wallet,
+        constraint = wallet_link.active @ AccountError::InactiveLink)]
+    pub wallet_link: Account<'info, WalletLink>,
+    #[account(seeds = [b"passkey", user.key().as_ref(), passkey.credential_hash.as_ref()],
+        bump = passkey.bump, has_one = user,
+        constraint = passkey.active @ AccountError::InactiveLink)]
+    pub passkey: Account<'info, PasskeyLink>,
+    /// CHECK: canonical instructions sysvar, read with checked Solana helpers.
+    #[account(address = solana_instructions_sysvar::ID)]
+    pub instructions: UncheckedAccount<'info>,
+}
+
+#[event]
+pub struct ProfileUpdated {
+    pub user: Pubkey,
+    pub profile_reference: [u8; 32],
+    pub sequence: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -251,6 +336,28 @@ fn base64url(bytes: &[u8]) -> String {
     encoded
 }
 
+pub fn profile_payload(
+    user: Pubkey,
+    wallet: Pubkey,
+    credential: &[u8; 32],
+    profile_reference: &[u8; 32],
+    revision: u64,
+    sequence: u64,
+    expires_at: i64,
+) -> Vec<u8> {
+    let mut payload = b"comfi:user-account:update-profile:v1\0".to_vec();
+    payload.extend_from_slice(ID.as_ref());
+    payload.extend_from_slice(&hash(CLUSTER_DOMAIN).to_bytes());
+    payload.extend_from_slice(user.as_ref());
+    payload.extend_from_slice(wallet.as_ref());
+    payload.extend_from_slice(credential);
+    payload.extend_from_slice(profile_reference);
+    payload.extend_from_slice(&revision.to_le_bytes());
+    payload.extend_from_slice(&sequence.to_le_bytes());
+    payload.extend_from_slice(&expires_at.to_le_bytes());
+    payload
+}
+
 pub fn client_data(kind: &str, challenge: &[u8; 32]) -> Vec<u8> {
     format!(
         "{{\"type\":\"{}\",\"challenge\":\"{}\",\"origin\":\"{}\",\"crossOrigin\":false}}",
@@ -320,11 +427,35 @@ pub enum AccountError {
     MissingPasskeyProof,
     #[msg("Passkey proof does not match this credential and assertion.")]
     InvalidPasskeyProof,
+    #[msg("Wallet or authenticator link is inactive.")]
+    InactiveLink,
+    #[msg("Approval sequence does not match the next account sequence.")]
+    InvalidSequence,
+    #[msg("Account sequence overflow.")]
+    SequenceOverflow,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_approval_binds_field_authority_and_sequence() {
+        let user = Pubkey::new_unique();
+        let wallet = Pubkey::new_unique();
+        let original = profile_payload(user, wallet, &[1; 32], &[2; 32], 0, 1, 100);
+        for changed in [
+            profile_payload(Pubkey::new_unique(), wallet, &[1; 32], &[2; 32], 0, 1, 100),
+            profile_payload(user, Pubkey::new_unique(), &[1; 32], &[2; 32], 0, 1, 100),
+            profile_payload(user, wallet, &[3; 32], &[2; 32], 0, 1, 100),
+            profile_payload(user, wallet, &[1; 32], &[3; 32], 0, 1, 100),
+            profile_payload(user, wallet, &[1; 32], &[2; 32], 1, 1, 100),
+            profile_payload(user, wallet, &[1; 32], &[2; 32], 0, 2, 100),
+            profile_payload(user, wallet, &[1; 32], &[2; 32], 0, 1, 101),
+        ] {
+            assert_ne!(original, changed);
+        }
+        assert!(original.starts_with(b"comfi:user-account:update-profile:v1\0"));
+    }
     #[test]
     fn canonical_client_data_uses_unpadded_challenge() {
         assert_eq!(
