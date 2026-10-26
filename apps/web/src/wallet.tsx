@@ -1,5 +1,6 @@
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Connection, Keypair, Transaction } from '@solana/web3.js'
+import { Connection, Keypair, Transaction, type BlockhashWithExpiryBlockHeight } from '@solana/web3.js'
+import { toBase58 } from './solana'
 import { confirmWalletTransaction } from './transaction-confirmation'
 import { checkRpcHealth, initialNetwork, networkEndpoints, validateNetwork, validateRpcEndpoint, type SolanaNetwork } from './network'
 import { getPhantomProvider, PhantomSession, type PhantomWindow } from './phantom-wallet'
@@ -69,7 +70,7 @@ export type WalletState = {
   walletLabel: string
   walletMode: WalletMode
   setWalletMode: (mode: WalletMode) => void
-  sendTransaction: (transaction: Transaction) => Promise<string>
+  sendTransaction: (transaction: Transaction, onSubmission?: (signature: string, latest: BlockhashWithExpiryBlockHeight) => void) => Promise<string>
   inBrowserWallet: InBrowserWalletState
   mockWallet: {
     publicKey: string
@@ -297,20 +298,14 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     setIsAirdropping(true)
     try {
       const pubkey = keypair.publicKey.toBase58()
-      const res = await fetch('http://localhost:5174/api/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'fund_wallet',
-          payload: { walletName: 'creator', solAmount: 0, usdcAmount: amount },
-        }),
-      }).catch(() => null)
-
-      if (res && res.ok) {
-        setStatusMessage(`Minted ${amount} test USDC on localnet!`)
-      } else {
-        setStatusMessage(`Test USDC faucet triggered for ${amount} USDC on ${pubkey.slice(0, 4)}…`)
-      }
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 10000) throw new Error('Faucet amount must be greater than 0 and at most 10000 USDC.')
+      const res = await fetch('/__comfi/mock-wallet/fund-wallet', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ walletAddress: pubkey, amount }),
+      })
+      const result = await res.json() as { wallet?: string; signature?: string; error?: string }
+      if (!res.ok || result.error || result.wallet !== pubkey || !result.signature) throw new Error(result.error ?? 'Test USDC funding was not confirmed for the selected wallet.')
+      setStatusMessage(`Minted ${amount} test USDC to ${pubkey.slice(0, 4)}…${pubkey.slice(-4)} on localnet.`)
       setTimeout(() => { void refreshBalances() }, 1000)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -376,7 +371,7 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     return walletMode === 'in-browser' ? keypair.publicKey.toBase58() : mockPublicKey
   }, [connected, walletMode, keypair, mockPublicKey, phantomPublicKey, backpackPublicKey])
 
-  const sendTransaction = useCallback(async (transaction: Transaction): Promise<string> => {
+  const sendTransaction = useCallback(async (transaction: Transaction, onSubmission?: (signature: string, latest: BlockhashWithExpiryBlockHeight) => void): Promise<string> => {
     if (!activePublicKey) throw new Error('Connect a wallet before signing a transaction.')
     if (walletMode === 'mock') throw new Error('Select ComFi Wallet, Phantom or Backpack to sign governance transactions.')
     const source = `${endpoint}:${activePublicKey}:${walletMode}`
@@ -394,7 +389,10 @@ export function MockWalletProvider({ children }: PropsWithChildren) {
     }
     if (source !== transactionSource.current) throw new Error('Wallet or network changed during transaction approval. Retry on the selected network.')
     if (!expectedMessage.equals(signed.serializeMessage())) throw new Error('Wallet changed the transaction message.')
-    const signature = await connection.sendRawTransaction(signed.serialize())
+    const serialized = signed.serialize()
+    if (!signed.signature) throw new Error('Wallet did not sign the transaction.')
+    onSubmission?.(toBase58(signed.signature), latest)
+    const signature = await connection.sendRawTransaction(serialized)
     await confirmWalletTransaction(connection, signature, latest)
     return signature
   }, [activePublicKey, endpoint, walletMode, keypair, phantomProvider, backpackProvider])

@@ -380,7 +380,6 @@ const ICONS = ['✦', '♣', '☻', '★', '◆', '✺']
 const ACCENTS = ['coral', 'lime', 'sky', 'violet']
 
 export function onChainPoolToPoolItem(pool: OnChainPool, currentWalletPubkey?: string): PoolItem {
-  const isCreator = currentWalletPubkey && pool.creator === currentWalletPubkey
   const icon = ICONS[pool.id % ICONS.length]
   const accent = ACCENTS[pool.id % ACCENTS.length]
   const formattedMinDeposit = formatUsdc(pool.minimumDepositAtomic)
@@ -390,7 +389,7 @@ export function onChainPoolToPoolItem(pool: OnChainPool, currentWalletPubkey?: s
     icon,
     accent,
     name: `Community Pool #${pool.id}`,
-    role: isCreator ? 'Creator' : 'Membership not loaded',
+    role: 'Membership not loaded',
     status: `${pool.metrics?.isClosing ? 'Closing' : pool.metrics?.isLocked ? 'Locked' : pool.metrics ? 'Active' : 'Status unavailable'} · Cycle ${pool.currentCycle.toString()}`,
     balance: pool.balanceUsdc,
     funds: `${pool.memberCount} of ${pool.memberCap}`,

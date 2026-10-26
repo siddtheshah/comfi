@@ -1040,3 +1040,5 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .account-explainer{font-size:12px;line-height:1.6;color:#617267;margin-top:20px}
 .account-error{color:#a22e25;font-size:13px;line-height:1.5}
 @media(max-width:800px){.user-account-grid{grid-template-columns:1fr}}
+
+.account-pool-setup fieldset{border:0;padding:0;margin:0;min-width:0}.account-pool-setup select,.account-pool-setup input{width:100%;min-width:0;border:1px solid #dce0d9;border-radius:7px;background:#fff;padding:10px;font:inherit}.pool-setup-address{display:block;overflow-wrap:anywhere;font-size:12px;margin:10px 0}.account-pool-setup .form-note{line-height:1.5}.account-pool-setup fieldset:disabled{opacity:.7}

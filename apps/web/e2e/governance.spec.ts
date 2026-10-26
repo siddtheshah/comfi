@@ -22,6 +22,7 @@ async function setup(page: Page, signing = false) {
     const { method, params, id }=route.request().postDataJSON()
     let result: unknown
     switch(method) {
+      case 'getMultipleAccounts':result={context:{slot:1},value:params[0].map((address:string)=>address===walletMember?account(member):null)};break
       case 'getHealth':result='ok';break
       case 'sendTransaction':broadcasts++;return route.fulfill({json:{jsonrpc:'2.0',id,error:{code:-32000,message:'Unexpected transaction broadcast'}}})
       case 'getAccountInfo':result={context:{slot:1},value:account(pool)};break

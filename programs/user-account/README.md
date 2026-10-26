@@ -109,9 +109,48 @@ The fixed test cluster domain is not an on-chain genesis check. **Never deploy t
 
 ## Follow-up scope
 
-Wallet/passkey enrollment/removal, revision increments on authority changes, SIWS/SAS service consent, real WebAuthn browser enrollment, withdrawal-ticket issuance/execution, and pool integration remain unimplemented. No existing pool authorization or payment paths have changed, and this slice does not claim ADR 0006 protection for those paths. The full ADRs remain Proposed. Production policy, broader enrollment support and lifecycle invariants must be implemented and verified before enabling production account operations.
+Pool setup discovers the selected base wallet's active on-chain UserAccount links,
+submits pool creation with that wallet, and verifies its resulting Member account.
+The wallet remains the contract's pool authority. A UserAccount link alone grants
+no membership; switching wallets requires a Member account for the new wallet.
+Pending deployment receipts contain public transaction details and survive reloads
+so an uncertain confirmation can be checked before another deployment is approved.
+
+Run `npm run localnet:accounts-and-pools` for an isolated validator with both
+programs and an initialized deployment mint. Start the app with the complete
+printed Vite command so its faucet uses the same temporary mint authority,
+create a UserAccount, mint test USDC from the wallet manager, then select
+**Start a pool**. The form shows the funding wallet, initial deposit, 1 USDC
+enrollment fee, and pool settings before approval. `npm run test:e2e:pool-setup`
+builds and deploys both programs and exercises account creation, funding, pool
+creation, payment accounting, reload, and wallet membership changes in a browser.
+It also runs the account bootstrap/profile negative cases. The runner uses a
+temporary fixture directory and stops its own validator afterward. Where needed,
+set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to your Chromium executable.
+
+Wallet/passkey enrollment/removal, revision increments on authority changes,
+SIWS/SAS service consent, real WebAuthn browser enrollment, withdrawal tickets,
+and UserAccount-based contract pool authorization remain follow-up work. This
+integration does not claim ADR 0006 protection for pool payment paths. The full
+ADRs remain Proposed. Production policy, broader enrollment support and lifecycle
+invariants must be implemented and verified before enabling production account
+operations.
 
 ## Verification
+
+Pool setup verified on 2026-10-26: 129 Node tests, 108 Rust tests, workspace
+typechecks and web build, 29 browser regressions, and the real localnet
+account-to-pool browser flow passed. Both program IDs matched source, Anchor
+configuration, deployment keypairs, and generated IDLs; both binaries deployed
+with the expected upgradeable loader. Tests verified wallet/vault payment
+balances, membership after reload and wallet switching, 17 rejected bootstrap
+cases, nine rejected profile cases, and ordinary-build bootstrap rejection.
+The ordinary ComFi binary also passed proposal voting, two real cycle rolls,
+spender-limit execution, and three rejection/rollback checks after moving the
+large ExecuteSpenderLimit accounts off the SBF stack. The final ordinary and
+testing builds had no stack-overflow diagnostic. All deployments were localnet
+only. Independent read-only review: APPROVED. Existing Anchor macro-configuration
+and Vite bundle-size warnings remain.
 
 UI extension verified locally on 2026-10-13: 121 Node tests, six Rust tests, workspace typechecks and web build, 27 browser regression tests, and one real localnet browser flow covering creation, reload, wrong-passcode rejection, profile update/readback, backup restore, and mismatched-backup-context rejection. The isolated workflow passed 17 rejected bootstrap cases and nine rejected profile update/replay cases. The ordinary build still rejects bootstrap atomically. Independent review approved the implementation. Chromium was selected with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` in this environment; the downloaded headless shell did not render text or accept typing reliably. Anchor's existing macro configuration warnings and Vite's bundle-size warning remain non-fatal.
 

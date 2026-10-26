@@ -3,6 +3,7 @@ import { defineConfig } from '@playwright/test'
 // Requires `npm run user-account:localnet` in a separate terminal.
 export default defineConfig({
   testDir: './apps/web/localnet-e2e',
+  testMatch: 'user-account.spec.ts',
   workers: 1,
   timeout: 60_000,
   use: {

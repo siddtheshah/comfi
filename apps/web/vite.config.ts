@@ -12,7 +12,7 @@ function mockWalletPoolApi(rpcUrl: string, programIdStr: string): Plugin {
   return {
     name: 'comfi-mock-wallet-pool-api',
     configureServer(server) {
-      const run = (path: string, operation: 'initialize' | 'next') => server.middlewares.use(path, (request, response, next) => {
+      const run = (path: string, operation: 'initialize' | 'next' | 'fund-wallet') => server.middlewares.use(path, (request, response, next) => {
         if (request.method !== 'POST') return next()
         let body = ''
         request.on('data', (chunk) => { body += chunk })
@@ -35,7 +35,14 @@ function mockWalletPoolApi(rpcUrl: string, programIdStr: string): Plugin {
                 if (params.voteThresholdBps || params.voteThreshold) envOverrides.COMFI_VOTE_THRESHOLD = String(params.voteThresholdBps ?? params.voteThreshold)
                 if (params.executionMode) envOverrides.COMFI_EXEC_MODE = String(params.executionMode)
               }
-              const child = spawn(process.execPath, [resolve(workspaceRoot, 'scripts/create-test-pool.mjs')], {
+              const args = [resolve(workspaceRoot, 'scripts/create-test-pool.mjs')]
+              if (operation === 'fund-wallet') {
+                const params = JSON.parse(body)
+                const address = new PublicKey(params.walletAddress).toBase58()
+                if (typeof params.amount !== 'number' || !Number.isFinite(params.amount) || params.amount <= 0 || params.amount > 10000 || !/^(0|[1-9]\d*)(\.\d{1,6})?$/.test(String(params.amount))) throw new Error('Invalid localnet faucet amount.')
+                args.push(`--wallet-address=${address}`, `--usdc-amount=${params.amount}`)
+              }
+              const child = spawn(process.execPath, args, {
                 cwd: workspaceRoot,
                 env: { ...process.env, COMFI_LOCALNET_RPC: rpcUrl, COMFI_POOL_MODE: operation, ...envOverrides },
               })
@@ -60,6 +67,7 @@ function mockWalletPoolApi(rpcUrl: string, programIdStr: string): Plugin {
           })()
         })
       })
+      run('/__comfi/mock-wallet/fund-wallet', 'fund-wallet')
       run('/__comfi/mock-wallet/initialize', 'initialize')
       run('/__comfi/mock-wallet/create-pool', 'next')
       server.middlewares.use('/__comfi/mock-wallet/pools', (request, response, next) => {

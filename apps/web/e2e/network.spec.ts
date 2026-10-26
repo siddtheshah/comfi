@@ -14,9 +14,10 @@ function pool(id: number) {
 test.beforeEach(async ({ page }) => {
   await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [] } }))
   await page.route('**/api.*net.solana.com/**', async route => {
-    const method = route.request().postDataJSON().method
-    const result = method === 'getHealth' ? 'ok' : method === 'getProgramAccounts' ? [pool(42)] : { value: { amount: '1000000' } }
-    await route.fulfill({ json: { result } })
+    const { method, params, id } = route.request().postDataJSON()
+    const result = method === 'getMultipleAccounts' ? { context: { slot: 1 }, value: params[0].map(() => null) }
+      : method === 'getHealth' ? 'ok' : method === 'getProgramAccounts' ? [pool(42)] : { value: { amount: '1000000' } }
+    await route.fulfill({ json: { jsonrpc: '2.0', id, result } })
   })
   await page.route('http://127.0.0.1:8899/', route => route.fulfill({ json: { result: 'ok' } }))
 })
@@ -64,6 +65,8 @@ test('late pool responses from the previous network do not replace the current p
   let started!: () => void
   const pending = new Promise<void>(resolve => { started = resolve })
   await page.route('https://api.devnet.solana.com/', async route => {
+    const { method, params, id } = route.request().postDataJSON()
+    if (method === 'getMultipleAccounts') return route.fulfill({ json: { jsonrpc: '2.0', id, result: { context: { slot: 1 }, value: params[0].map(() => null) } } })
     if (route.request().postDataJSON().method !== 'getProgramAccounts') return route.fulfill({ json: { result: 'ok' } })
     started()
     await new Promise<void>(resolve => { release = resolve })

@@ -96,7 +96,7 @@ test('local API and direct RPC use the same account decoder', async t => {
   const [rpc] = await fetchOnChainPools('http://localhost:8899', creator)
   assert.deepEqual(rpc, local)
   const item = onChainPoolToPoolItem(rpc, creator)
-  assert.equal(item.role, 'Creator')
+  assert.equal(item.role, 'Membership not loaded')
   assert.equal(item.status, 'Closing · Cycle 9')
   assert.equal(item.proposals, 5)
   assert.throws(() => onChainPoolToPoolItem({ ...rpc, minimumDepositAtomic: -1n }), /Invalid USDC atomic amount/)

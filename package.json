@@ -26,7 +26,9 @@
     "user-account:create": "node scripts/user-account/create-single-account.mjs",
     "user-account:test-production": "bash scripts/user-account/test-deployment.sh production",
     "user-account:localnet": "bash scripts/user-account/test-deployment.sh ui",
-    "test:e2e:user-account": "playwright test --config playwright.user-account.config.ts"
+    "test:e2e:user-account": "playwright test --config playwright.user-account.config.ts",
+    "test:e2e:pool-setup": "bash scripts/user-account/test-deployment.sh pool",
+    "localnet:accounts-and-pools": "bash scripts/user-account/test-deployment.sh pool-ui"
   },
   "engines": {
     "node": ">=22"

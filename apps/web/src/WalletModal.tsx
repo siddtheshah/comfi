@@ -15,6 +15,7 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
   const [showExport, setShowExport] = useState(false)
   const [importInput, setImportInput] = useState('')
   const [importError, setImportError] = useState<string | null>(null)
+  const [faucetError, setFaucetError] = useState('')
   const [confirmGenerate, setConfirmGenerate] = useState(false)
   const activeMode = useRef({ mode: walletMode, revision: 0 })
   if (activeMode.current.mode !== walletMode) {
@@ -176,10 +177,10 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
                 <button onClick={inBrowserWallet.clearMessages}>✕</button>
               </div>
             )}
-            {inBrowserWallet.errorMessage && (
-              <div className="wallet-alert error">
-                <span>{inBrowserWallet.errorMessage}</span>
-                <button onClick={inBrowserWallet.clearMessages}>✕</button>
+            {(faucetError || inBrowserWallet.errorMessage) && (
+              <div className="wallet-alert error" role="alert">
+                <span>{faucetError || inBrowserWallet.errorMessage}</span>
+                <button onClick={() => { setFaucetError(''); inBrowserWallet.clearMessages() }}>✕</button>
               </div>
             )}
 
@@ -201,7 +202,10 @@ export function WalletModal({ isOpen, onClose }: WalletModalProps) {
                 <button
                   type="button"
                   className="faucet-btn secondary-faucet"
-                  onClick={() => void inBrowserWallet.requestUsdcFaucet(100)}
+                  onClick={() => {
+                    setFaucetError('')
+                    void inBrowserWallet.requestUsdcFaucet(100).catch(error => setFaucetError(error instanceof Error ? error.message : String(error)))
+                  }}
                   disabled={inBrowserWallet.isAirdropping || !wallet.useLocalnetApi}
                 >
                   {inBrowserWallet.isAirdropping ? 'Minting…' : '💵 Mint 100 USDC'}

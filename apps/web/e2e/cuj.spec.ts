@@ -13,9 +13,10 @@ async function showTestPool(page: Page, options: Parameters<typeof poolBytes>[0]
 test.beforeEach(async ({ page }) => {
   await page.route('**/__comfi/mock-wallet/pools', route => route.fulfill({ json: { pools: [] } }))
   await page.route('http://127.0.0.1:8899/', route => {
-    const method = route.request().postDataJSON().method
-    const result = method === 'getHealth' ? 'ok' : method === 'getBalance' ? { value: 0 } : method === 'getProgramAccounts' ? [] : { value: [] }
-    return route.fulfill({ json: { result } })
+    const { method, params, id } = route.request().postDataJSON()
+    const result = method === 'getMultipleAccounts' ? { context: { slot: 1 }, value: params[0].map(() => null) }
+      : method === 'getHealth' ? 'ok' : method === 'getBalance' ? { value: 0 } : method === 'getProgramAccounts' ? [] : { value: [] }
+    return route.fulfill({ json: { jsonrpc: '2.0', id, result } })
   })
 })
 

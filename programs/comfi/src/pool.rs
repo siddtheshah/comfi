@@ -381,9 +381,9 @@ pub struct ExecuteSpenderLimit<'info> {
     #[account(mut)]
     pub executor: Signer<'info>,
     #[account(mut)]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
     #[account(mut, has_one = pool)]
-    pub proposal: Account<'info, Proposal>,
+    pub proposal: Box<Account<'info, Proposal>>,
     #[account(mut, has_one = pool)]
     pub spender_member: Account<'info, Member>,
     #[account(

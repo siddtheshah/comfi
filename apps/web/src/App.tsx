@@ -3,6 +3,9 @@ import type { PoolItem } from './data'
 import { fetchOnChainPools, onChainPoolToPoolItem, poolFromAccount, formatUsdc, quorumHealth } from './solana'
 import { useWallet } from './wallet'
 import { WalletModal } from './WalletModal'
+import { Connection, PublicKey } from '@solana/web3.js'
+import { PoolAccountSetup } from './PoolAccountSetup'
+import { walletMemberships } from './pool-setup'
 import { UserAccountPanel } from './UserAccountPanel'
 import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
@@ -37,6 +40,7 @@ export function App() {
   const [walletModalOpen, setWalletModalOpen] = useState(false)
   const [copilotOpen, setCopilotOpen] = useState(false)
   const [createPoolModalOpen, setCreatePoolModalOpen] = useState(false)
+  const [accountPoolOpen, setAccountPoolOpen] = useState(false)
   const [inviteModalOpen, setInviteModalOpen] = useState(false)
   const [inviteAcceptOpen, setInviteAcceptOpen] = useState(false)
   const [inviteAcceptToken, setInviteAcceptToken] = useState('')
@@ -46,6 +50,15 @@ export function App() {
     const isCurrent = () => activeSource.current === poolSource && request === poolRequest.current
     setLoadingPools(true)
     setPoolError(null)
+    const applyMemberships = async (items: PoolItem[]) => {
+      for (const item of items) item.role = 'No pool membership'
+      if (!wallet.publicKey || items.length === 0) return
+      const members = await walletMemberships(new Connection(wallet.endpoint, 'confirmed'), new PublicKey(wallet.programId), items.map(item => item.chain.address), new PublicKey(wallet.publicKey))
+      for (const item of items) {
+        const member = members.get(item.chain.address)
+        item.role = member ? `${member.role} · ${member.status}` : 'No pool membership'
+      }
+    }
     try {
       if (wallet.useLocalnetApi) {
         // First try the Vite local dev endpoint
@@ -54,6 +67,7 @@ export function App() {
           const data = await response.json() as { pools: { address: string; data: string; vaultBalanceAtomic: string }[] }
           if (!Array.isArray(data.pools)) throw new Error('Invalid localnet pools response')
           const items = data.pools.map(p => onChainPoolToPoolItem(poolFromAccount(p.address, p.data, p.vaultBalanceAtomic), wallet.publicKey))
+          await applyMemberships(items)
           items.sort((a, b) => a.chain.id - b.chain.id)
           if (!isCurrent()) return []
           setPoolSnapshot({ source: poolSource, pools: items })
@@ -78,6 +92,7 @@ export function App() {
       if (rpc && programId) {
         const raw = await fetchOnChainPools(rpc, programId)
         const items = raw.map(p => onChainPoolToPoolItem(p, wallet.publicKey))
+        await applyMemberships(items)
         if (!isCurrent()) return []
         setPoolSnapshot({ source: poolSource, pools: items })
         if (selectAddress) {
@@ -141,6 +156,7 @@ export function App() {
   const closeNotice = () => setNotice('')
 
   const createPool = async (customParams?: CreatePoolModalParams) => {
+    if (wallet.walletMode !== 'mock') { setAccountPoolOpen(true); return }
     if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
     if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setCreatingPool(true)
@@ -193,6 +209,7 @@ export function App() {
   }
 
   const onStartPool = () => {
+    if (wallet.walletMode !== 'mock') { setAccountPoolOpen(true); return }
     if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
     if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
     setCreatePoolModalOpen(true)
@@ -305,6 +322,12 @@ export function App() {
         walletAddress={wallet.publicKey}
 
       />
+      {accountPoolOpen && <PoolAccountSetup key={`${poolSource}:${wallet.walletMode}`} onClose={() => setAccountPoolOpen(false)} onAccount={() => { setAccountPoolOpen(false); setView('account') }} onCreated={address => {
+        setAccountPoolOpen(false)
+        setView('overview')
+        setNotice(`Pool deployed and membership verified: ${address.slice(0, 4)}…${address.slice(-4)}.`)
+        void loadOnChainPools(address).catch(error => setPoolError(error instanceof Error ? error.message : String(error)))
+      }} />}
       <CreatePoolModal
         isOpen={createPoolModalOpen}
         onClose={() => setCreatePoolModalOpen(false)}

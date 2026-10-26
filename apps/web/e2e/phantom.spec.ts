@@ -44,7 +44,7 @@ test('Phantom connection tracks the extension account and disconnect; mock actio
   await page.getByRole('button', { name: 'Connect Phantom', exact: true }).click()
   await page.getByRole('button', { name: 'Done', exact: true }).click()
   await page.getByTestId('start-pool').click()
-  await expect(page.getByRole('status')).toContainText('Select and connect the mock wallet')
+  await expect(page.getByRole('dialog', { name: 'Set up your pool' })).toBeVisible()
   expect(mockRequests).toBe(0)
 })
 

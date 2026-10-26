@@ -19,9 +19,9 @@ const argumentValue = (name) => {
 };
 const rpcUrl = (argumentValue('rpc-url') ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899').trim();
 const programId = new PublicKey('3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP');
-const localnetDirectory = resolve(root, '.localnet');
+const localnetDirectory = process.env.COMFI_LOCALNET_STATE_DIR ? resolve(process.env.COMFI_LOCALNET_STATE_DIR) : resolve(root, '.localnet');
 const statePath = resolve(localnetDirectory, 'state.json');
-const publicOutputPath = resolve(root, 'localnet.json');
+const publicOutputPath = process.env.COMFI_LOCALNET_STATE_DIR ? resolve(localnetDirectory, 'localnet.json') : resolve(root, 'localnet.json');
 const usdcDecimals = 6;
 const oneUsdc = 10n ** BigInt(usdcDecimals);
 const operation = argumentValue('operation') ?? process.env.COMFI_POOL_MODE ?? 'bootstrap';
@@ -34,6 +34,14 @@ if (!validOperations.includes(operation)) {
 if (!/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(?:\/|$)/.test(rpcUrl)) {
   throw new Error(`Refusing to run outside localnet: ${rpcUrl}`);
 }
+
+// A public recipient is sufficient for a local faucet; wallet secrets stay in the browser.
+const faucetRecipient = argumentValue('wallet-address');
+const faucetAmount = argumentValue('usdc-amount') ?? '100';
+if (faucetRecipient && operation !== 'fund-wallet') throw new Error('A faucet recipient is only allowed for fund-wallet.');
+if (faucetRecipient && (!/^(0|[1-9]\d*)(\.\d{1,6})?$/.test(faucetAmount) || Number(faucetAmount) <= 0 || Number(faucetAmount) > 10000)) throw new Error('Faucet amount must be greater than 0 and at most 10000 USDC with up to six decimals.');
+const recipient = faucetRecipient ? new PublicKey(faucetRecipient) : undefined;
+
 const connection = new Connection(rpcUrl, 'confirmed');
 
 async function waitForConnection(conn, maxAttempts = 30, delayMs = 1000) {
@@ -105,6 +113,15 @@ if (operation === 'initialize') {
   const output = { operation: 'initialize', rpcUrl, programId: programId.toBase58(), mint: mint.toBase58(), treasury: treasury.address.toBase58(), global: global.toBase58(), demoCreator: creator.publicKey.toBase58(), generatedAt: new Date().toISOString() };
   await writeFile(publicOutputPath, JSON.stringify(output, null, 2), 'utf8');
   console.log(JSON.stringify(output, null, 2));
+  process.exit(0);
+}
+
+if (operation === 'fund-wallet' && recipient) {
+  const [whole, fraction = ''] = faucetAmount.split('.');
+  const amount = BigInt(whole) * oneUsdc + BigInt(fraction.padEnd(6, '0'));
+  const recipientUsdc = await getOrCreateAssociatedTokenAccount(connection, administrator, mint, recipient);
+  const signature = await mintTo(connection, administrator, mint, recipientUsdc.address, administrator, amount);
+  console.log(JSON.stringify({ wallet: recipient.toBase58(), mint: mint.toBase58(), amount: amount.toString(), signature }));
   process.exit(0);
 }
 

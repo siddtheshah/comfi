@@ -128,3 +128,11 @@ Run `npm run user-account:localnet`, then in another terminal start the app with
 with test SOL, and create your account with a passcode. See the
 [UserAccount guide](programs/user-account/README.md#create-and-update-from-the-browser)
 for setup, storage, authorization, and live browser tests.
+
+To use a linked UserAccount during pool setup, run
+`npm run localnet:accounts-and-pools` and start the app with the complete Vite
+command it prints, including the temporary fixture directory. Create your UserAccount, fund the same base wallet with test
+USDC in the wallet manager, and select **Start a pool**. The selected wallet
+signs and pays the deposit, enrollment fee, SOL fees, and rent. Membership is
+read from its confirmed Member account. Run `npm run test:e2e:pool-setup` for
+an isolated build, deployment of both programs, and the live browser workflow.
