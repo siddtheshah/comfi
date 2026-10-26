@@ -82,6 +82,6 @@
   - Verified 2026-10-13: 121 Node tests, 6 Rust tests, workspace typechecks/build, 27 browser regression tests, and a real localnet browser create/reload/update/backup-restore flow. Isolated deployment verified creation and profile updates, 17 rejected bootstrap cases, 9 rejected update/replay cases, and ordinary-build bootstrap rejection. Independent review: APPROVED. Production WebAuthn and pool authorization remain follow-up work.
 
 ### Account integration follow-ups from the initial UI audit
-- [ ] [Claimed: Codex-Pool-Account | Deadline: 2026-10-21T19:42:22Z] Integrate the selected wallet/UserAccount with pool deployment and derive membership from on-chain wallet links and Member accounts; account bootstrap alone does not establish pool authorization.
+- [ ] [Claimed: Codex-Pool-Account-Rescue | Deadline: 2026-10-26T09:29:23Z] Integrate the selected wallet/UserAccount with pool deployment and derive membership from on-chain wallet links and Member accounts; account bootstrap alone does not establish pool authorization.
 - [ ] Correct the browser USDC faucet recipient and error reporting, filter balances by the deployment mint, and preserve stored wallet identity on corruption.
 - [ ] Require live account-to-pool deployment coverage in addition to mocked browser endpoint tests.
