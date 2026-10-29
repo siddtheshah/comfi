@@ -1,403 +1,242 @@
-# ComFi Security Vulnerability Report: Pool & Governance Attack Vectors
-
-This document details critical and high-severity security vulnerabilities and attack vectors identified in [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) (and related deployer logic). These issues enable malicious or minority participants to gain control of, drain, or use pool funds without legitimate, majority proposal authorization.
-
----
-
-## Executive Summary
-
-| Issue ID | Severity | Category | Description | Status |
-|---|---|---|---|---|
-| **COMFI-SEC-01** | **Critical** | Governance / Access Control | Missing strict majority floor on `ApproveWithdrawal` proposals enables single-voter fund drainage | **Resolved** |
-| **COMFI-SEC-02** | **Critical** | Governance / State Mutation | `ConfigurationModification` lacks majority floor and bypasses pending-state cycle staging | **Resolved** |
-| **COMFI-SEC-03** | **High** | Accounting / Liquidation | "Ghost Unfunded" exploit on pool closure: depositing 1 unit flips `is_funded` to false, evading spend attribution and draining senior Tier-1 refunds | **Resolved** |
-| **COMFI-SEC-04** | **High** | Governance / State Drift | Inactive members retain perpetual funded voting status across infinite future cycles | **Resolved** |
-| **COMFI-SEC-05** | **Medium** | Accounting / Governance DoS | Asymmetric `funded_member_count` updates permit counter inflation, diluting shared spend benefit deltas to zero and bricking voting quorums | **Resolved** |
-| **COMFI-SEC-06** | **Medium** | Spend Attribution Bypass | Unfunded members can request shared vendor spends without having benefits attributed to their closure basis | **Resolved** |
-| **COMFI-SEC-07** | **Medium** | Math / Account Lockout | `deposit` underflow in `total_non_conferred_capital` permanently locks member accounts from re-funding | **Resolved** |
-| **COMFI-SEC-08** | **Critical** | Governance / Voter Manipulation | Mid-cycle `join_pool` immediately confers funded status and increments voter count, enabling single-voter proposal hijacking | **Resolved** |
-| **COMFI-SEC-10** | **High** | Governance / Scalability | Variable-space vector member storage and omission attack during cycle rollover replaced with singly-linked list registry | **Resolved** |
-
----
-
-## Detailed Findings
-
----
-
-### COMFI-SEC-01: Missing Strict Majority Floor on `ApproveWithdrawal` Enables Single-Voter Fund Drainage
-
-- **Severity:** Critical
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L723-L748), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1427-L1455), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1572-L1705)
-
-#### Description
-In `Proposal::required_votes_for_pool`, strict majority enforcement (`threshold_bps.max(5001)`) was added for `SetSpenderLimit` and `ClosePool` (under `VULN-02`), but **omitted** for `ProposalAction::ApproveWithdrawal`:
-
-```rust
-pub fn required_votes_for_pool(&self, pool: &Pool) -> Result<u32> {
-    require!(
-        self.vote_threshold >= 100 && self.vote_threshold <= 10_000,
-        ComfiError::InvalidVoteThreshold
-    );
-    let mut threshold_bps = self.vote_threshold as u64;
-    if matches!(
-        self.action,
-        ProposalAction::SetSpenderLimit { .. } | ProposalAction::ClosePool
-    ) {
-        threshold_bps = threshold_bps.max(5001);
-    }
-    let active_members = (pool.funded_member_count as u64).max(1);
-    let required = active_members
-        .checked_mul(threshold_bps)
-        .ok_or(ComfiError::MathOverflow)?
-        .checked_add(9999)
-        .ok_or(ComfiError::MathOverflow)?
-        / 10_000;
-    Ok((required as u32).max(1))
-}
-```
-
-#### Attack Scenario
-1. `validate_create_pool` allows any `vote_threshold` from 100 bps (1%) to 10,000 bps (100%).
-2. In a pool with 10 funded members and `vote_threshold = 1000` (10%), or a 2-member pool with `vote_threshold = 5000` (50%):
-   $$\text{required} = \frac{10 \times 1000 + 9999}{10,000} = 1 \text{ vote}$$
-3. An attacker becomes a funded member, calls `request_withdrawal` for an amount up to the pool's entire `total_conferred_capital`, specifying their own wallet's token account as `recipient`, with `requires_proposal = true`.
-4. The attacker submits an `ApproveWithdrawal` proposal and casts **1 YES vote**.
-5. Since `yes_votes (1) >= required (1)` and `yes_votes > no_votes (0)`, `is_passed_for_pool` evaluates to `true`.
-6. If `withdrawal_execution_mode == ExecutionMode::ThresholdMet`, `finalize_proposal` can be called immediately.
-7. Because `timelock_seconds` can be set to 0 at pool deployment, the proposal immediately becomes executable.
-8. The attacker calls `spend` within the same transaction or block, completely draining the pool vault without majority authorization or allowing other members time to cast NO votes.
-
-#### Remediation
-Include `ProposalAction::ApproveWithdrawal` in the strict majority floor in `required_votes_for_pool`:
-```rust
-if matches!(
-    self.action,
-    ProposalAction::SetSpenderLimit { .. }
-        | ProposalAction::ClosePool
-        | ProposalAction::ApproveWithdrawal { .. }
-) {
-    threshold_bps = threshold_bps.max(5001);
-}
-```
-
-#### Resolution
-- Enforced strict majority floor (>= 5001 bps) in `validate_create_pool`, guaranteeing that all pools start with a strong consensus floor.
-- Included `ProposalAction::ApproveWithdrawal` in `Proposal::required_votes_for_pool` with `threshold_bps.max(5001)`.
-- Verified in unit test `test_comfi_sec_01_approve_withdrawal_strict_majority_floor` that sub-majority approvals fail in both 2-member and 10-member pools.
-
----
-
-### COMFI-SEC-02: `ConfigurationModification` Lacks Majority Floor and Staging Mechanism
-
-- **Severity:** Critical
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L729-L734), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1501-L1569)
-
-#### Description
-1. `ProposalAction::ConfigurationModification` is also omitted from the `threshold_bps.max(5001)` check, allowing minority factions to pass structural governance amendments.
-2. In `execute_configuration_modification`, the handler mutates live pool configuration fields immediately instead of storing them into `pending_*` fields and waiting for `apply_pending_config` during `roll_cycle`:
-
-```rust
-pool.vote_threshold = vote_threshold;
-pool.cycle_duration_seconds = cycle_duration_seconds;
-pool.member_obligation_amount = member_obligation_amount;
-pool.spender_limit_deadline_cycles = spender_limit_deadline_cycles;
-pool.withdrawal_deadline_cycles = withdrawal_deadline_cycles;
-pool.config_modification_deadline_cycles = config_modification_deadline_cycles;
-pool.spender_limit_execution_mode = spender_limit_execution_mode;
-pool.withdrawal_execution_mode = withdrawal_execution_mode;
-pool.config_modification_execution_mode = config_modification_execution_mode;
-pool.has_pending_config = false;
-```
-
-#### Attack Scenario
-1. A minority attacker submits a `ConfigurationModification` proposal to lower `vote_threshold` to 100 bps (1%), change `withdrawal_execution_mode` to `ThresholdMet`, and set `cycle_duration_seconds` to 1.
-2. The proposal passes with minority support and is executed.
-3. The pool's active parameters are immediately modified without any cycle rollover buffer.
-4. The attacker proceeds to execute `ApproveWithdrawal` under the newly weakened threshold, extracting unauthorized funds.
-
-#### Remediation
-1. Enforce strict majority floor (`threshold_bps.max(5001)`) for `ConfigurationModification`.
-2. Stage configuration changes onto `pool.pending_*` fields and set `pool.has_pending_config = true`:
-```rust
-pool.pending_vote_threshold = vote_threshold;
-pool.pending_cycle_duration_seconds = cycle_duration_seconds;
-pool.pending_member_obligation_amount = member_obligation_amount;
-pool.pending_spender_limit_deadline_cycles = spender_limit_deadline_cycles;
-pool.pending_withdrawal_deadline_cycles = withdrawal_deadline_cycles;
-pool.pending_config_modification_deadline_cycles = config_modification_deadline_cycles;
-pool.pending_spender_limit_execution_mode = spender_limit_execution_mode;
-pool.pending_withdrawal_execution_mode = withdrawal_execution_mode;
-pool.pending_config_modification_execution_mode = config_modification_execution_mode;
-pool.has_pending_config = true;
-```
-
-#### Resolution
-- Included `ProposalAction::ConfigurationModification` in `Proposal::required_votes_for_pool` with `threshold_bps.max(5001)`.
-- Added strict parameter validation (`vote_threshold >= 5001 && vote_threshold <= 10_000`) in both `create_proposal` and `execute_configuration_modification` so any attempt to lower the threshold below the 50% majority floor fails validation immediately.
-- Updated `execute_configuration_modification` to stage all modified configuration fields into `pool.pending_*` and set `pool.has_pending_config = true`, deferring live state mutations until `apply_pending_config()` is executed at cycle boundary.
-- Verified in unit tests `test_comfi_sec_02_configuration_modification_majority_floor_and_staging`, `test_configuration_modification_below_majority_threshold_rejected`, and `test_configuration_modification_deferred_until_cycle_roll`.
-
----
-
-### COMFI-SEC-03: Senior Priority Fund Drainage on Pool Closure via `is_funded` Manipulation ("Ghost Unfunded")
-
-- **Severity:** High
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L626-L632), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L653-L667), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L967-L975), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1707-L1765)
-
-#### Description
-1. `Member::non_conferred_amount()` returns `self.total_contributions` whenever `!self.is_funded`:
-   ```rust
-   pub fn non_conferred_amount(&self) -> u64 {
-       if !self.is_funded {
-           self.total_contributions
-       } else {
-           self.surplus_amount
-       }
-   }
-   ```
-2. In `claim_closure_refund`, `non_conferred_amount()` is treated as Senior Priority 1 capital and is refunded in full without deducting `cumulative_benefit_received`. Only Priority 2 (conferred capital) deducts `cumulative_benefit_received`.
-3. In `deposit`, if a member in a new cycle (`member.funded_cycle < pool.current_cycle`) deposits any amount less than `pool.member_obligation_amount` (e.g. 1 unit), the program sets `member.is_funded = false`:
-   ```rust
-   } else if member.funded_cycle < pool.current_cycle {
-       if amount >= current_obligation { ... }
-       else {
-           (0, false, 0u64, amount as i128)
-       }
-   }
-   ...
-   member.is_funded = becomes_funded; // false!
-   ```
-4. In `sync_benefit`:
-   ```rust
-   if self.is_funded_for_pool(pool) {
-       let accrued = (diff / BENEFIT_SCALE) as u64;
-       self.cumulative_benefit_received = self.cumulative_benefit_received
-           .checked_add(accrued)?;
-   }
-   self.last_benefit_index = pool.cumulative_benefit_per_member;
-   ```
-   If `!self.is_funded`, `sync_benefit` drops all un-synced spend benefits from `cumulative_benefit_received`.
-
-#### Attack Scenario
-1. Member A deposits 100 USDC in cycle 0 and is funded.
-2. The pool executes 100 USDC of shared spends (e.g., to an off-chain vendor), increasing `pool.cumulative_benefit_per_member`. Member A enjoyed 50 USDC of benefit.
-3. In cycle 1, Member A intentionally deposits 1 micro-USDC. Because $1 < \text{obligation}$, `member.is_funded` flips to `false`.
-4. The pool later closes via `ClosePool`.
-5. Member A calls `claim_closure_refund`:
-   - `sync_benefit` sees `!is_funded`, so Member A's `cumulative_benefit_received` is never debited.
-   - `non_conferred_amount()` evaluates to `self.total_contributions` (101 USDC).
-   - Member A receives 101 USDC in Senior Priority 1 refund.
-6. Honest members who remained funded receive nothing because the vault deficit caused by the 100 USDC spend is shifted entirely onto Tier-2 conferred capital.
-
-#### Remediation
-- Track non-conferred capital accurately by recording un-conferred deposits explicitly rather than equating `!is_funded` with full lifetime contributions.
-- Deduct `cumulative_benefit_received` and `total_withdrawn` against total contributions across all closure tiers.
-- In `sync_benefit`, do not discard spend benefit accruals for members who were funded during the cycle when the spend occurred.
-
-#### Resolution
-- Enforced that member funded status (`is_funded`) only flips on cycle rollover (`roll_cycle`), never during mid-cycle deposits.
-- Mid-cycle deposits accumulate strictly into `surplus_amount` and `total_non_conferred_capital`, preventing an attacker from manipulating `is_funded` or evading spend deductions on pool closure.
-- Added `test_funded_status_only_flips_on_cycle_rollover_not_deposit` verifying that depositing mid-cycle does not flip funded status.
-
----
-
-### COMFI-SEC-04: Inactive Members Retain Perpetual Funded Voting Status
-
-- **Severity:** High
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L622-L624), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1192-L1216)
-
-#### Description
-`Member::is_funded_for_pool` is implemented as:
-```rust
-pub fn is_funded_for_pool(&self, pool: &Pool) -> bool {
-    self.is_funded && self.deposited_total >= pool.member_obligation_amount
-}
-```
-`roll_cycle` advances `pool.current_cycle` but does not mutate `Member` state.
-Because `is_funded_for_pool` does not check `self.funded_cycle == pool.current_cycle`, any member who paid `member_obligation_amount` once in cycle 0 remains permanently recognized as a "funded voting member" for cycles 1, 2, ..., 100+ without making any recurring contributions.
-
-#### Attack Scenario
-- An early participant deposits for cycle 0 only.
-- In subsequent cycles, active members deposit new capital into the pool.
-- The inactive participant retains full voting rights to approve proposals, allocate spender limits, and vote on withdrawals involving funds they did not help contribute.
-
-#### Remediation
-Enforce that a member is only funded for the active cycle or prepaid surplus cycles:
-```rust
-pub fn is_funded_for_pool(&self, pool: &Pool) -> bool {
-    self.is_funded
-        && self.funded_cycle == pool.current_cycle
-        && self.deposited_total >= pool.member_obligation_amount
-}
-```
-
-#### Resolution
-- Implemented `is_funded_for_pool` requiring `self.funded_cycle == pool.current_cycle`.
-- Implemented `process_cycle_members` in `roll_cycle` to transition all member accounts: members with `surplus_amount >= obligation` automatically have their surplus transferred to `total_conferred_capital`, `is_funded = true`, and their `funded_cycle` advanced. Members without sufficient surplus are transitioned to `is_funded = false`, immediately stripping voting rights in the new cycle.
-- Enforced `ensure_cycle_current` gatekeeper across all pool operations, blocking operations if cycle time has elapsed until `roll_cycle` is called.
-- Verified in unit test `test_inactive_members_lose_voting_status_in_new_cycle` and `test_roll_cycle_updates_members_and_moves_surplus`.
-
----
-
-### COMFI-SEC-05: Benefit Dilution & Governance DoS via `funded_member_count` Inflation
-
-- **Severity:** Medium
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1000-L1005), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1681-L1695)
-
-#### Description
-In `deposit`, `pool.funded_member_count` is incremented when `!was_funded && becomes_funded`:
-```rust
-if !was_funded && becomes_funded {
-    pool.funded_member_count = pool
-        .funded_member_count
-        .checked_add(1)
-        .ok_or(ComfiError::MathOverflow)?;
-}
-```
-However, `pool.funded_member_count` is **never decremented** when `was_funded && !becomes_funded`.
-When a funded member deposits less than the cycle obligation in a new cycle, `was_funded` is true and `becomes_funded` is false (`funded_member_count` unchanged). When they deposit again to meet the obligation, `!was_funded && becomes_funded` triggers again, incrementing `funded_member_count`.
-
-#### Impact
-1. **Governance DoS:** A member can repeatedly cycle their status to inflate `funded_member_count` arbitrarily high. Because `required_votes_for_pool` multiplies by `pool.funded_member_count`, the required vote count can exceed total physical members, making all future proposals impossible to pass.
-2. **Dilution of Benefit Accounting:** In `spend`:
-   ```rust
-   let benefit_delta = (request.amount as u128)
-       .checked_mul(BENEFIT_SCALE)?
-       .checked_div(active_funded_members)?;
-   ```
-   An inflated `funded_member_count` causes integer division to truncate `benefit_delta` to 0. Members accumulate 0 `cumulative_benefit_received`, evading spend deductions on pool closure.
-
-#### Remediation
-Decrement `funded_member_count` when a member transitions from funded to unfunded:
-```rust
-if was_funded && !becomes_funded {
-    pool.funded_member_count = pool.funded_member_count.saturating_sub(1);
-} else if !was_funded && becomes_funded {
-    pool.funded_member_count = pool.funded_member_count.checked_add(1)?;
-}
-```
-
-#### Resolution
-- Updated `deposit` to decrement `funded_member_count` with `saturating_sub(1)` when a member transitions from funded to unfunded, preventing counter inflation.
-- In `roll_cycle`'s `process_cycle_members`, `pool.funded_member_count` is updated directly to the count of members that are funded for the new cycle.
-
----
-
-### COMFI-SEC-06: Unfunded Member Shared Spend Attribution Bypass
-
-- **Severity:** Medium
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1297-L1300), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1583-L1586), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1696)
-
-#### Description
-- `request_withdrawal` only requires `ctx.accounts.member.can_request_spend()`, which is true for all members regardless of funded status.
-- In `spend`, `requester_member` is also only checked with `can_request_spend()`.
-- When a spend is executed to an external vendor (`recipient_usdc.owner != requester.wallet`), line 1696 executes:
-  ```rust
-  requester.sync_benefit(&ctx.accounts.pool)?;
-  ```
-- Because `requester` is unfunded, `sync_benefit` ignores the benefit delta (`self.is_funded_for_pool` is false).
-- The unfunded requester routes pool funds to their external destination, yet never accumulates any benefit deduction against their own account.
-
-#### Remediation
-Require `requester_member.is_funded_for_pool(&ctx.accounts.pool)` in `request_withdrawal` and `spend`, or ensure that vendor spend benefits are debited regardless of current funded status.
-
-#### Resolution
-- Added `require!(ctx.accounts.member.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded)` in `request_withdrawal`.
-- Added `require!(ctx.accounts.requester_member.is_funded_for_pool(&ctx.accounts.pool), ComfiError::MemberNotFunded)` in `spend`.
-- Verified in unit test `test_comfi_sec_06_unfunded_member_cannot_request_or_spend`.
-
----
-
-### COMFI-SEC-07: Math Underflow Lockout in `deposit`
-
-- **Severity:** Medium
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L958-L966), [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L1012-L1016)
-
-#### Description
-In `deposit`, if a member is unfunded and deposits an amount that satisfies `next_total >= current_obligation`, the handler computes:
-```rust
-(excess, true, current_obligation, (amount as i128) - (current_obligation as i128))
-```
-If `amount < current_obligation`, `delta_non_conferred` is negative.
-Line 1014 attempts to subtract this negative delta from `pool.total_non_conferred_capital`:
-```rust
-let neg = (-delta_non_conferred) as u64;
-pool.total_non_conferred_capital = pool
-    .total_non_conferred_capital
-    .checked_sub(neg)
-    .ok_or(ComfiError::MathOverflow)?;
-```
-If `total_non_conferred_capital < neg`, the transaction aborts with `ComfiError::MathOverflow`. Once in this state, the member is permanently prevented from depositing and cannot restore funded status.
-
-#### Remediation
-Recalculate `delta_non_conferred` based on the actual non-conferred capital currently attributed to the member, clamped to `pool.total_non_conferred_capital`.
-
-#### Resolution
-- In `deposit`, clamped negative non-conferred delta subtractions to `pool.total_non_conferred_capital` via `saturating_sub(neg.min(pool.total_non_conferred_capital))`, completely eliminating `MathOverflow` deposit lockouts.
-
----
-
-### COMFI-SEC-08: Mid-Cycle Join Governance Exploitation via Instant Funded Status Conferral
-
-- **Severity:** Critical
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L894-L969)
-
-#### Description
-Prior to remediation, [`join_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L894-L969) immediately set `member.is_funded = true`, advanced `member.funded_cycle = pool.current_cycle`, incremented `pool.funded_member_count`, and transferred capital into `pool.total_conferred_capital` upon deposit of `args.initial_deposit >= pool.member_obligation_amount`. 
-
-Conversely, existing members depositing via `deposit` mid-cycle had their funds directed to `surplus_amount` and `total_non_conferred_capital`, leaving their funded voting status deferred until `roll_cycle`.
-
-#### Attack Scenario
-1. At cycle boundary rollover, existing members who had not prepaid advance surplus become unfunded (`is_funded = false`, `funded_cycle < pool.current_cycle`).
-2. Even after existing members deposit their recurring obligation for the new cycle, they remain unfunded throughout the active cycle and are blocked from voting by `is_funded_for_pool`.
-3. An attacker joins the pool mid-cycle via `join_pool` with `initial_deposit >= obligation`.
-4. `join_pool` immediately conferred `is_funded = true` and incremented `pool.funded_member_count = 1`.
-5. Because the attacker was the sole funded member, the required vote threshold (`required_votes_for_pool`) was 1 vote.
-6. The attacker submitted and unilaterally passed withdrawal proposals or spender limits in the same cycle, extracting funds contributed by existing members without those members having any ability to vote.
-
-#### Remediation
-Ensure consistency across all mid-cycle deposits: joining a pool mid-cycle and depositing initial capital must not confer immediate funded voting status or confer capital for the active cycle. All initial deposits must accumulate as non-conferred surplus (`surplus_amount` and `total_non_conferred_capital`) and only transition to funded voting status at the cycle rollover boundary via `roll_cycle`'s `process_cycle_members`.
-
-#### Resolution
-- Updated [`pool_handlers::join_pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs#L894-L969) so that `member.is_funded = false`, `member.funded_cycle = 0`, and `pool.funded_member_count` is not incremented.
-- Routed all initial deposits into `pool.total_non_conferred_capital` and `member.surplus_amount`, with overfunding checks capping deposits at $2 \times \text{obligation}$.
-- On cycle rollover (`roll_cycle`), `process_cycle_members` consumes the member's surplus, transfers it to `total_conferred_capital`, sets `is_funded = true`, sets `funded_cycle = pool.current_cycle`, and updates `funded_member_count` for the new cycle.
-- Added unit tests `test_join_pool_status_deferred_to_next_cycle` and `test_join_pool_overfunding_cap_enforced` verifying that mid-cycle joiners have no active cycle voting power and transition to funded status on next cycle roll.
-
----
-
-### COMFI-SEC-10: Arbitrary Member Omission During Cycle Rollover via Caller-Supplied Accounts
-
-- **Severity:** High
-- **Affected File:** [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs), [`programs/comfi/src/deployer.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs)
-
-#### Description
-Prior to remediation, [`roll_cycle`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) delegated member surplus rollover and funded status transition to `process_cycle_members`, which iterated exclusively over caller-supplied `ctx.remaining_accounts`. Because the pool did not track its registered members on-chain, a malicious cranker or caller could:
-1. Omit legitimate pool members from `remaining_accounts`, preventing their surplus from converting into conferred capital and leaving them unfunded and unable to vote.
-2. Supply only select colluding members, resulting in an artificially depressed `pool.funded_member_count`. This reduced the required vote threshold (`required_votes_for_pool`) for proposals in the new cycle, allowing attackers to seize control of governance.
-
-#### Remediation
-Implement an on-chain singly-linked list member registry rather than storing a dynamically growing `Vec<Pubkey>` on the `Pool` account:
-1. **State**:
-   - `Pool`: Replace `members: Vec<Pubkey>` with `pub head_member: Option<Pubkey>` ($O(1)$ constant space `8 + 426`) and `pub rollover_cursor: Option<Pubkey>`.
-   - `Member`: Add `pub next_member: Option<Pubkey>` to the `Member` PDA.
-2. **Join Pool ($O(1)$ Prepend)**:
-   - `member.next_member = pool.head_member;`
-   - `pool.head_member = Some(member.key());`
-   - Prepend new member as the head in $O(1)$ constant time; rent is paid naturally by the joining member.
-3. **Chunked Pointer-Chain Cycle Rollover**:
-   - In `roll_cycle` and `process_cycle_members`, verify the pointer chain: `accounts[i + 1].key() == accounts[i].next_member`.
-   - Support chunked rollover across transactions using `pool.rollover_cursor`.
-   - Gate pool operations during incomplete rollovers (`pool.ensure_cycle_current_at` blocks if `pool.rollover_cursor.is_some()`).
-
-#### Resolution
-- Replaced `members: Vec<Pubkey>` on [`Pool`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) with `pub head_member: Option<Pubkey>` and `pub rollover_cursor: Option<Pubkey>`, reducing `Pool` to a fixed constant space (`8 + 426`).
-- Added `pub next_member: Option<Pubkey>` to [`Member`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) (`Member::SPACE = 8 + 258`).
-- Updated [`programs/comfi/src/deployer.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/deployer.rs) `create_pool` to initialize `pool.head_member = Some(creator_member)` and `creator_member.next_member = None`.
-- Updated [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) `join_pool` to prepend each new member to the head (`member.next_member = pool.head_member; pool.head_member = Some(member.key())`).
-- Refactored `process_cycle_members` and `roll_cycle` in [`programs/comfi/src/pool.rs`](file:///c:/Users/sidds/Documents/comfi/programs/comfi/src/pool.rs) to verify the pointer chain across remaining accounts, supporting chunked rollover via `pool.rollover_cursor` and ensuring proposals only resolve when `pool.rollover_cursor.is_none()`.
-- Added cycle current gatekeeping in `Pool::ensure_cycle_current_at` requiring `self.rollover_cursor.is_none()`, preventing governance manipulation or fund actions mid-rollover.
-- Updated `scripts/crank-keeper.mjs` and `apps/testing/src/backend/localnet.ts` to traverse the member linked list pointer chain starting at `rolloverCursor ?? headMember`.
-- Verified pointer chain validation and chunked multi-transaction rollover in unit tests `test_process_cycle_members_verifies_pool_members_list` and `test_chunked_cycle_rollover_with_linked_list`.
+# ComFi and UserAccount backend audit — open issues
 
+Audited 2026-10-29 on **`next-release`**, code baseline **`d7968cc9fc12107e91a5d33c314e83ac69d7dd44`**. The audit claim commit changes only `TASKLIST.md`. This report supersedes the discarded audit of `work`; all retained findings were rechecked against this branch.
 
+Scope: both Anchor programs (`programs/comfi` and `programs/user-account`), their account constraints and authorization, ComFi accounting/governance/member lifecycle, sponsor quotes, account/profile clients, encrypted authenticator storage, wallet signing/confirmation, account-to-pool creation and recovery, and rollover clients.
+
+**Current authority boundary:** UserAccount creation/profile updates are an explicitly localnet-only software-authenticator slice. Ordinary builds reject both operations. The browser checks active UserAccount wallet links before pool setup, but ComFi still authorizes pool operations through wallet-bound Member PDAs. Real WebAuthn, wallet/passkey lifecycle, withdrawal tickets, production cluster/origin policy, and UserAccount-based pool authority are documented follow-up work, not implemented security guarantees. Those deliberate scope limits are not counted as vulnerabilities here.
+
+This tracker contains **open findings only**. Previously resolved entries have been removed. COMFI-SEC-03 and COMFI-SEC-10 are retained with current, narrower reproductions; their previous “Resolved” labels were not sufficient evidence of correctness. This pass records findings and does not change application code. Historical web findings about mandatory mock-wallet deployment/signing have also been removed from `apps/web/ISSUES.md`: browser-wallet localnet setup now exists.
+
+## Findings
+
+| ID | Severity | Finding | Evidence |
+|---|---|---|---|
+| COMFI-AUD-01 | High | Ending-cycle votes are evaluated against the next cycle's electorate | Native program-helper reproduction |
+| COMFI-AUD-02 | High | Rollover loses or retroactively charges shared-spend benefits | Native program-helper reproductions |
+| COMFI-AUD-03 | High | Closure payouts depend on claim order and can consume other members' senior reserves | Settlement-formula reproduction |
+| COMFI-AUD-04 | High | Eviction can execute after closure and pay an already-refunded member again | Handler/state-transition trace |
+| COMFI-SEC-10 | High | Departures break the member registry within and across rollover chunks | Two native program-helper reproductions |
+| COMFI-AUD-05 | High | Zero mature voters disables the voting maturation requirement | Eligibility/threshold trace |
+| COMFI-AUD-06 | High | Evicting a nonvoter incorrectly reduces the eligible electorate | Native threshold reproduction |
+| COMFI-AUD-07 | High | First initializer can seize the singleton global configuration | Account-constraint/initialization trace; deployment-window condition |
+| COMFI-AUD-14 | High | Pre-funding a candidate PDA blocks governance admission | Handler trace + local-validator System Program test |
+| COMFI-AUD-08 | High | Keeper and console do not correctly crank the current rollover protocol | Executed keeper failure and client-code trace |
+| COMFI-SEC-03 | Medium | Cycle-zero creator capital can still be reclassified as non-conferred | Native program-helper reproduction; impact conditions below |
+| COMFI-AUD-09 | Medium | Partial creator deposits are omitted from consumable surplus | Native helper reproduction using initialization/deposit accounting |
+| COMFI-AUD-10 | Medium | Sponsor service has no working on-chain quote format/signing adapter | Wire-format comparison |
+| COMFI-AUD-11 | Medium | Sponsored alias changes bypass inactive-member restrictions | Direct/sponsored handler comparison |
+| COMFI-AUD-12 | Medium | Wallet load silently replaces invalid stored key material | Executed wallet/storage reproduction |
+| COMFI-AUD-13 | Medium | Wallet reports arbitrary SPL-token balances as USDC | Executed wallet/RPC reproduction |
+| UA-AUD-01 | Medium | A disclosed creation ID can be reserved by another authenticator/wallet | Actual UserAccount local-validator reproduction |
+| UA-AUD-02 | Medium | Successful pool recovery is blocked by subsequent legitimate Member/Pool changes | Executed recovery-helper reproduction |
+
+### COMFI-AUD-01 — Ending-cycle approvals use the next cycle's voting denominator
+
+**Locations:** [`roll_cycle`](programs/comfi/src/pool.rs#L1830), [`process_cycle_proposals`](programs/comfi/src/pool.rs#L1593), [`required_votes_for_pool`](programs/comfi/src/pool.rs#L1166), [`finalize_proposal`](programs/comfi/src/pool.rs#L2222).
+
+`roll_cycle` increments the cycle, applies pending configuration, and replaces funded/mature-voter counts before resolving proposals for the ending cycle. Proposals retain historical YES/NO totals, but store no electorate snapshot. Manual finalization also uses the live pool counts.
+
+**Reproduction:** Start with five registered members, three funded/mature voters, and an `ApproveWithdrawal` proposal with one YES, zero NO, threshold 5001 bps, and a deadline in the ending cycle. In the next cycle, one old voter remains funded, two old voters stop funding, and two previously unfunded members fund for their first cycle. The new funded quorum is **3/5**, so the pool stays unlocked; the new mature-voter count is **1**. The real helper sequence, including `evaluate_lock_and_auto_close`, changes the proposal from failing (1 YES versus 2 required) to `Executable` (1 required). The historical YES can belong to a member who is no longer eligible. The subsequent timelock delays this incorrect authorization but does not revalidate it.
+
+**Impact:** A minority of the voting electorate can authorize withdrawals; changed cohorts can also invalidate previously sufficient approvals. Proposals spanning several cycles accumulate votes from different cohorts without a consistent denominator.
+
+**Required fix/check:** Define and snapshot the eligible electorate/threshold at the intended voting boundary, bind receipts and multi-cycle eligibility to that policy, and use it in both finalization paths. Add regression tests with changing mature cohorts, satisfied funding quorum, opposing votes, multi-cycle deadlines, and chunked rollovers.
+
+### COMFI-AUD-02 — Benefits are neither settled nor rebased when funded status changes
+
+**Locations:** [`sync_benefit`](programs/comfi/src/pool.rs#L1095), [`process_cycle_members`](programs/comfi/src/pool.rs#L1661), [`roll_cycle`](programs/comfi/src/pool.rs#L1847), [`claim_closure_refund`](programs/comfi/src/pool.rs#L2530).
+
+Rollover overwrites `is_funded`/`funded_cycle` without settling the ending cycle's benefit index. `sync_benefit` decides whether to debit the entire outstanding index using only the member's **current** funded status, and always advances `last_benefit_index`.
+
+**Reproductions against the actual helpers:** (1) A member has 50 units of unsettled benefits while funded in cycle 1. Rollover into cycle 2 without surplus makes them unfunded; the next sync records zero benefit and permanently discards the 50-unit index delta. (2) A previously unfunded member with a stale index becomes funded on rollover; their next sync debits 50 units of shared spending from the period when they were not funded.
+
+**Impact:** Former participants evade closure deductions, while newly funded participants subsidize earlier spending. Leaving members also miss benefits accruing between `leave_pool` and their rollover removal.
+
+**Required fix/check:** Settle against the ending cycle's actual funded cohort before changing the cycle/status; establish a fresh index baseline when funding begins or ends. Preserve fractional accruals. Test funded-to-unfunded, paused, leaving, unfunded-to-funded, and repeated-cycle transitions without intermediate votes/deposits.
+
+### COMFI-AUD-03 — Closure does not reserve outstanding senior claims or normalize junior liabilities
+
+**Locations:** [`spend`](programs/comfi/src/pool.rs#L2469), [`enter_closure`](programs/comfi/src/pool.rs#L918), [`claim_closure_refund`](programs/comfi/src/pool.rs#L2546).
+
+An authorized personal withdrawal can exceed its requester's lifetime conferred contribution. The requester's junior claim then saturates at zero, while other junior claims remain unchanged. Consequently, `total_conferred_capital` (remaining capital after spends) can be smaller than the sum of outstanding nonnegative junior claims. Closure treats that remaining-capital value as the denominator, and caps a junior payout only by the current vault after **that claimant's** senior payout; it does not reserve other members' outstanding senior capital.
+
+**Reproduction using the handler's settlement formulas:** A/B/C each contributed 100 conferred units. An authorized personal withdrawal pays A 150, leaving A's junior claim at zero. D has 100 unconsumed senior units. Closure records vault 250, non-conferred basis 100, conferred basis 150. Claims ordered B/C/D pay **100/100/50**; ordered D/B/C pay **100/100/50** to D/B/C instead. D loses half their protected principal solely by claiming last. No external vault loss or stale benefit index is needed.
+
+**Required fix/check:** Keep aggregate refundable junior liabilities consistent with per-member saturating net claims, or constrain personal withdrawals so that this divergence cannot arise. Always reserve all outstanding senior/escrow liabilities before a junior transfer. Test all claim permutations, personal benefits exceeding contribution, departed members, and senior escrows; verify both equal junior haircuts and senior preservation through actual token transfers.
+
+### COMFI-AUD-04 — Post-closure eviction bypasses refund idempotency
+
+**Locations:** [`execute_evict_member`](programs/comfi/src/pool.rs#L2663), [`ensure_cycle_current`](programs/comfi/src/pool.rs#L892), [`claim_closure_refund`](programs/comfi/src/pool.rs#L2607), [`non_conferred_amount`](programs/comfi/src/pool.rs#L1064).
+
+Unlike other execution handlers, eviction does not call `ensure_not_closing`. Closure clears `is_locked`, and the cycle gate permits operations on closing pools. A closure claim sets `closure_claimed` and clears surplus, but leaves `status == Active` and `total_contributions` unchanged. Eviction checks neither `closure_claimed` nor closure state.
+
+**Trigger:** Have an already-executable eviction for an active, never-funded member with a partial deposit (e.g. 50 units, `funded_cycle == 0`). Execute pool closure, let that member claim their 50-unit senior refund, then execute the eviction. `non_conferred_amount()` returns the same 50-unit lifetime contribution again. Eviction transfers it a second time, or credits a new escrow redeemable through `claim_eviction_refund`. The second payment comes from other members if the vault can cover it.
+
+**Required fix/check:** Reject eviction once closure begins and enforce shared settlement/idempotency across refund paths. Test closure-claim/eviction/escrow permutations, including withheld destination accounts and permissionless execution of previously approved proposals.
+
+### COMFI-SEC-10 — Member departures corrupt or block linked-list rollover
+
+**Locations:** [`process_cycle_members`](programs/comfi/src/pool.rs#L1680), especially [previous-member repair](programs/comfi/src/pool.rs#L1740) and [member serialization](programs/comfi/src/pool.rs#L1800).
+
+The omission checks added previously do not make departure processing correct.
+
+1. **Across chunks:** For `A(active) -> B(leaving) -> C(active)`, process `[A]`, then `[B,C]`. `prev_retained_idx` resets to `None` in the second call. Removing B therefore sets `pool.head_member = C` instead of repairing `A.next_member`. Native execution reproduces an orphaned A, stale `A -> B` link, and `member_count == 2` despite only C being reachable. Future rollover excludes A from funded/voting counts.
+2. **Within one chunk:** For `[A(active),B(leaving)]`, serializing A through `&mut *account_info.try_borrow_mut_data()?` advances the `&mut [u8]` stored inside its `AccountInfo` borrow. The later attempt to deserialize A to repair its link reads the remaining tail rather than its discriminator. The native helper returns `AccountDiscriminatorMismatch`; the rollover transaction fails. Several existing tests inspect original backing buffers or manually simulate unlinking, which misses this reuse error.
+
+**Required fix/check:** Persist/validate the retained predecessor across chunk boundaries, distinguish the real head from a chunk head, and serialize through a local slice cursor without advancing the stored account-data view. Test every split of a chain with head/interior/tail and consecutive departures, then run a second complete rollover and compare reachability with member/funded/voting counts.
+
+### COMFI-AUD-05 — A zero-sized mature electorate grants immature members governance rights
+
+**Locations:** [proposal eligibility](programs/comfi/src/pool.rs#L2076), [vote eligibility](programs/comfi/src/pool.rs#L2179), [threshold fallback](programs/comfi/src/pool.rs#L1188).
+
+Both maturation checks are conditional on `pool.voting_member_count > 0`. When the count is zero, all currently funded members can propose/vote immediately, and threshold calculation falls back to `funded_member_count`.
+
+**Trigger:** Existing mature voters stop funding while a sufficient cohort of admitted newcomers funds for its first cycle. For example, two newly funded members in a three-member pool satisfy the default funding quorum but have zero mature voters. Despite `voting_maturation_cycles == 2`, they can vote on queued proposals and create new governance proposals. The founder's explicit initialization exception does not require this general fallback.
+
+**Required fix/check:** Enforce individual maturation regardless of the aggregate count. Keep any bootstrap exception explicit and limited; retain a deliberate recovery/closure path when no eligible electorate remains. Test zero mature voters with a healthy funding quorum, and a sole eligible founder separately.
+
+### COMFI-AUD-06 — Eviction always subtracts a voter even when its target is ineligible
+
+**Locations:** [`required_votes_for_pool`](programs/comfi/src/pool.rs#L1198), [`create_proposal`](programs/comfi/src/pool.rs#L2041), [`vote`](programs/comfi/src/pool.rs#L2157).
+
+The eviction denominator always subtracts one from the mature/funded electorate. The proposal carries only a target key; there is no verified target eligibility snapshot proving that this target was included in the denominator.
+
+**Reproduction:** A healthy three-member pool has two mature funded voters and one unfunded/nonvoting target. With the 6667-bps eviction floor, the real threshold helper requires **one** YES rather than two: it evaluates `ceil((2 - 1) * 6667 / 10000)`. A single eligible voter can remove the third member without the advertised supermajority.
+
+**Required fix/check:** Verify the target account and subtract it only when it belongs to the snapshotted eligible electorate. Reject nonexistent/foreign targets at proposal creation. Test funded mature, funded immature, unfunded, leaving, and invalid targets.
+
+### COMFI-AUD-07 — Singleton global initialization trusts the first arbitrary signer
+
+**Locations:** [`InitializeGlobalConfig`](programs/comfi/src/deployer.rs#L90), [`initialize_global_config`](programs/comfi/src/deployer.rs#L161).
+
+The singleton `["global"]` PDA is initialized by any signer, who becomes its permanent administrator and supplies the mint, treasury, and quote authority. Nothing ties initialization to the intended deployer or program upgrade authority. Later updates correctly require the stored administrator, so an attacker winning initialization cannot be displaced through normal instructions.
+
+**Impact condition:** This is a deployment/bootstrap vulnerability while GlobalConfig is absent, not a claim that an already-initialized deployment has been compromised. An attacker monitoring a fresh deployment can initialize first, choose a counterfeit “USDC” mint and their treasury, and control pool-creation pausing and quote authority. The setup script's fetch-before-initialize is not an authorization boundary.
+
+**Required fix/check:** Authenticate the intended bootstrap authority on-chain, for example against verified program upgrade-authority state or an explicit configured initializer. Test an unauthorized first initializer and the legitimate initializer, and verify deployed global addresses/authorities before accepting user funds.
+
+### COMFI-AUD-14 — Pre-funding a candidate member PDA blocks admission
+
+**Location:** [`execute_admit_member`](programs/comfi/src/pool.rs#L2833).
+
+Admission accepts an empty-data candidate PDA and unconditionally invokes System Program `create_account`. A third party can derive the public candidate address from the admission proposal and transfer enough SOL to make it an existing rent-exempt empty system account before execution. `data_is_empty()` still passes, but ordinary `create_account` rejects a destination with a nonzero lamport balance as already in use. Re-proposing the same wallet derives the same blocked PDA. The program has no recovery/allocation path for it; default gated admission also prevents falling back to direct join.
+
+**Local validation:** On an isolated Solana 3.1.10 validator, pre-funding an empty system account with its 890,880-lamport rent exemption left its data empty, and a subsequent ordinary `create_account` simulation failed with `already in use` (System Program error 0). This verifies the System Program precondition used by the trace; the ComFi admission CPI itself was not deployed/executed.
+
+**Impact:** An outsider can veto a governance-approved admission at low cost without any member vote or signature.
+
+**Required fix/check:** Use initialization that handles pre-funded, empty system-owned PDAs: top up rent, then allocate and assign with PDA seeds, validating owner/data carefully. Test admission with zero balance, a rent-exempt pre-funded balance, an already initialized member, and an invalid owner. Validate the complete admission CPI on a local validator.
+
+### COMFI-AUD-08 — Shipped rollover clients are incompatible with current account fields and chunking
+
+**Locations:** [`processPoolCycleRoll`](scripts/crank-keeper.mjs#L60), [keeper proposal selection](scripts/crank-keeper.mjs#L105), [console production rollover](apps/testing/src/backend/localnet.ts#L688).
+
+The keeper reads `pool.cycleDuration` and `pool.startTime`; current Pool fields are `cycleDurationSeconds` and `cycleStartedAt`. Calling the real exported keeper function with the current account shape throws `Cannot read properties of undefined (reading 'toString')` before any crank. The existing keeper test supplies the obsolete fields, so it passes.
+
+There are additional failures after correcting those names: the next boundary must be `cycleStartedAt + cycleDurationSeconds`, not an original-start formula; a pending rollover cursor needs immediate continuation; the console's production `roll_cycle` passes unsorted `.member.all()` results including departed accounts instead of traversing the pointer chain; both clients submit all accounts in one transaction rather than bounded chunks; and proposal selection compares YES counts directly with basis points such as 5001 instead of calculating the required vote count. Threshold-met proposals are consequently omitted until deadline even when they have passed.
+
+**Impact:** The provided automation cannot maintain current pools. Once a cycle expires, program gates block deposits, spending, voting, joining, and other active operations until someone supplies a correct crank manually.
+
+**Required fix/check:** Share a client implementation for current fields, pointer-chain traversal, bounded chunk submission/resumption, and the actual governance threshold rules. Test real decoded account shapes, at least two cycles, shuffled RPC results, departed accounts, a pool exceeding one transaction's account budget, and early threshold resolution.
+
+### COMFI-SEC-03 — `funded_cycle == 0` still confuses previously conferred capital with unfunded deposits
+
+**Locations:** [`non_conferred_amount`](programs/comfi/src/pool.rs#L1064), [creator initialization](programs/comfi/src/deployer.rs#L195), [`process_cycle_members`](programs/comfi/src/pool.rs#L1793), [`leave_pool`](programs/comfi/src/pool.rs#L2629).
+
+The former ghost-unfunded finding is narrower but not fully resolved. A creator funded at cycle 0 also has `funded_cycle == 0`. After their first unfunded/paused rollover, `non_conferred_amount()` returns **all lifetime contributions**, including capital already conferred in cycle 0; this is the same sentinel used for never-funded members.
+
+**Native reproduction:** Initialize a cycle-zero creator with 100 conferred units and no surplus, then process the first unfunded rollover. The member reports a 100-unit senior claim while `pool.total_non_conferred_capital == 0`. Both leave and closure use this classification, and senior refunds do not deduct prior benefits.
+
+**Impact qualification:** Current default gated admission and cycle delays constrain obtaining other members' deposits before that first rollover; this reproduction alone does not establish an unconditional drain of a default multi-member pool. It does establish inconsistent senior accounting, possible refund lockout after fees/spending, and an over-prioritized claim in pools whose admission/history permits other capital to be present.
+
+**Required fix/check:** Track actual never-conferred principal explicitly; do not infer it from funded status or a valid cycle number. Test the cycle-zero creator after funding loss, pause, sponsored charges, deposits, leave, eviction, and closure.
+
+### COMFI-AUD-09 — Below-obligation creator deposits disappear from usable surplus
+
+**Locations:** [`create_pool`](programs/comfi/src/deployer.rs#L195), [creator member fields](programs/comfi/src/deployer.rs#L310), [`deposit`](programs/comfi/src/pool.rs#L1441), [rollover funding](programs/comfi/src/pool.rs#L1765).
+
+The below-obligation creation branch records the initial deposit as pool non-conferred capital but initializes member surplus to zero. Subsequent deposits add only new amounts to surplus, while rollover funds members exclusively from surplus.
+
+**Reproduction:** With obligation 100 and a minimum permitting an initial deposit of 40, create the pool and deposit another 60. Lifetime deposited/contribution totals are 100, and the pool reserves 100, but usable surplus is only 60. The native rollover helper leaves the creator unfunded. They must supply an extra 40 to become funded, and the original 40 remains outside normal surplus accounting.
+
+**Required fix/check:** Initialize the unfunded creator's surplus with the entire initial deposit, consistently with admitted/direct-join deposits. Test partial initial deposits plus exact top-ups through actual handlers and reconcile aggregate non-conferred capital after rollover and closure.
+
+### COMFI-AUD-10 — Sponsor quotes cannot currently be consumed by the program
+
+**Locations:** [`SponsorQuoteService.sign`](services/sponsor-api/src/service.ts#L105), [`canonicalQuote`](services/sponsor-api/src/canonical.ts#L15), [`SponsorQuote`](programs/comfi/src/pool.rs#L1300), [`verify_preceding_ed25519_quote`](programs/comfi/src/pool.rs#L95).
+
+The service signs sorted JSON strings and ships only an HMAC signer. The program verifies an Ed25519 instruction over Borsh `SponsorQuote` bytes. The schemas also disagree: UUID/string IDs versus `[u8;32]`, ISO expiry versus Unix seconds, string action versus enum, and extra service fields. A simple switch from HMAC to signing the same JSON with Ed25519 still fails the program's byte-for-byte check. There is no production adapter or transaction-level integration test in this checkout. The service README acknowledges this outstanding gap.
+
+Separately, the advertised `actionDigest` and program binding are absent from the on-chain quote, so the verifier cannot enforce the advertised binding to alias/encryption arguments and program domain after an adapter is added.
+
+**Required fix/check:** Define a shared, versioned signing payload with action-argument/domain binding, canonical binary encoding, Ed25519 signing, explicit ID/expiry conversion, and transaction construction. Test one API-issued quote through the real instruction, plus altered arguments, wrong authority/program, expiry, and replay rejection. Keep enrollment/capacity quotes documented as unsupported until corresponding program instructions exist.
+
+### COMFI-AUD-11 — Sponsored alias changes remain available to departed members
+
+**Locations:** [`set_alias`](programs/comfi/src/pool.rs#L1465), [`run_sponsored_set_alias`](programs/comfi/src/pool.rs#L1494), [`RunSponsoredSetAlias`](programs/comfi/src/pool.rs#L242).
+
+The direct alias handler requires `MemberStatus::Active`. Its sponsored equivalent checks quote signature, member/pool binding, expiry, and allowance, but never checks member status. Member PDAs survive departure/eviction, so a Leaving/Exited/Evicted wallet can still mutate its alias and charge pool conferred funds using a valid unused quote. An off-chain policy check does not revoke a quote issued immediately before the status change. This path requires a valid Ed25519 quote; it is not a signature bypass.
+
+**Required fix/check:** Apply the same active-member restriction in both account/handler paths and explicitly define funded eligibility for pool-paid actions. Test a valid quote issued before leave/eviction and submitted afterward; assert no alias, receipt, allowance, or vault mutation on rejection.
+
+### COMFI-AUD-12 — Invalid persisted wallet data is overwritten instead of preserved for recovery
+
+**Location:** [`getOrCreateInBrowserKeypair`](apps/web/src/in-browser-wallet.ts#L193).
+
+If stored key import throws for any reason, loading the wallet silently generates another key and writes over the same storage slot. Startup neither surfaces an error nor retains the original bytes. A format/decoder regression can therefore replace an existing funded wallet's only locally stored recovery material and present the user with a different identity.
+
+**Executed reproduction:** Supply storage whose existing value fails import and count writes. A call to `getOrCreateInBrowserKeypair` completes successfully and performs one write replacing the existing value.
+
+**Required fix/check:** Generate only when no key exists. Preserve invalid material, fail visibly, and require an explicit recovery/replacement action. Test malformed/legacy values and decoder failure with zero storage writes; keep valid-key and missing-key cases separate.
+
+### COMFI-AUD-13 — The displayed USDC balance sums all SPL mints
+
+**Locations:** [`refreshBalances`](apps/web/src/wallet.tsx#L224), [`fetchUsdcBalance`](apps/web/src/in-browser-wallet.ts#L258).
+
+`refreshBalances` omits the optional mint argument. The helper consequently queries every account owned by the SPL Token program, sums token UI amounts across unrelated mints/decimals, and formats the result as dollars. A wallet with no USDC can appear to hold USDC simply by receiving another token.
+
+**Executed reproduction:** Mock a successful token-account response containing 999 units of an unrelated SPL token. The actual helper sends a program-wide filter and returns `$999.00`.
+
+**Required fix/check:** Resolve and require the configured cluster's USDC mint, filter by that mint, and sum its atomic units using its validated decimals. Test mixed mints, multiple USDC accounts, no USDC, and malformed RPC responses.
+
+### UA-AUD-01 — Bootstrap identifiers are not bound to their intended initial authority
+
+**Locations:** [`CreateUser`](programs/user-account/src/lib.rs#L199), [`creation_payload`](programs/user-account/src/lib.rs#L293), [persist-before-submit/retry](apps/web/src/UserAccountPanel.tsx#L49), [`fetchUserAccount`](apps/web/src/user-account.ts#L164).
+
+The UserAccount PDA is derived only from a caller-selected `user_id`. The wallet and authenticator must authorize the contents of their own request, but there is no ownership proof for the identifier itself. A different wallet/authenticator can submit an independently valid bootstrap using the same disclosed ID before the intended creation is included.
+
+**Actual local-validator reproduction:** Prepare a victim credential and bootstrap transaction, then generate another credential with the same `userId` and a different P-256 key/wallet. Both requests derive the same UserAccount but different links. Submit the second request first: it succeeds, sets sequence 1, and links the second wallet/key. The original creation then fails because the UserAccount is already initialized; the victim client's readback fails because its wallet/passkey links are missing. No victim wallet or authenticator signature was used by the second request. The UI persists the original encrypted credential before submission and offers retries using that same ID, so ordinary retry/load cannot recover from the collision.
+
+**Impact/conditions:** This is a targeted denial of signup/recovery once a pending creation ID becomes observable (for example to the submitting RPC or transaction processor). It is **not** a takeover of an already-created identity or a claim of a production passkey exploit; current account operations are test-build-only. Random 256-bit IDs prevent blind guessing, but do not prevent this disclosed-ID race.
+
+**Required fix/check:** Bind initial identifier allocation to an authenticated immutable creation authority/commitment while keeping later wallet rotations independent of that immutable seed. Provide an explicit, safe conflict recovery path that preserves existing encrypted material. Test two independently signed requests for the same disclosed ID and verify the intended authority cannot be displaced by transaction ordering.
+
+### UA-AUD-02 — Recovery verifies mutable live state as though it were the original creation receipt
+
+**Locations:** [`checkPoolSetup`](apps/web/src/pool-setup.ts#L121), [`verifyPoolSetup`](apps/web/src/pool-setup.ts#L107), [pending deployment UI](apps/web/src/PoolAccountSetup.tsx#L42).
+
+A saved deployment with a confirmed successful signature is reconciled by comparing the current Member deposit total/status and current Pool configuration with the original form. These fields can legitimately change after creation. There is no historical transaction verification or reconciliation path distinguishing a valid subsequent change from a failed/mismatched deployment.
+
+**Executed reproduction against the actual helper:** A matching confirmed setup first returns `verified`. Increase the Member's `deposited_total` by one legitimate deposit, leaving creator, pool, wallet link, ownership, and signature unchanged. Checking the same successful receipt now throws `Pool or Member state does not match the approved setup`. The same happens after valid governance configuration changes or a later departure. This matters after an uncertain confirmation/reload while the pool is used through another client.
+
+**Impact:** `PoolAccountSetup` retains the pending record on this error and disables new form input. Every retry re-enters the same failing verification; neither successful recovery nor a deliberate new deployment is available through the form.
+
+**Required fix/check:** Reconcile the recorded successful transaction and its immutable creation identity/arguments separately from current mutable state. Continue to reject substituted accounts and preserve genuinely pending receipts. Test successful creation followed by deposit, governance modification, pause/exit, reload, and recovery, plus a conflicting creator taking the same pool ID.
+
+## Verification and limits
+
+- Baseline: `next-release` at `d7968cc9fc12107e91a5d33c314e83ac69d7dd44`; native probes compile against this checkout's programs and locked dependency versions. The discarded `work` audit commit was removed from local and remote `work` before this review.
+- `npm test`: **129 passed** (5 standalone UserAccount client + 9 console + 111 web + 4 sponsor), with no failed/skipped tests. The console now validates arguments without loading an IDL first; the missing-IDL test failure from the discarded branch audit does not apply here.
+- `npm run typecheck`: **passed** across all workspaces.
+- `cargo test --locked`: **108 passed** (102 ComFi, 6 UserAccount), no failures/ignored tests. Existing Anchor macro-configuration and unused-variable warnings remain.
+- Eight additional native probes against the actual ComFi helpers confirmed the two registry failures, both benefit-transition errors, changed-electorate approval with a healthy funded quorum, wrong eviction threshold, cycle-zero reclassification, and partial-creator funding gap. The probes assert observed defects, not successful fixes. They do not execute token-transfer handlers or replace validator integration tests.
+- JavaScript probes executed current keeper, maturity eligibility, wallet storage/balance, and pending-deployment recovery code. A separate settlement-formula model demonstrated claim-order dependence; that formula model is not itself a token-transfer test.
+- `npm run user-account:test-workflow`: **passed** on an isolated Solana 3.1.10 validator after Anchor 1.1.2 build/deploy. It verified sponsored bootstrap and browser-client profile updates, **17 rejected bootstrap cases** and **9 rejected profile cases**, including invalid signatures, substituted wallet/payer/arguments, missing proofs/signatures, expiry, sequence, and replay. No signature or sequence bypass was found in this supported mock policy.
+- Additional local-validator probes executed the creation-ID race in UA-AUD-01 and the System Program pre-funding rejection used in COMFI-AUD-14. The latter validates the System Program precondition, not the full ComFi admission CPI.
+- `npm run test:e2e:pool-setup`: **passed**. Both programs built/deployed; the real browser flow created an account, funded its selected wallet, deployed a pool, verified payments, recovered membership after reload, and checked wallet switching. The runner also passed its account/profile negative cases and ordinary ComFi proposal/voting, two real cycle rolls, spender-limit execution, and three rejection/rollback checks.
+- Web production build: **passed**, with existing bundle-size/dynamic-import warnings.
+- `npm run user-account:test-production`: **passed**. The ordinary UserAccount binary built/deployed and rejected bootstrap with `LocalnetOnly`; all three prospective accounts remained absent. Both handlers also contain the explicit compile-feature gate.
+- Independent read-only report review: **APPROVED**. The reviewer independently passed all 129 Node tests and type checks, reran all eight native probes and the JavaScript probes, and checked source/evidence consistency. Approval covers this documentation, not remediation of the open vulnerabilities.
+- Current maximum serialized account sizes: Pool **542**, Member **333**, UserAccount **102**, WalletLink **74**, PasskeyLink **107** bytes. No allocation-size defect is claimed.
+- No Devnet/Mainnet transaction/deployment or external notification was performed. Production deployments, live authorities, migrations, real WebAuthn ceremonies, and future authority lifecycle/withdrawal-ticket code are outside this verification. All validator tests use temporary local test funds/signers.

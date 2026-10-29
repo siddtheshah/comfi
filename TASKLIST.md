@@ -87,4 +87,4 @@
 - [ ] Require live account-to-pool deployment coverage in addition to mocked browser endpoint tests.
 
 ## 8. Backend Audit
-- [ ] [Claimed: Codex-Backend-Audit | Deadline: 2026-10-29T20:04:10Z] Audit current ComFi and UserAccount setup on next-release; leave verified findings in ISSUES.md and clear resolved issues.
+- [x] [Completed: Codex-Backend-Audit] Audit current ComFi and UserAccount setup on next-release; leave verified findings in ISSUES.md and clear resolved issues.

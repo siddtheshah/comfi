@@ -1,6 +1,8 @@
 # ComFi Web Application Issues & Misalignment Report
 
-This document details critical, high, medium, and architectural misalignments, bugs, and design discrepancies identified in [`apps/web`](file:///c:/Users/sidds/Documents/comfi/apps/web) relative to the Solana smart contract, [`TASKLIST.md`](file:///c:/Users/sidds/Documents/comfi/TASKLIST.md), and workspace verification rules.
+This document details critical, high, medium, and architectural misalignments, bugs, and design discrepancies identified in [`apps/web`](../../apps/web) relative to the Solana smart contract, [`TASKLIST.md`](../../TASKLIST.md), and workspace verification rules.
+
+Audited on `next-release` at `d7968cc` (2026-10-29). Removed historical COMFI-WEB-02 and COMFI-WEB-03: browser-wallet localnet pool creation and signing now use `PoolAccountSetup`/`pool-setup.ts`. Public-cluster UserAccount setup remains explicitly deferred. Backend and UserAccount findings are tracked in the [root audit](../../ISSUES.md).
 
 ---
 
@@ -9,8 +11,6 @@ This document details critical, high, medium, and architectural misalignments, b
 | Issue ID | Severity | Category | Description | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **COMFI-WEB-01** | **Critical** | Architecture / On-Chain State | Invitation webhook pipeline creates simulated mock proposals in `localStorage` instead of dispatching real on-chain `create_proposal(AdmitMember)` transactions | **Open** |
-| **COMFI-WEB-02** | **Critical** | Wallet / Network Parity | Pool creation bypasses browser wallets (Phantom, Backpack, In-Browser) and relies on dev server script, breaking Devnet & Testnet deployments | **Open** |
-| **COMFI-WEB-03** | **High** | UX / Functional Lock | Mock wallet signing paradox: pool creation requires `walletMode === 'mock'`, but governance signing strictly forbids `mock` mode | **Open** |
 | **COMFI-WEB-04** | **High** | Feature Completeness | Copilot Supervised (Tier 2) and Autonomous (Tier 3) modes are hardcoded disabled in the UI despite being marked completed | **Open** |
 | **COMFI-WEB-05** | **High** | Architecture / Automation | Copilot autonomous actions (cycle roll, proposal execute, auto-vote) are simulated in-memory audit logs without submitting Solana transactions | **Open** |
 | **COMFI-WEB-06** | **Medium** | React Integration | Disconnected props: `CopilotPanel` is rendered in `App.tsx` without passing `onExecuteProposal` or `onRollCycle` handlers | **Open** |
@@ -29,7 +29,7 @@ This document details critical, high, medium, and architectural misalignments, b
 
 - **Severity:** Critical
 - **Category:** Architecture / On-Chain State
-- **Affected Files:** [`apps/web/src/invitation-engine.ts:341-369`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/invitation-engine.ts#L341-L369), [`apps/web/src/InviteAcceptanceView.tsx:88-105`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/InviteAcceptanceView.tsx#L88-L105), [`apps/web/src/GovernanceView.tsx:86-100`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/GovernanceView.tsx#L86-L100)
+- **Affected Files:** [`apps/web/src/invitation-engine.ts:341-369`](../../apps/web/src/invitation-engine.ts#L341-L369), [`apps/web/src/InviteAcceptanceView.tsx:88-105`](../../apps/web/src/InviteAcceptanceView.tsx#L88-L105), [`apps/web/src/GovernanceView.tsx:86-100`](../../apps/web/src/GovernanceView.tsx#L86-L100)
 - **Tasklist Reference:** Section 4, line 56: `- [x] Implement automated webhook-style listener that detects the recipient's wallet submission and dispatches an AdmitMember governance proposal on behalf of the inviter.`
 
 #### Description
@@ -61,57 +61,10 @@ export async function dispatchAdmitMemberProposal(
 The result is recorded exclusively in browser `localStorage`. 
 
 #### Impact
-In [`GovernanceView.tsx`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/GovernanceView.tsx#L86-L100), proposals are fetched directly from the on-chain Solana cluster via `connection.getProgramAccounts(program, { filters: [...] })`. Because the webhook never broadcasts a transaction to the network, the admitted candidate proposal **never appears in the Governance View**, cannot be voted upon by members, and cannot be executed on-chain.
+In [`GovernanceView.tsx`](../../apps/web/src/GovernanceView.tsx#L86-L100), proposals are fetched directly from the on-chain Solana cluster via `connection.getProgramAccounts(program, { filters: [...] })`. Because the webhook never broadcasts a transaction to the network, the admitted candidate proposal **never appears in the Governance View**, cannot be voted upon by members, and cannot be executed on-chain.
 
 #### Recommended Remediation
 Integrate `buildGovernanceTransaction` with `kind: 'create'` and `action: { kind: 'AdmitMember', candidateWallet, vouchedBy }` inside the webhook dispatch pipeline, signing with the active connected wallet or queueing it for 1-click user signature.
-
----
-
-### COMFI-WEB-02: Pool Creation Bypasses Browser Wallets & Relies on Dev Server Script
-
-- **Severity:** Critical
-- **Category:** Wallet / Network Parity
-- **Affected Files:** [`apps/web/src/App.tsx:142-175`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/App.tsx#L142-L175), [`apps/web/vite.config.ts:10-65`](file:///c:/Users/sidds/Documents/comfi/apps/web/vite.config.ts#L10-L65)
-- **Tasklist Reference:** Section 2 (Browser Wallet Integration) & Section 4 (Create Pool Modal)
-
-#### Description
-Pool deployment in `apps/web` is coupled to a custom Vite dev server middleware route `/__comfi/mock-wallet/create-pool`. This server route uses `child_process.spawn` to run `scripts/create-test-pool.mjs` using Node.js on the host machine.
-```typescript
-// apps/web/src/App.tsx
-const createPool = async (customParams?: CreatePoolModalParams) => {
-  if (!wallet.useLocalnetApi) return setNotice('This test action requires the configured localnet RPC.')
-  if (!wallet.connected || wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')
-  // ... fetch('/__comfi/mock-wallet/create-pool') ...
-}
-```
-
-#### Impact
-1. Users connected with real browser wallets (In-Browser Web Wallet, Phantom, Backpack) are prohibited from deploying pools.
-2. The interactive Network Switcher allows users to select Devnet or Testnet, but attempting to create a pool on any non-localnet RPC immediately errors out with *"This test action requires the configured localnet RPC."*
-3. Production bundles (`vite build && vite preview`) cannot create pools because the Vite dev middleware does not exist in production.
-
-#### Recommended Remediation
-Construct a standard client-side Solana transaction using `@solana/web3.js` for the `create_pool` instruction, signing and sending via `wallet.sendTransaction(tx)` across any supported network.
-
----
-
-### COMFI-WEB-03: The Mock vs Web3 Wallet Signing Paradox
-
-- **Severity:** High
-- **Category:** UX / Functional Lock
-- **Affected Files:** [`apps/web/src/App.tsx:144`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/App.tsx#L144), [`apps/web/src/GovernanceView.tsx:49, 68`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/GovernanceView.tsx#L49)
-
-#### Description
-There is a conflicting invariant between pool creation and governance operations:
-- In `App.tsx`: `if (wallet.walletMode !== 'mock') return setNotice('Select and connect the mock wallet to use this localnet test action.')`
-- In `GovernanceView.tsx`: `const canSign = wallet.connected && wallet.walletMode !== 'mock'`
-
-#### Impact
-A user must use `mock` mode to create a pool. However, once in the pool view, `mock` mode disables all governance actions (*"Select and connect ComFi Wallet, Phantom or Backpack to sign governance transactions."*). The creator cannot vote, create proposals, or finalize results without opening the wallet modal, switching wallet modes, and importing the test keypair.
-
-#### Recommended Remediation
-Enable In-Browser Wallet and extension wallets to sign `create_pool` transactions directly, removing the mock-mode restriction.
 
 ---
 
@@ -119,7 +72,7 @@ Enable In-Browser Wallet and extension wallets to sign `create_pool` transaction
 
 - **Severity:** High
 - **Category:** Feature Completeness
-- **Affected Files:** [`apps/web/src/CopilotPanel.tsx:48, 92-98`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/CopilotPanel.tsx#L48-L98)
+- **Affected Files:** [`apps/web/src/CopilotPanel.tsx:48, 92-98`](../../apps/web/src/CopilotPanel.tsx#L48-L98)
 - **Tasklist Reference:** Section 5, lines 63–64: `- [x] Tier 2: Supervised Automation`, `- [x] Tier 3: Autonomous Delegation`
 
 #### Description
@@ -150,7 +103,7 @@ Wire transaction signing capabilities (via `wallet.sendTransaction`) into the co
 
 - **Severity:** High
 - **Category:** Architecture / Automation
-- **Affected Files:** [`apps/web/src/copilot-engine.ts:216-265`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/copilot-engine.ts#L216-L265)
+- **Affected Files:** [`apps/web/src/copilot-engine.ts:216-265`](../../apps/web/src/copilot-engine.ts#L216-L265)
 - **Tasklist Reference:** Section 5, lines 65–70: `- [x] Auto-roll cycle`, `- [x] Auto-execute passed proposals`
 
 #### Description
@@ -168,7 +121,7 @@ Provide explicit on-chain execution adapters that invoke `roll_cycle` or `execut
 
 - **Severity:** Medium
 - **Category:** React Integration
-- **Affected Files:** [`apps/web/src/App.tsx:297-305`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/App.tsx#L297-L305), [`apps/web/src/CopilotPanel.tsx:31-32`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/CopilotPanel.tsx#L31-L32)
+- **Affected Files:** [`apps/web/src/App.tsx:297-305`](../../apps/web/src/App.tsx#L297-L305), [`apps/web/src/CopilotPanel.tsx:31-32`](../../apps/web/src/CopilotPanel.tsx#L31-L32)
 
 #### Description
 `CopilotPanelProps` defines execution callbacks:
@@ -202,7 +155,7 @@ Pass concrete `onExecuteProposal` and `onRollCycle` handlers that construct and 
 
 - **Severity:** High
 - **Category:** Feature Gap
-- **Affected Files:** [`apps/web/src/App.tsx:592, 605`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/App.tsx#L592-L605)
+- **Affected Files:** [`apps/web/src/App.tsx:592, 605`](../../apps/web/src/App.tsx#L592-L605)
 - **Tasklist Reference:** Section 3, lines 41–45: `- [ ] Implement Membership & History View`
 
 #### Description
@@ -230,7 +183,7 @@ Build dedicated `MembershipDirectory` and `MemberActions` cards in `apps/web` re
 
 - **Severity:** Medium
 - **Category:** Feature Gap
-- **Affected Files:** [`apps/web/src/App.tsx`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/App.tsx), [`apps/web/src/GovernanceView.tsx`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/GovernanceView.tsx)
+- **Affected Files:** [`apps/web/src/App.tsx`](../../apps/web/src/App.tsx), [`apps/web/src/GovernanceView.tsx`](../../apps/web/src/GovernanceView.tsx)
 - **Tasklist Reference:** Section 3, lines 46–49: `- [ ] Implement Spends & Treasury View`
 
 #### Description
@@ -251,7 +204,7 @@ Implement a `TreasuryView` component that reads `WithdrawalRequest` accounts and
 
 - **Severity:** Medium
 - **Category:** Rule Violation / Zero-Evasion
-- **Affected Files:** [`apps/web/src/WalletModal.tsx:26-36`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/WalletModal.tsx#L26-L36)
+- **Affected Files:** [`apps/web/src/WalletModal.tsx:26-36`](../../apps/web/src/WalletModal.tsx#L26-L36)
 - **Workspace Rule Reference:** *"Do not add try-catch statements to evade legitimate failure scenarios. Escalate when input arguments or parameters violate expectations."*
 
 #### Description
@@ -282,7 +235,7 @@ Remove error masking in the catch block and set an explicit error state (`setImp
 
 - **Severity:** Low
 - **Category:** Error Handling / UX
-- **Affected Files:** [`apps/web/src/InviteAcceptanceView.tsx:96`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/InviteAcceptanceView.tsx#L96), [`apps/web/src/invitation-engine.ts:398-400`](file:///c:/Users/sidds/Documents/comfi/apps/web/src/invitation-engine.ts#L398-L400)
+- **Affected Files:** [`apps/web/src/InviteAcceptanceView.tsx:96`](../../apps/web/src/InviteAcceptanceView.tsx#L96), [`apps/web/src/invitation-engine.ts:398-400`](../../apps/web/src/invitation-engine.ts#L398-L400)
 
 #### Description
 When a candidate wallet equals the inviter address, `submitRecipientWallet()` throws an unhandled error:
