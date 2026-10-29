@@ -2526,6 +2526,7 @@ pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
     require!(pool.is_closing, ComfiError::PoolNotClosing);
     let member = &mut ctx.accounts.member;
     require!(!member.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+    require!(member.status != MemberStatus::Evicted, ComfiError::MemberNotActive);
 
     // Sync any unconsumed surplus transitions if cycles advanced
     member.sync_surplus(pool);
@@ -2662,6 +2663,7 @@ pub fn leave_pool(ctx: Context<LeavePool>) -> Result<()> {
 
 pub fn execute_evict_member(ctx: Context<ExecuteEvictMember>) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
+    pool.ensure_not_closing()?;
     pool.ensure_not_locked()?;
     pool.ensure_cycle_current()?;
 
@@ -2680,6 +2682,7 @@ pub fn execute_evict_member(ctx: Context<ExecuteEvictMember>) -> Result<()> {
 
     let target = &mut ctx.accounts.target_member;
     require!(target.status == MemberStatus::Active, ComfiError::MemberNotActive);
+    require!(!target.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
 
     target.sync_surplus(pool);
     target.sync_benefit(pool)?;
@@ -8577,6 +8580,386 @@ mod tests {
         assert!(lock_guard.is_err());
         assert_eq!(lock_guard.unwrap_err(), ComfiError::PoolLocked.into());
     }
+
+    // =========================================================================
+    // Regression Tests for COMFI-AUD-04: Refund Idempotency & Post-Closure Eviction Rejection
+    // =========================================================================
+
+    #[test]
+    fn test_audit_04_eviction_execution_fails_when_pool_is_closing() {
+        let mut pool = create_test_pool();
+        let target_pda = Pubkey::new_unique();
+        let target = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::EvictMember { member: target_pda },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        let validate_evict = |p: &Pool, t: &Member, prop: &Proposal, now: i64| -> Result<()> {
+            p.ensure_not_closing()?;
+            p.ensure_not_locked()?;
+            p.ensure_cycle_current_at(now)?;
+            require!(
+                prop.state == ProposalState::Executable,
+                ComfiError::ProposalNotExecutable
+            );
+            require!(
+                p.current_cycle >= prop.executable_cycle,
+                ComfiError::ExecutionCycleNotReached
+            );
+            require!(
+                now >= prop.executable_after,
+                ComfiError::TimelockActive
+            );
+            let target_key = match prop.action {
+                ProposalAction::EvictMember { member } => member,
+                _ => return err!(ComfiError::WrongProposalAction),
+            };
+            require_keys_eq!(target_key, target_pda, ComfiError::ProposalTargetMismatch);
+            require!(t.status == MemberStatus::Active, ComfiError::MemberNotActive);
+            require!(!t.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+            Ok(())
+        };
+
+        // Before pool closure, eviction validation passes
+        assert!(validate_evict(&pool, &target, &proposal, 100).is_ok());
+
+        // Pool enters closure
+        pool.enter_closure();
+        assert!(pool.is_closing);
+
+        // a) Eviction execution fails when pool is closing with ComfiError::PoolIsClosing
+        let res = validate_evict(&pool, &target, &proposal, 100);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::PoolIsClosing.into());
+    }
+
+    #[test]
+    fn test_audit_04_eviction_execution_fails_if_target_claimed_closure_refund() {
+        let pool = create_test_pool();
+        let target_pda = Pubkey::new_unique();
+        let mut target = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::EvictMember { member: target_pda },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        let validate_evict = |p: &Pool, t: &Member, prop: &Proposal, now: i64| -> Result<()> {
+            p.ensure_not_closing()?;
+            p.ensure_not_locked()?;
+            p.ensure_cycle_current_at(now)?;
+            require!(
+                prop.state == ProposalState::Executable,
+                ComfiError::ProposalNotExecutable
+            );
+            require!(
+                p.current_cycle >= prop.executable_cycle,
+                ComfiError::ExecutionCycleNotReached
+            );
+            require!(
+                now >= prop.executable_after,
+                ComfiError::TimelockActive
+            );
+            let target_key = match prop.action {
+                ProposalAction::EvictMember { member } => member,
+                _ => return err!(ComfiError::WrongProposalAction),
+            };
+            require_keys_eq!(target_key, target_pda, ComfiError::ProposalTargetMismatch);
+            require!(t.status == MemberStatus::Active, ComfiError::MemberNotActive);
+            require!(!t.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+            Ok(())
+        };
+
+        // Target member has claimed closure refund
+        target.closure_claimed = true;
+
+        // b) Eviction execution fails if target member already claimed closure refund with ComfiError::ClosureRefundAlreadyClaimed
+        let res = validate_evict(&pool, &target, &proposal, 100);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::ClosureRefundAlreadyClaimed.into());
+    }
+
+    #[test]
+    fn test_audit_04_evicted_member_cannot_claim_closure_refund() {
+        let mut pool = create_test_pool();
+        pool.is_closing = true;
+
+        let evicted_member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Evicted,
+            claimable_surplus_escrow: 50,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+
+        let validate_closure_claim = |p: &Pool, m: &Member| -> Result<()> {
+            require!(p.is_closing, ComfiError::PoolNotClosing);
+            require!(!m.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+            require!(m.status != MemberStatus::Evicted, ComfiError::MemberNotActive);
+            Ok(())
+        };
+
+        // c) Evicted member cannot claim closure refund (ComfiError::MemberNotActive)
+        let res = validate_closure_claim(&pool, &evicted_member);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::MemberNotActive.into());
+    }
+
+    #[test]
+    fn test_audit_04_normal_eviction_before_closure_succeeds() {
+        let mut pool = create_test_pool();
+        let target_pda = Pubkey::new_unique();
+        let mut target = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 200,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 200,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::EvictMember { member: target_pda },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 0,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+        };
+
+        pool.head_member = Some(target_pda);
+        pool.member_count = 2;
+        pool.funded_member_count = 2;
+        pool.total_non_conferred_capital = 50;
+
+        let validate_evict = |p: &Pool, t: &Member, prop: &Proposal, now: i64| -> Result<()> {
+            p.ensure_not_closing()?;
+            p.ensure_not_locked()?;
+            p.ensure_cycle_current_at(now)?;
+            require!(
+                prop.state == ProposalState::Executable,
+                ComfiError::ProposalNotExecutable
+            );
+            require!(
+                p.current_cycle >= prop.executable_cycle,
+                ComfiError::ExecutionCycleNotReached
+            );
+            require!(
+                now >= prop.executable_after,
+                ComfiError::TimelockActive
+            );
+            let target_key = match prop.action {
+                ProposalAction::EvictMember { member } => member,
+                _ => return err!(ComfiError::WrongProposalAction),
+            };
+            require_keys_eq!(target_key, target_pda, ComfiError::ProposalTargetMismatch);
+            require!(t.status == MemberStatus::Active, ComfiError::MemberNotActive);
+            require!(!t.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+            Ok(())
+        };
+
+        // d) Normal eviction before closure still works properly:
+        assert!(validate_evict(&pool, &target, &proposal, 100).is_ok());
+
+        // Perform eviction state transition
+        target.sync_surplus(&mut pool);
+        target.sync_benefit(&pool).unwrap();
+        let total_preservation_amount = target.non_conferred_amount();
+        assert_eq!(total_preservation_amount, 50);
+
+        // Fallback escrow (or refund)
+        target.claimable_surplus_escrow = target
+            .claimable_surplus_escrow
+            .checked_add(total_preservation_amount)
+            .unwrap();
+        pool.total_escrowed_surplus = pool
+            .total_escrowed_surplus
+            .checked_add(total_preservation_amount)
+            .unwrap();
+        target.surplus_amount = 0;
+        target.total_contributions = target.total_contributions.saturating_sub(total_preservation_amount);
+
+        unlink_member(&mut pool, target_pda, target.next_member, None).unwrap();
+        target.next_member = None;
+        pool.member_count = pool.member_count.saturating_sub(1);
+        if target.is_funded_for_pool(&pool) {
+            pool.funded_member_count = pool.funded_member_count.saturating_sub(1);
+        }
+        target.status = MemberStatus::Evicted;
+        target.is_funded = false;
+        proposal.state = ProposalState::Executed;
+        assert_eq!(proposal.state, ProposalState::Executed);
+
+        assert_eq!(target.status, MemberStatus::Evicted);
+        assert_eq!(pool.member_count, 1);
+        assert_eq!(target.claimable_surplus_escrow, 50);
+
+        // Target can claim eviction refund
+        assert_eq!(target.claimable_surplus_escrow, 50);
+        target.claimable_surplus_escrow = 0;
+        pool.total_escrowed_surplus = pool.total_escrowed_surplus.saturating_sub(50);
+        pool.total_non_conferred_capital = pool.total_non_conferred_capital.saturating_sub(50);
+
+        // Later pool closes
+        pool.enter_closure();
+        assert!(pool.is_closing);
+
+        // Evicted member attempts to claim closure refund -> rejected with ComfiError::MemberNotActive
+        let validate_closure_claim = |p: &Pool, m: &Member| -> Result<()> {
+            require!(p.is_closing, ComfiError::PoolNotClosing);
+            require!(!m.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
+            require!(m.status != MemberStatus::Evicted, ComfiError::MemberNotActive);
+            Ok(())
+        };
+        let res = validate_closure_claim(&pool, &target);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::MemberNotActive.into());
+    }
+
 }
 
 
