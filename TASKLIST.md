@@ -93,4 +93,4 @@
 - [x] [Completed: Subagent-AUD-04] COMFI-AUD-04: Enforce refund idempotency and reject post-closure eviction
 - [x] [Completed: Subagent-AUD-03] COMFI-AUD-03: Attribute authorized withdrawals to group benefit and reserve senior liabilities in closure
 - [x] [Completed: Subagent-AUD-02] COMFI-AUD-02: Settle benefit index during rollover and baseline funded status transitions
-- [ ] COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles over proposal lifetime
+- [ ] [Claimed: Subagent-AUD-01 | Deadline: 2026-10-29T17:30:00Z] COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles over proposal lifetime
