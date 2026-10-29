@@ -1075,9 +1075,11 @@ impl Member {
 
     pub fn sync_surplus(&mut self, pool: &mut Pool) {
         if pool.current_cycle > self.surplus_cycle {
+            let was_funded_in_ending_cycle = self.is_funded && self.funded_cycle == self.surplus_cycle;
             let obligation = pool.member_obligation_amount;
             if self.is_paused {
                 self.is_funded = false;
+                self.last_benefit_index = pool.cumulative_benefit_per_member;
             } else if self.surplus_amount >= obligation && obligation > 0 {
                 let consumed = obligation;
                 self.surplus_amount = self.surplus_amount.saturating_sub(consumed);
@@ -1085,27 +1087,48 @@ impl Member {
                 pool.total_conferred_capital = pool.total_conferred_capital.saturating_add(consumed);
                 self.is_funded = true;
                 self.funded_cycle = pool.current_cycle;
+                if !was_funded_in_ending_cycle {
+                    self.last_benefit_index = pool.cumulative_benefit_per_member;
+                }
             } else {
                 self.is_funded = false;
+                self.last_benefit_index = pool.cumulative_benefit_per_member;
             }
             self.surplus_cycle = pool.current_cycle;
         }
     }
 
-    pub fn sync_benefit(&mut self, pool: &Pool) -> Result<()> {
-        if pool.cumulative_benefit_per_member > self.last_benefit_index {
-            let diff = pool.cumulative_benefit_per_member
-                .checked_sub(self.last_benefit_index)
-                .ok_or(ComfiError::MathOverflow)?;
-            if self.is_funded_for_pool(pool) {
-                let accrued = (diff / BENEFIT_SCALE) as u64;
-                self.cumulative_benefit_received = self.cumulative_benefit_received
-                    .checked_add(accrued)
+    pub fn sync_benefit_settle(&mut self, pool: &Pool, was_funded: bool) -> Result<()> {
+        if was_funded {
+            if pool.cumulative_benefit_per_member > self.last_benefit_index {
+                let diff = pool
+                    .cumulative_benefit_per_member
+                    .checked_sub(self.last_benefit_index)
                     .ok_or(ComfiError::MathOverflow)?;
+                let accrued = (diff / BENEFIT_SCALE) as u64;
+                if accrued > 0 {
+                    self.cumulative_benefit_received = self
+                        .cumulative_benefit_received
+                        .checked_add(accrued)
+                        .ok_or(ComfiError::MathOverflow)?;
+                    let scaled_accrued = (accrued as u128)
+                        .checked_mul(BENEFIT_SCALE)
+                        .ok_or(ComfiError::MathOverflow)?;
+                    self.last_benefit_index = self
+                        .last_benefit_index
+                        .checked_add(scaled_accrued)
+                        .ok_or(ComfiError::MathOverflow)?;
+                }
             }
+        } else {
             self.last_benefit_index = pool.cumulative_benefit_per_member;
         }
         Ok(())
+    }
+
+    pub fn sync_benefit(&mut self, pool: &Pool) -> Result<()> {
+        let was_funded = self.is_funded_for_pool(pool);
+        self.sync_benefit_settle(pool, was_funded)
     }
 }
 
@@ -1727,12 +1750,17 @@ pub fn process_cycle_members<'info>(
 
         let next_ptr = member.next_member;
 
+        let ending_cycle = pool.current_cycle.saturating_sub(1);
+        let was_funded_in_ending_cycle = member.is_funded && member.funded_cycle == ending_cycle;
+        member.sync_benefit_settle(pool, was_funded_in_ending_cycle)?;
+
         if member.status == MemberStatus::Leaving {
             member.status = MemberStatus::Exited;
             member.is_funded = false;
             member.funded_cycle_streak = 0;
             member.is_matured_voter = false;
             member.next_member = None;
+            member.last_benefit_index = pool.cumulative_benefit_per_member;
             member.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
 
             pool.member_count = pool.member_count.saturating_sub(1);
@@ -1762,6 +1790,7 @@ pub fn process_cycle_members<'info>(
                 member.is_funded = false;
                 member.funded_cycle_streak = 0;
                 member.is_matured_voter = false;
+                member.last_benefit_index = pool.cumulative_benefit_per_member;
             } else if member.surplus_amount >= obligation && obligation > 0 {
                 let consumed = obligation;
                 member.surplus_amount = member
@@ -1794,6 +1823,7 @@ pub fn process_cycle_members<'info>(
                 member.is_funded = false;
                 member.funded_cycle_streak = 0;
                 member.is_matured_voter = false;
+                member.last_benefit_index = pool.cumulative_benefit_per_member;
             }
             member.surplus_cycle = pool.current_cycle;
 
@@ -2527,6 +2557,12 @@ pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
     let member = &mut ctx.accounts.member;
     require!(!member.closure_claimed, ComfiError::ClosureRefundAlreadyClaimed);
     require!(member.status != MemberStatus::Evicted, ComfiError::MemberNotActive);
+
+    // Settle ending cycle benefits if cycles advanced past member's surplus_cycle
+    let ending_funded = member.is_funded && member.funded_cycle == member.surplus_cycle;
+    if pool.current_cycle > member.surplus_cycle {
+        member.sync_benefit_settle(pool, ending_funded)?;
+    }
 
     // Sync any unconsumed surplus transitions if cycles advanced
     member.sync_surplus(pool);
@@ -9503,6 +9539,434 @@ mod tests {
         let res = check_spend(&pool);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), ComfiError::MemberNotFunded.into());
+    }
+
+    #[test]
+    fn test_audit_02_reproduction_1_funded_to_unfunded_settles_unsettled_benefits() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+        pool.funded_member_count = 1;
+
+        let mut m1_data = vec![0u8; Member::SPACE];
+        let m1_key = Pubkey::new_unique();
+        let owner = crate::ID;
+
+        let m1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+        m1.try_serialize(&mut &mut m1_data[..]).unwrap();
+        pool.head_member = Some(m1_key);
+        pool.member_count = 1;
+
+        pool.cumulative_benefit_per_member = 50 * BENEFIT_SCALE;
+
+        pool.current_cycle = 1;
+        let mut l1 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let accounts = vec![a1];
+
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &accounts).unwrap();
+
+        let mut m1_after = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+
+        assert!(!m1_after.is_funded);
+        assert_eq!(m1_after.surplus_cycle, 1);
+        assert_eq!(m1_after.cumulative_benefit_received, 50);
+        assert_eq!(m1_after.last_benefit_index, 50 * BENEFIT_SCALE);
+
+        m1_after.sync_benefit(&pool).unwrap();
+        assert_eq!(m1_after.cumulative_benefit_received, 50);
+    }
+
+    #[test]
+    fn test_audit_02_reproduction_2_unfunded_to_funded_rebase_prevents_subsidizing_past_spending() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+        pool.funded_member_count = 1;
+
+        let mut m1_data = vec![0u8; Member::SPACE];
+        let m1_key = Pubkey::new_unique();
+        let owner = crate::ID;
+
+        let m1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 50,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+        m1.try_serialize(&mut &mut m1_data[..]).unwrap();
+        pool.head_member = Some(m1_key);
+        pool.member_count = 1;
+
+        pool.cumulative_benefit_per_member = 50 * BENEFIT_SCALE;
+
+        pool.current_cycle = 1;
+        let mut l1 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let accounts = vec![a1];
+
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &accounts).unwrap();
+
+        let mut m1_after = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+
+        assert!(m1_after.is_funded);
+        assert_eq!(m1_after.funded_cycle, 1);
+        assert_eq!(m1_after.surplus_amount, 0);
+        assert_eq!(m1_after.last_benefit_index, 50 * BENEFIT_SCALE);
+        assert_eq!(m1_after.cumulative_benefit_received, 0);
+
+        pool.cumulative_benefit_per_member += 30 * BENEFIT_SCALE;
+
+        m1_after.sync_benefit(&pool).unwrap();
+
+        assert_eq!(m1_after.cumulative_benefit_received, 30);
+        assert_eq!(m1_after.last_benefit_index, 80 * BENEFIT_SCALE);
+    }
+
+    #[test]
+    fn test_audit_02_leaving_member_settles_benefits_accruing_after_leave_pool() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+        pool.funded_member_count = 1;
+
+        let mut m1_data = vec![0u8; Member::SPACE];
+        let m1_key = Pubkey::new_unique();
+        let owner = crate::ID;
+
+        let m1 = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 50,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 10,
+            total_contributions: 50,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Leaving,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+        m1.try_serialize(&mut &mut m1_data[..]).unwrap();
+        pool.head_member = Some(m1_key);
+        pool.member_count = 1;
+
+        pool.cumulative_benefit_per_member = 35 * BENEFIT_SCALE;
+        let mut m1_leaving = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+        m1_leaving.last_benefit_index = 10 * BENEFIT_SCALE;
+        m1_leaving.try_serialize(&mut &mut m1_data[..]).unwrap();
+
+        pool.current_cycle = 1;
+        let mut l1 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let accounts = vec![a1];
+
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &accounts).unwrap();
+
+        let m1_after = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+
+        assert_eq!(m1_after.status, MemberStatus::Exited);
+        assert!(!m1_after.is_funded);
+        assert_eq!(m1_after.cumulative_benefit_received, 35);
+        assert_eq!(m1_after.last_benefit_index, 35 * BENEFIT_SCALE);
+    }
+
+    #[test]
+    fn test_audit_02_fractional_accruals_preserved_across_spends_and_rollovers() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        pool.cumulative_benefit_per_member = (5 * BENEFIT_SCALE) / 2;
+        assert_eq!(pool.cumulative_benefit_per_member, 2_500_000_000_000);
+
+        member.sync_benefit(&pool).unwrap();
+        assert_eq!(member.cumulative_benefit_received, 2);
+        assert_eq!(member.last_benefit_index, 2_000_000_000_000);
+
+        pool.current_cycle = 1;
+        member.sync_surplus(&mut pool);
+        assert!(member.is_funded);
+        assert_eq!(member.funded_cycle, 1);
+        assert_eq!(member.last_benefit_index, 2_000_000_000_000);
+
+        pool.cumulative_benefit_per_member += (5 * BENEFIT_SCALE) / 2;
+        assert_eq!(pool.cumulative_benefit_per_member, 5_000_000_000_000);
+
+        member.sync_benefit(&pool).unwrap();
+        assert_eq!(member.cumulative_benefit_received, 5);
+        assert_eq!(member.last_benefit_index, 5_000_000_000_000);
+    }
+
+    #[test]
+    fn test_audit_02_repeated_cycle_transitions_maintain_exact_accounting() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 0;
+        pool.member_obligation_amount = 50;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 200,
+            surplus_amount: 150,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 200,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        pool.cumulative_benefit_per_member += 40 * BENEFIT_SCALE;
+
+        member.is_paused = true;
+        pool.current_cycle = 1;
+        member.sync_surplus(&mut pool);
+        assert!(!member.is_funded);
+        assert_eq!(member.last_benefit_index, 40 * BENEFIT_SCALE);
+
+        pool.cumulative_benefit_per_member += 60 * BENEFIT_SCALE;
+
+        member.is_paused = false;
+        pool.current_cycle = 2;
+        member.sync_surplus(&mut pool);
+        assert!(member.is_funded);
+        assert_eq!(member.funded_cycle, 2);
+        assert_eq!(member.last_benefit_index, 100 * BENEFIT_SCALE);
+
+        pool.cumulative_benefit_per_member += 20 * BENEFIT_SCALE;
+
+        pool.current_cycle = 3;
+        member.sync_surplus(&mut pool);
+        assert!(member.is_funded);
+        assert_eq!(member.funded_cycle, 3);
+
+        pool.cumulative_benefit_per_member += 10 * BENEFIT_SCALE;
+
+        member.sync_benefit(&pool).unwrap();
+
+        assert_eq!(member.cumulative_benefit_received, 30);
+        assert_eq!(member.last_benefit_index, 130 * BENEFIT_SCALE);
+    }
+
+    #[test]
+    fn test_audit_02_claim_closure_refund_settles_unsettled_ending_cycle_benefits() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+        pool.is_closing = true;
+
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        pool.cumulative_benefit_per_member = 50 * BENEFIT_SCALE;
+
+        let ending_funded = member.is_funded && member.funded_cycle == member.surplus_cycle;
+        assert!(ending_funded);
+        if pool.current_cycle > member.surplus_cycle {
+            member.sync_benefit_settle(&pool, ending_funded).unwrap();
+        }
+        member.sync_surplus(&mut pool);
+        member.sync_benefit(&pool).unwrap();
+
+        assert_eq!(member.cumulative_benefit_received, 50);
+        assert_eq!(member.last_benefit_index, 50 * BENEFIT_SCALE);
+    }
+
+    #[test]
+    fn test_audit_02_negative_sync_benefit_settle_overflow_escalation() {
+        let pool = create_test_pool();
+        let mut member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: u64::MAX,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        let mut pool_with_benefit = pool;
+        pool_with_benefit.cumulative_benefit_per_member = 10 * BENEFIT_SCALE;
+
+        let res = member.sync_benefit_settle(&pool_with_benefit, true);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::MathOverflow.into());
     }
 
 }
