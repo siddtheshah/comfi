@@ -39,6 +39,7 @@
     "@solana/spl-token": "^0.4.13",
     "@solana/web3.js": "^1.98.4",
     "@types/bn.js": "^5.1.6",
+    "@types/node": "^26.6.6",
     "bn.js": "^5.2.2",
     "playwright": "^1.55.0"
   }
