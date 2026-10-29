@@ -91,6 +91,6 @@
 
 ## 9. Backend Audit Remediation
 - [x] [Completed: Subagent-AUD-04] COMFI-AUD-04: Enforce refund idempotency and reject post-closure eviction
-- [ ] COMFI-AUD-03: Attribute authorized withdrawals to group benefit and reserve senior liabilities in closure
+- [ ] [Claimed: Subagent-AUD-03 | Deadline: 2026-10-29T16:30:00Z] COMFI-AUD-03: Attribute authorized withdrawals to group benefit and reserve senior liabilities in closure
 - [ ] COMFI-AUD-02: Settle benefit index during rollover and baseline funded status transitions
 - [ ] COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles over proposal lifetime
