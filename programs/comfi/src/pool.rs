@@ -1223,13 +1223,38 @@ impl Proposal {
         } else {
             base_voting_members.max(1)
         };
-        let required = active_members
+        let proposal_cycles = self
+            .deadline_cycle
+            .saturating_sub(self.voting_cycle)
+            .saturating_add(1)
+            .max(1);
+        let scaled_active_members = active_members
+            .checked_mul(proposal_cycles)
+            .ok_or(ComfiError::MathOverflow)?;
+        let required = scaled_active_members
             .checked_mul(threshold_bps)
             .ok_or(ComfiError::MathOverflow)?
             .checked_add(9999)
             .ok_or(ComfiError::MathOverflow)?
             / 10_000;
         Ok((required as u32).max(1))
+    }
+
+    pub fn vote_weight_for_member(&self, pool: &Pool, member: &Member) -> u32 {
+        let proposal_cycles = self
+            .deadline_cycle
+            .saturating_sub(self.voting_cycle)
+            .saturating_add(1)
+            .max(1);
+        let surplus_cycles = if pool.member_obligation_amount > 0 {
+            member.surplus_amount / pool.member_obligation_amount
+        } else {
+            proposal_cycles
+        };
+        let funded_cycles_available = member
+            .funded_cycle_streak
+            .max(1u64.saturating_add(surplus_cycles));
+        funded_cycles_available.min(proposal_cycles).max(1) as u32
     }
 
     pub fn is_passed_for_pool(&self, pool: &Pool) -> Result<bool> {
@@ -2230,15 +2255,30 @@ pub fn vote(ctx: Context<Vote>, approve: bool) -> Result<()> {
     // Enforce invariant: casting a vote always totals any accrued spend benefits against the voter!
     voter.sync_benefit(pool)?;
 
+    let proposal_cycles = proposal
+        .deadline_cycle
+        .saturating_sub(proposal.voting_cycle)
+        .saturating_add(1)
+        .max(1);
+    let surplus_cycles = if pool.member_obligation_amount > 0 {
+        voter.surplus_amount / pool.member_obligation_amount
+    } else {
+        proposal_cycles
+    };
+    let funded_cycles_available = voter
+        .funded_cycle_streak
+        .max(1u64.saturating_add(surplus_cycles));
+    let vote_weight = funded_cycles_available.min(proposal_cycles).max(1) as u32;
+
     if approve {
         proposal.yes_votes = proposal
             .yes_votes
-            .checked_add(1)
+            .checked_add(vote_weight)
             .ok_or(ComfiError::MathOverflow)?;
     } else {
         proposal.no_votes = proposal
             .no_votes
-            .checked_add(1)
+            .checked_add(vote_weight)
             .ok_or(ComfiError::MathOverflow)?;
     }
     let receipt = &mut ctx.accounts.receipt;
@@ -5732,7 +5772,7 @@ mod tests {
             action: ProposalAction::ClosePool,
             yes_votes: 1,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -5784,7 +5824,7 @@ mod tests {
             },
             yes_votes: 2,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -6370,7 +6410,7 @@ mod tests {
             },
             yes_votes: 1,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -6423,7 +6463,7 @@ mod tests {
             },
             yes_votes: 1,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -8126,7 +8166,7 @@ mod tests {
             yes_votes: 0,
             no_votes: 0,
             voting_cycle: 1,
-            deadline_cycle: 2,
+            deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
             executable_after: 0,
@@ -8673,7 +8713,7 @@ mod tests {
             action: ProposalAction::EvictMember { member: target_pda },
             yes_votes: 2,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -8766,7 +8806,7 @@ mod tests {
             action: ProposalAction::EvictMember { member: target_pda },
             yes_votes: 2,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -8905,7 +8945,7 @@ mod tests {
             action: ProposalAction::EvictMember { member: target_pda },
             yes_votes: 2,
             no_votes: 0,
-            voting_cycle: 0,
+            voting_cycle: 1,
             deadline_cycle: 1,
             executable_cycle: 0,
             deadline: 1000,
@@ -9965,6 +10005,351 @@ mod tests {
         pool_with_benefit.cumulative_benefit_per_member = 10 * BENEFIT_SCALE;
 
         let res = member.sync_benefit_settle(&pool_with_benefit, true);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::MathOverflow.into());
+    }
+
+    // -------------------------------------------------------------------------
+    // COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_audit_01_user_spec_funded_cycles_integral_and_scaled_denominators() {
+        // User specification scenario:
+        // 5 members in pool, 3 funded 100% of the time, 2 funded 50% of the time.
+        // Proposal lives for 2 cycles.
+        // Effective quorum is 4.
+        // Scaled by 2 cycles = 8 total possible votes.
+        // Strict majority (5001 bps) required votes = ceil(8 * 0.5001) = 5.
+        // - The 3 fully funded members get 2 votes each (3 * 2 = 6 >= 5 -> passes).
+        // - The 2 partly unfunded members get 1 vote each (2 * 1 = 2 < 5 -> rejected).
+        // - 1 fully funded (2 votes) + 1 partly unfunded (1 vote) = 3 < 5 -> rejected.
+        // - 2 fully funded (4 votes) + 1 partly unfunded (1 vote) = 5 >= 5 -> passes.
+
+        let mut pool = create_test_pool();
+        pool.member_count = 5;
+        pool.member_obligation_amount = 50;
+        pool.funded_member_count = 4; // Effective quorum is 4
+        pool.voting_member_count = 4;
+        pool.vote_threshold = 5001;
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 2, // Proposal lives for 2 cycles
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5001,
+        };
+
+        // Proposal cycles = 2 - 1 + 1 = 2.
+        // Scaled active members = 4 * 2 = 8.
+        // Required votes = ceil(8 * 5001 / 10000) = 5 votes.
+        let required = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(required, 5);
+
+        // Fully funded member (funded 100% of the time: streak >= 2 or streak = 1 + 1 cycle surplus)
+        let fully_funded_member_a = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 50, // 1 surplus cycle
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 1,
+            funded_cycle: 1,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2, // Streak of 2 cycles
+            is_matured_voter: true,
+        };
+
+        let fully_funded_member_b = Member {
+            funded_cycle_streak: 1,
+            surplus_amount: 50, // 50 / 50 = 1 surplus cycle => 1 + 1 = 2 available cycles
+            ..fully_funded_member_a
+        };
+
+        let fully_funded_member_c = Member {
+            funded_cycle_streak: 3,
+            surplus_amount: 0,
+            ..fully_funded_member_a
+        };
+
+        // Partly unfunded member (funded 50% of the time: only 1 cycle available)
+        let partly_funded_member_d = Member {
+            funded_cycle_streak: 1,
+            surplus_amount: 0,
+            ..fully_funded_member_a
+        };
+
+        let partly_funded_member_e = Member {
+            funded_cycle_streak: 1,
+            surplus_amount: 25, // Less than 1 full obligation (50), surplus_cycles = 0
+            ..fully_funded_member_a
+        };
+
+        // Verify vote weights
+        assert_eq!(proposal.vote_weight_for_member(&pool, &fully_funded_member_a), 2);
+        assert_eq!(proposal.vote_weight_for_member(&pool, &fully_funded_member_b), 2);
+        assert_eq!(proposal.vote_weight_for_member(&pool, &fully_funded_member_c), 2);
+        assert_eq!(proposal.vote_weight_for_member(&pool, &partly_funded_member_d), 1);
+        assert_eq!(proposal.vote_weight_for_member(&pool, &partly_funded_member_e), 1);
+
+        // Outcome 1: The 3 fully funded members vote YES (3 * 2 = 6 votes >= 5 -> passes)
+        proposal.yes_votes = 3 * 2;
+        proposal.no_votes = 0;
+        assert!(proposal.is_passed_for_pool(&pool).unwrap());
+
+        // Outcome 2: The 2 partly unfunded members vote YES (2 * 1 = 2 votes < 5 -> rejected)
+        proposal.yes_votes = 2 * 1;
+        proposal.no_votes = 0;
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+
+        // Outcome 3: 1 fully funded (2 votes) + 1 partly unfunded (1 vote) = 3 votes (< 5 -> rejected)
+        proposal.yes_votes = 2 + 1;
+        proposal.no_votes = 0;
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+
+        // Outcome 4: 2 fully funded (4 votes) + 1 partly unfunded (1 vote) = 5 votes (>= 5 -> passes)
+        proposal.yes_votes = 4 + 1;
+        proposal.no_votes = 0;
+        assert!(proposal.is_passed_for_pool(&pool).unwrap());
+
+        // Also verify opposing NO votes: 5 YES vs 5 NO fails (must be strictly greater)
+        proposal.no_votes = 5;
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap());
+    }
+
+    #[test]
+    fn test_audit_01_one_cycle_proposal_preserves_single_vote_and_unscaled_denominator() {
+        let mut pool = create_test_pool();
+        pool.member_count = 5;
+        pool.funded_member_count = 5;
+        pool.voting_member_count = 5;
+        pool.member_obligation_amount = 50;
+        pool.vote_threshold = 5001;
+
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1, // 1-cycle proposal
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5001,
+        };
+
+        // For 1-cycle proposal: proposal_cycles = 1.
+        // Scaled active members = 5 * 1 = 5.
+        // Required votes = ceil(5 * 5001 / 10000) = 3 votes.
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 3);
+
+        // Even with huge streak and huge surplus, 1-cycle proposal caps voter weight at exactly 1
+        let whale_voter = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100_000,
+            surplus_amount: 50_000, // 1000 surplus cycles
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100_000,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 1,
+            funded_cycle: 1,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 100, // 100 streak cycles
+            is_matured_voter: true,
+        };
+
+        let weight = proposal.vote_weight_for_member(&pool, &whale_voter);
+        assert_eq!(weight, 1);
+    }
+
+    #[test]
+    fn test_audit_01_reproduction_changing_mature_cohorts_cannot_turn_failed_vote_into_approved() {
+        // COMFI-AUD-01 reproduction:
+        // Pool has 5 registered members, 3 funded/mature voters in cycle 1.
+        // A multi-cycle ApproveWithdrawal proposal (voting_cycle: 1, deadline_cycle: 2) gets 1 YES vote in cycle 1.
+        // In the next cycle (cycle 2), 1 old voter remains funded, 2 old stop funding, 2 new members join.
+        // New funded quorum is 3/5, so pool stays unlocked.
+        // New mature-voter count is 1.
+        // Under the old bug: Live pool counts with unscaled denominator yielded ceil(1 * 5001 / 10000) = 1 required vote,
+        // causing the historical single YES vote to pass the proposal.
+        // Under the fixed logic: proposal_cycles = 2, so scaled active members = 1 * 2 = 2.
+        // Required votes = ceil(2 * 5001 / 10000) = 2.
+        // 1 YES vote is < 2 required, so the proposal remains failed and rejected.
+
+        let mut pool = create_test_pool();
+        pool.member_count = 5;
+        pool.funded_member_count = 3;
+        pool.voting_member_count = 1; // Only 1 mature voter in ending cycle
+        pool.vote_threshold = 5001;
+
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 1, // Historical single YES vote
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 2, // 2-cycle voting duration
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5001,
+        };
+
+        let required = proposal.required_votes_for_pool(&pool).unwrap();
+        assert_eq!(required, 2); // 1 mature voter * 2 cycles = 2; ceil(2 * 0.5001) = 2
+        assert!(!proposal.is_passed_for_pool(&pool).unwrap()); // 1 < 2 -> REJECTED!
+    }
+
+    #[test]
+    fn test_audit_01_multi_cycle_deadline_proposals_scale_required_threshold_proportionally() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 10;
+        pool.voting_member_count = 10;
+
+        let mut proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ApproveWithdrawal {
+                request: Pubkey::new_unique(),
+            },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5001, // Strict majority
+        };
+
+        // 1 cycle: 10 * 1 = 10; ceil(10 * 0.5001) = 6
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 6);
+
+        // 2 cycles: 10 * 2 = 20; ceil(20 * 0.5001) = 11
+        proposal.deadline_cycle = 2;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 11);
+
+        // 3 cycles: 10 * 3 = 30; ceil(30 * 0.5001) = 16
+        proposal.deadline_cycle = 3;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 16);
+
+        // 5 cycles: 10 * 5 = 50; ceil(50 * 0.5001) = 26
+        proposal.deadline_cycle = 5;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 26);
+
+        // Supermajority proposal (e.g. SetSpenderLimit, min 6667 bps)
+        proposal.action = ProposalAction::SetSpenderLimit {
+            member: Pubkey::new_unique(),
+            cap: 1000,
+        };
+        // 1 cycle: ceil(10 * 0.6667) = 7
+        proposal.deadline_cycle = 1;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 7);
+
+        // 2 cycles: ceil(20 * 0.6667) = 14
+        proposal.deadline_cycle = 2;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 14);
+
+        // 3 cycles: ceil(30 * 0.6667) = 21
+        proposal.deadline_cycle = 3;
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 21);
+    }
+
+    #[test]
+    fn test_audit_01_negative_overflow_escalates_comfi_error() {
+        let pool = create_test_pool();
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::ClosePool,
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: u64::MAX,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: 5001,
+        };
+
+        // When deadline_cycle is near u64::MAX, active_members * proposal_cycles overflows u64
+        // Must escalate MathOverflow rather than wrapping or panicking.
+        let mut big_pool = pool;
+        big_pool.funded_member_count = u32::MAX;
+        let res = proposal.required_votes_for_pool(&big_pool);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), ComfiError::MathOverflow.into());
     }
