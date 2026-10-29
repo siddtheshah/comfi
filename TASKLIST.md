@@ -88,3 +88,9 @@
 
 ## 8. Backend Audit
 - [x] [Completed: Codex-Backend-Audit] Audit current ComFi and UserAccount setup on next-release; leave verified findings in ISSUES.md and clear resolved issues.
+
+## 9. Backend Audit Remediation
+- [ ] COMFI-AUD-04: Enforce refund idempotency and reject post-closure eviction
+- [ ] COMFI-AUD-03: Attribute authorized withdrawals to group benefit and reserve senior liabilities in closure
+- [ ] COMFI-AUD-02: Settle benefit index during rollover and baseline funded status transitions
+- [ ] COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles over proposal lifetime
