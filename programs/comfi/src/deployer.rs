@@ -280,6 +280,7 @@ pub mod deployer_handlers {
         pool.closing_conferred_pool_capital = 0;
         pool.head_member = Some(ctx.accounts.creator_member.key());
         pool.rollover_cursor = None;
+        pool.rollover_prev_member = None;
         pool.is_locked = false;
         pool.min_quorum_members = 1;
         pool.min_quorum_bps = 5001;

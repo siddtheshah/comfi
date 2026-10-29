@@ -73,6 +73,10 @@ pub fn unlink_member(
         pool.rollover_cursor = target_next;
     }
 
+    if pool.rollover_prev_member == Some(target_key) {
+        pool.rollover_prev_member = None;
+    }
+
     Ok(())
 }
 
@@ -731,6 +735,7 @@ pub struct Pool {
     pub closing_conferred_pool_capital: u64,
     pub head_member: Option<Pubkey>,
     pub rollover_cursor: Option<Pubkey>,
+    pub rollover_prev_member: Option<Pubkey>,
     pub is_locked: bool,
     pub min_quorum_members: u32,
     pub min_quorum_bps: u32,
@@ -809,7 +814,7 @@ pub struct PoolAutoClosedEvent {
 }
 
 impl Pool {
-    pub const BASE_SPACE: usize = 8 + 534;
+    pub const BASE_SPACE: usize = 8 + 567;
     pub const SPACE: usize = Self::BASE_SPACE;
 
     pub fn space(_member_cap: u32) -> usize {
@@ -1701,7 +1706,11 @@ pub fn process_cycle_proposals<'info>(
             proposal.state = ProposalState::Rejected;
         }
 
-        proposal.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
+        {
+            let mut data = account_info.try_borrow_mut_data()?;
+            let mut cursor: &mut [u8] = &mut data[..];
+            proposal.try_serialize(&mut cursor)?;
+        }
     }
     Ok(())
 }
@@ -1714,11 +1723,15 @@ pub fn process_cycle_members<'info>(
     let (mut current_expected, mut newly_funded_count, mut newly_voting_count) = match pool.rollover_cursor {
         Some(cursor) => (cursor, pool.funded_member_count, pool.voting_member_count),
         None => match pool.head_member {
-            Some(head) => (head, 0, 0),
+            Some(head) => {
+                pool.rollover_prev_member = None;
+                (head, 0, 0)
+            }
             None => {
                 pool.funded_member_count = 0;
                 pool.voting_member_count = 0;
                 pool.rollover_cursor = None;
+                pool.rollover_prev_member = None;
                 return Ok(());
             }
         },
@@ -1726,8 +1739,41 @@ pub fn process_cycle_members<'info>(
 
     let mut processed_members: usize = 0;
     let mut prev_retained_idx: Option<usize> = None;
+    let mut start_idx = 0;
+
+    if pool.rollover_cursor.is_some() {
+        if let Some(prev_key) = pool.rollover_prev_member {
+            if !remaining_accounts.is_empty() && remaining_accounts[0].key == &prev_key {
+                let prev_ai = &remaining_accounts[0];
+                require!(prev_ai.data_len() >= 8, ComfiError::IncompleteMemberList);
+                let disc = {
+                    let data = prev_ai.try_borrow_data()?;
+                    let mut d = [0u8; 8];
+                    d.copy_from_slice(&data[..8]);
+                    d
+                };
+                require!(disc == Member::DISCRIMINATOR, ComfiError::IncompleteMemberList);
+                require!(prev_ai.is_writable, ComfiError::Unauthorized);
+
+                let prev_member = {
+                    let data = prev_ai.try_borrow_data()?;
+                    let mut slice: &[u8] = &data;
+                    Member::try_deserialize(&mut slice).map_err(|_| ComfiError::IncompleteMemberList)?
+                };
+                require!(prev_member.pool == pool_key, ComfiError::Unauthorized);
+                require!(prev_member.status == MemberStatus::Active, ComfiError::IncompleteMemberList);
+                require!(prev_member.next_member == Some(current_expected), ComfiError::IncompleteMemberList);
+
+                prev_retained_idx = Some(0);
+                start_idx = 1;
+            }
+        }
+    }
 
     for (idx, account_info) in remaining_accounts.iter().enumerate() {
+        if idx < start_idx {
+            continue;
+        }
         if account_info.data_len() < 8 {
             break;
         }
@@ -1786,7 +1832,11 @@ pub fn process_cycle_members<'info>(
             member.is_matured_voter = false;
             member.next_member = None;
             member.last_benefit_index = pool.cumulative_benefit_per_member;
-            member.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
+            {
+                let mut data = account_info.try_borrow_mut_data()?;
+                let mut cursor: &mut [u8] = &mut data[..];
+                member.try_serialize(&mut cursor)?;
+            }
 
             pool.member_count = pool.member_count.saturating_sub(1);
 
@@ -1798,9 +1848,15 @@ pub fn process_cycle_members<'info>(
                     Member::try_deserialize(&mut s)?
                 };
                 prev_member.next_member = next_ptr;
-                prev_member.try_serialize(&mut *prev_ai.try_borrow_mut_data()?)?;
-            } else {
+                {
+                    let mut data = prev_ai.try_borrow_mut_data()?;
+                    let mut cursor: &mut [u8] = &mut data[..];
+                    prev_member.try_serialize(&mut cursor)?;
+                }
+            } else if pool.head_member == Some(*account_info.key) {
                 pool.head_member = next_ptr;
+            } else {
+                return err!(ComfiError::IncompleteMemberList);
             }
 
             emit!(MemberExitedEvent {
@@ -1852,8 +1908,13 @@ pub fn process_cycle_members<'info>(
             }
             member.surplus_cycle = pool.current_cycle;
 
-            member.try_serialize(&mut *account_info.try_borrow_mut_data()?)?;
+            {
+                let mut data = account_info.try_borrow_mut_data()?;
+                let mut cursor: &mut [u8] = &mut data[..];
+                member.try_serialize(&mut cursor)?;
+            }
             prev_retained_idx = Some(idx);
+            pool.rollover_prev_member = Some(*account_info.key);
         }
 
         match next_ptr {
@@ -1862,6 +1923,7 @@ pub fn process_cycle_members<'info>(
             }
             None => {
                 pool.rollover_cursor = None;
+                pool.rollover_prev_member = None;
                 pool.funded_member_count = newly_funded_count;
                 pool.voting_member_count = newly_voting_count;
                 return Ok(());
@@ -1907,6 +1969,7 @@ pub fn roll_cycle(ctx: Context<RollCycle>) -> Result<()> {
         pool.apply_pending_config();
         pool.funded_member_count = 0;
         pool.voting_member_count = 0;
+        pool.rollover_prev_member = None;
     }
 
     let ending_cycle = pool.current_cycle.saturating_sub(1);
@@ -1959,6 +2022,7 @@ pub fn test_roll_cycle(ctx: Context<TestPoolOnly>) -> Result<()> {
         pool.apply_pending_config();
         pool.funded_member_count = 0;
         pool.voting_member_count = 0;
+        pool.rollover_prev_member = None;
     }
 
     let ending_cycle = pool.current_cycle.saturating_sub(1);
@@ -1991,6 +2055,7 @@ pub fn test_advance_cycles(ctx: Context<TestPoolOnly>, count: u64) -> Result<()>
     pool.funded_member_count = 0;
     pool.voting_member_count = 0;
     pool.rollover_cursor = None;
+    pool.rollover_prev_member = None;
 
     process_cycle_members(pool_key, pool, ctx.remaining_accounts)?;
 
@@ -3063,6 +3128,7 @@ mod tests {
             closing_conferred_pool_capital: 0,
             head_member: None,
             rollover_cursor: None,
+            rollover_prev_member: None,
             is_locked: false,
             min_quorum_members: 0,
             min_quorum_bps: 0,
@@ -3245,7 +3311,7 @@ mod tests {
 
     #[test]
     fn test_account_space_constants() {
-        assert_eq!(Pool::SPACE, 8 + 534);
+        assert_eq!(Pool::SPACE, 8 + 567);
         assert_eq!(
             Member::SPACE,
             8 + 325
@@ -10352,6 +10418,444 @@ mod tests {
         let res = proposal.required_votes_for_pool(&big_pool);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), ComfiError::MathOverflow.into());
+    }
+
+    // =========================================================================
+    // Regression Tests for COMFI-SEC-10: Member departures & chunked rollover
+    // =========================================================================
+
+    fn create_test_member_data(
+        pool: Pubkey,
+        wallet: Pubkey,
+        next_member: Option<Pubkey>,
+        status: MemberStatus,
+        surplus: u64,
+        funded: bool,
+    ) -> Vec<u8> {
+        let member = Member {
+            pool,
+            wallet,
+            role: MemberRole::Member,
+            is_funded: funded,
+            deposited_total: surplus,
+            surplus_amount: surplus,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: surplus,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            status,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: if funded { 1 } else { 0 },
+            is_matured_voter: funded,
+            next_member,
+        };
+        let mut data = vec![0u8; Member::SPACE];
+        let mut cursor: &mut [u8] = &mut data[..];
+        member.try_serialize(&mut cursor).unwrap();
+        data
+    }
+
+    #[test]
+    fn test_sec_10_single_chunk_active_and_leaving_serialization_reuse() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+
+        let owner = crate::ID;
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+
+        let mut m1_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m2_key), MemberStatus::Active, 100, true);
+        let mut m2_data = create_test_member_data(pool.global, Pubkey::new_unique(), None, MemberStatus::Leaving, 0, false);
+
+        pool.head_member = Some(m1_key);
+        pool.member_count = 2;
+
+        let mut l1 = 1_000_000;
+        let mut l2 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let a2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+
+        let accounts = vec![a1, a2];
+        let res = pool_handlers::process_cycle_members(pool.global, &mut pool, &accounts);
+        assert!(res.is_ok());
+
+        // Prior to fix, serializing A through `&mut *account_info.try_borrow_mut_data()?` advanced
+        // AccountInfo's internal slice, causing deserialization during B's link repair to fail
+        // with AccountDiscriminatorMismatch.
+        // With fix, serialization uses local cursor slice, and AccountInfo borrow remains valid:
+        let a1_info = &accounts[0];
+        let m1_borrowed = {
+            let data = a1_info.try_borrow_data().unwrap();
+            let mut slice: &[u8] = &data;
+            Member::try_deserialize(&mut slice).unwrap()
+        };
+        assert_eq!(m1_borrowed.next_member, None);
+        assert_eq!(m1_borrowed.status, MemberStatus::Active);
+        assert!(m1_borrowed.is_funded);
+
+        let a2_info = &accounts[1];
+        let m2_borrowed = {
+            let data = a2_info.try_borrow_data().unwrap();
+            let mut slice: &[u8] = &data;
+            Member::try_deserialize(&mut slice).unwrap()
+        };
+        assert_eq!(m2_borrowed.status, MemberStatus::Exited);
+        assert_eq!(m2_borrowed.next_member, None);
+
+        assert_eq!(pool.head_member, Some(m1_key));
+        assert_eq!(pool.member_count, 1);
+        assert_eq!(pool.funded_member_count, 1);
+        assert!(pool.rollover_cursor.is_none());
+        assert!(pool.rollover_prev_member.is_none());
+    }
+
+    #[test]
+    fn test_sec_10_chunked_interior_departure_preserves_head_and_repairs_chain() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+
+        let owner = crate::ID;
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let m3_key = Pubkey::new_unique();
+
+        // Chain: M1(active) -> M2(leaving) -> M3(active)
+        let mut m1_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m2_key), MemberStatus::Active, 100, true);
+        let mut m2_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m3_key), MemberStatus::Leaving, 0, false);
+        let mut m3_data = create_test_member_data(pool.global, Pubkey::new_unique(), None, MemberStatus::Active, 100, true);
+
+        pool.head_member = Some(m1_key);
+        pool.member_count = 3;
+
+        // Chunk 1: [M1]
+        let mut l1 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let chunk_1 = vec![a1];
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &chunk_1).unwrap();
+
+        assert_eq!(pool.rollover_cursor, Some(m2_key));
+        assert_eq!(pool.rollover_prev_member, Some(m1_key));
+        assert_eq!(pool.head_member, Some(m1_key));
+
+        // Negative test: Calling Chunk 2 without M1 predecessor when M2 is leaving must escalate
+        let mut m2_neg_data = m2_data.clone();
+        let mut m3_neg_data = m3_data.clone();
+        let mut l2_neg = 1_000_000;
+        let mut l3_neg = 1_000_000;
+        let a2_neg = AccountInfo::new(&m2_key, false, true, &mut l2_neg, &mut m2_neg_data, &owner, false);
+        let a3_neg = AccountInfo::new(&m3_key, false, true, &mut l3_neg, &mut m3_neg_data, &owner, false);
+        let mut pool_neg = pool.clone();
+        let err = pool_handlers::process_cycle_members(pool_neg.global, &mut pool_neg, &[a2_neg, a3_neg]).unwrap_err();
+        assert_eq!(err, ComfiError::IncompleteMemberList.into());
+
+        // Chunk 2: [M1(predecessor), M2(leaving), M3(active)]
+        let mut l1_c2 = 1_000_000;
+        let mut l2 = 1_000_000;
+        let mut l3 = 1_000_000;
+        let a1_c2 = AccountInfo::new(&m1_key, false, true, &mut l1_c2, &mut m1_data, &owner, false);
+        let a2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        let a3 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        let chunk_2 = vec![a1_c2, a2, a3];
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &chunk_2).unwrap();
+
+        // Rollover completes
+        assert!(pool.rollover_cursor.is_none());
+        assert!(pool.rollover_prev_member.is_none());
+        // Head MUST still be M1 (not overwritten to M3!)
+        assert_eq!(pool.head_member, Some(m1_key));
+        assert_eq!(pool.member_count, 2);
+        assert_eq!(pool.funded_member_count, 2);
+
+        // M1 next_member must point to M3
+        let m1_final = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+        assert_eq!(m1_final.next_member, Some(m3_key));
+        // M1 obligations were not reprocessed in chunk 2 (surplus was 100 - 50 = 50 in chunk 1, remained 50)
+        assert_eq!(m1_final.surplus_amount, 50);
+
+        // M2 is Exited
+        let m2_final = Member::try_deserialize(&mut &m2_data[..]).unwrap();
+        assert_eq!(m2_final.status, MemberStatus::Exited);
+        assert_eq!(m2_final.next_member, None);
+
+        // M3 is Active and next is None
+        let m3_final = Member::try_deserialize(&mut &m3_data[..]).unwrap();
+        assert_eq!(m3_final.status, MemberStatus::Active);
+        assert_eq!(m3_final.next_member, None);
+    }
+
+    #[test]
+    fn test_sec_10_chunked_head_departure() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+
+        let owner = crate::ID;
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let m3_key = Pubkey::new_unique();
+
+        // Chain: M1(leaving) -> M2(active) -> M3(active)
+        let mut m1_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m2_key), MemberStatus::Leaving, 0, false);
+        let mut m2_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m3_key), MemberStatus::Active, 100, true);
+        let mut m3_data = create_test_member_data(pool.global, Pubkey::new_unique(), None, MemberStatus::Active, 100, true);
+
+        pool.head_member = Some(m1_key);
+        pool.member_count = 3;
+
+        // Chunk 1: [M1(leaving)]
+        let mut l1 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1]).unwrap();
+
+        // M1 was head and left, so pool.head_member is updated to M2
+        assert_eq!(pool.head_member, Some(m2_key));
+        assert_eq!(pool.rollover_cursor, Some(m2_key));
+        assert!(pool.rollover_prev_member.is_none());
+        assert_eq!(pool.member_count, 2);
+
+        // Chunk 2: [M2, M3]
+        let mut l2 = 1_000_000;
+        let mut l3 = 1_000_000;
+        let a2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        let a3 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a2, a3]).unwrap();
+
+        assert!(pool.rollover_cursor.is_none());
+        assert!(pool.rollover_prev_member.is_none());
+        assert_eq!(pool.head_member, Some(m2_key));
+        assert_eq!(pool.member_count, 2);
+        assert_eq!(pool.funded_member_count, 2);
+
+        let m2_final = Member::try_deserialize(&mut &m2_data[..]).unwrap();
+        assert_eq!(m2_final.next_member, Some(m3_key));
+    }
+
+    #[test]
+    fn test_sec_10_chunked_tail_departure() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+
+        let owner = crate::ID;
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let m3_key = Pubkey::new_unique();
+
+        // Chain: M1(active) -> M2(active) -> M3(leaving)
+        let mut m1_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m2_key), MemberStatus::Active, 100, true);
+        let mut m2_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m3_key), MemberStatus::Active, 100, true);
+        let mut m3_data = create_test_member_data(pool.global, Pubkey::new_unique(), None, MemberStatus::Leaving, 0, false);
+
+        pool.head_member = Some(m1_key);
+        pool.member_count = 3;
+
+        // Chunk 1: [M1, M2]
+        let mut l1 = 1_000_000;
+        let mut l2 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        let a2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1, a2]).unwrap();
+
+        assert_eq!(pool.rollover_cursor, Some(m3_key));
+        assert_eq!(pool.rollover_prev_member, Some(m2_key));
+        assert_eq!(pool.funded_member_count, 2);
+
+        // Chunk 2: [M2(predecessor), M3(leaving)]
+        let mut l2_c2 = 1_000_000;
+        let mut l3 = 1_000_000;
+        let a2_c2 = AccountInfo::new(&m2_key, false, true, &mut l2_c2, &mut m2_data, &owner, false);
+        let a3 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a2_c2, a3]).unwrap();
+
+        assert!(pool.rollover_cursor.is_none());
+        assert!(pool.rollover_prev_member.is_none());
+        assert_eq!(pool.head_member, Some(m1_key));
+        assert_eq!(pool.member_count, 2);
+        assert_eq!(pool.funded_member_count, 2);
+
+        let m2_final = Member::try_deserialize(&mut &m2_data[..]).unwrap();
+        assert_eq!(m2_final.next_member, None);
+
+        let m3_final = Member::try_deserialize(&mut &m3_data[..]).unwrap();
+        assert_eq!(m3_final.status, MemberStatus::Exited);
+        assert_eq!(m3_final.next_member, None);
+    }
+
+    #[test]
+    fn test_sec_10_chunked_consecutive_departures_and_subsequent_rollover() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+
+        let owner = crate::ID;
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let m3_key = Pubkey::new_unique();
+        let m4_key = Pubkey::new_unique();
+
+        // Chain: M1(active) -> M2(leaving) -> M3(leaving) -> M4(active)
+        let mut m1_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m2_key), MemberStatus::Active, 100, true);
+        let mut m2_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m3_key), MemberStatus::Leaving, 0, false);
+        let mut m3_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m4_key), MemberStatus::Leaving, 0, false);
+        let mut m4_data = create_test_member_data(pool.global, Pubkey::new_unique(), None, MemberStatus::Active, 100, true);
+
+        pool.head_member = Some(m1_key);
+        pool.member_count = 4;
+
+        // Chunk 1: [M1]
+        let mut l1 = 1_000_000;
+        let a1 = AccountInfo::new(&m1_key, false, true, &mut l1, &mut m1_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1]).unwrap();
+
+        assert_eq!(pool.rollover_cursor, Some(m2_key));
+        assert_eq!(pool.rollover_prev_member, Some(m1_key));
+
+        // Chunk 2: [M1, M2(leaving)] (split right between consecutive departures!)
+        let mut l1_c2 = 1_000_000;
+        let mut l2 = 1_000_000;
+        let a1_c2 = AccountInfo::new(&m1_key, false, true, &mut l1_c2, &mut m1_data, &owner, false);
+        let a2 = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_c2, a2]).unwrap();
+
+        // M1.next_member was updated to M3. M1 remains rollover_prev_member!
+        assert_eq!(pool.rollover_cursor, Some(m3_key));
+        assert_eq!(pool.rollover_prev_member, Some(m1_key));
+        assert_eq!(pool.member_count, 3);
+
+        // Chunk 3: [M1, M3(leaving), M4(active)]
+        let mut l1_c3 = 1_000_000;
+        let mut l3 = 1_000_000;
+        let mut l4 = 1_000_000;
+        let a1_c3 = AccountInfo::new(&m1_key, false, true, &mut l1_c3, &mut m1_data, &owner, false);
+        let a3 = AccountInfo::new(&m3_key, false, true, &mut l3, &mut m3_data, &owner, false);
+        let a4 = AccountInfo::new(&m4_key, false, true, &mut l4, &mut m4_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_c3, a3, a4]).unwrap();
+
+        assert!(pool.rollover_cursor.is_none());
+        assert!(pool.rollover_prev_member.is_none());
+        assert_eq!(pool.head_member, Some(m1_key));
+        assert_eq!(pool.member_count, 2);
+        assert_eq!(pool.funded_member_count, 2);
+
+        let m1_final = Member::try_deserialize(&mut &m1_data[..]).unwrap();
+        assert_eq!(m1_final.next_member, Some(m4_key));
+
+        let m4_final = Member::try_deserialize(&mut &m4_data[..]).unwrap();
+        assert_eq!(m4_final.next_member, None);
+
+        // --- Subsequent complete rollover verifying reachability and counts ---
+        pool.current_cycle = 2;
+
+        // Traverse chain from head to verify reachability
+        let mut reachable = 0;
+        let mut curr = pool.head_member;
+        let member_map = [(&m1_key, &m1_data), (&m4_key, &m4_data)];
+        while let Some(k) = curr {
+            reachable += 1;
+            let (_, data) = member_map.iter().find(|(key, _)| **key == k).unwrap();
+            let m = Member::try_deserialize(&mut &data[..]).unwrap();
+            curr = m.next_member;
+        }
+        assert_eq!(reachable, pool.member_count);
+        assert_eq!(reachable, 2);
+
+        // Run cycle 2 rollover
+        let mut l1_s2 = 1_000_000;
+        let mut l4_s2 = 1_000_000;
+        let a1_s2 = AccountInfo::new(&m1_key, false, true, &mut l1_s2, &mut m1_data, &owner, false);
+        let a4_s2 = AccountInfo::new(&m4_key, false, true, &mut l4_s2, &mut m4_data, &owner, false);
+        pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_s2, a4_s2]).unwrap();
+        assert!(pool.rollover_cursor.is_none());
+        assert!(pool.rollover_prev_member.is_none());
+        assert_eq!(pool.member_count, 2);
+        assert_eq!(pool.funded_member_count, 2);
+    }
+
+    #[test]
+    fn test_sec_10_negative_predecessor_and_departure_escalations() {
+        let mut pool = create_test_pool();
+        pool.testing_enabled = true;
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+
+        let owner = crate::ID;
+        let m1_key = Pubkey::new_unique();
+        let m2_key = Pubkey::new_unique();
+        let foreign_pool = Pubkey::new_unique();
+
+        // 1. Resuming chunk with leading account that has wrong discriminator
+        pool.rollover_cursor = Some(m2_key);
+        pool.rollover_prev_member = Some(m1_key);
+        let mut bad_disc_data = vec![0u8; Member::SPACE]; // Discriminator is 0
+        let mut l1 = 1_000_000;
+        let a1_bad_disc = AccountInfo::new(&m1_key, false, true, &mut l1, &mut bad_disc_data, &owner, false);
+        let err = pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_bad_disc]).unwrap_err();
+        assert_eq!(err, ComfiError::IncompleteMemberList.into());
+
+        // 2. Resuming chunk with leading account that is not writable
+        let mut m1_data = create_test_member_data(pool.global, Pubkey::new_unique(), Some(m2_key), MemberStatus::Active, 100, true);
+        let mut l1_ro = 1_000_000;
+        let a1_ro = AccountInfo::new(&m1_key, false, false, &mut l1_ro, &mut m1_data, &owner, false); // is_writable = false
+        let err = pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_ro]).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // 3. Resuming chunk with leading account belonging to foreign pool
+        let mut m1_foreign = create_test_member_data(foreign_pool, Pubkey::new_unique(), Some(m2_key), MemberStatus::Active, 100, true);
+        let mut l1_for = 1_000_000;
+        let a1_foreign = AccountInfo::new(&m1_key, false, true, &mut l1_for, &mut m1_foreign, &owner, false);
+        let err = pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_foreign]).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // 4. Resuming chunk with leading account whose next_member does not match rollover_cursor
+        let wrong_next = Pubkey::new_unique();
+        let mut m1_wrong_next = create_test_member_data(pool.global, Pubkey::new_unique(), Some(wrong_next), MemberStatus::Active, 100, true);
+        let mut l1_wn = 1_000_000;
+        let a1_wrong_next = AccountInfo::new(&m1_key, false, true, &mut l1_wn, &mut m1_wrong_next, &owner, false);
+        let err = pool_handlers::process_cycle_members(pool.global, &mut pool, &[a1_wrong_next]).unwrap_err();
+        assert_eq!(err, ComfiError::IncompleteMemberList.into());
+
+        // 5. Leaving member encountered when not head and no retained predecessor
+        pool.rollover_cursor = Some(m2_key);
+        pool.rollover_prev_member = None;
+        pool.head_member = Some(m1_key); // Real head is m1, not m2
+        let mut m2_leaving = create_test_member_data(pool.global, Pubkey::new_unique(), None, MemberStatus::Leaving, 0, false);
+        let mut l2 = 1_000_000;
+        let a2_leaving = AccountInfo::new(&m2_key, false, true, &mut l2, &mut m2_leaving, &owner, false);
+        let err = pool_handlers::process_cycle_members(pool.global, &mut pool, &[a2_leaving]).unwrap_err();
+        assert_eq!(err, ComfiError::IncompleteMemberList.into());
+    }
+
+    #[test]
+    fn test_unlink_member_clears_rollover_prev_member_if_pointing_to_target() {
+        let mut pool = create_test_pool();
+        let target_key = Pubkey::new_unique();
+        let next_key = Pubkey::new_unique();
+        pool.head_member = Some(target_key);
+        pool.rollover_prev_member = Some(target_key);
+        unlink_member(&mut pool, target_key, Some(next_key), None).unwrap();
+        assert_eq!(pool.head_member, Some(next_key));
+        assert!(pool.rollover_prev_member.is_none());
     }
 
 }

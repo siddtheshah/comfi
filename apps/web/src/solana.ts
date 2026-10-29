@@ -87,6 +87,7 @@ export type PoolMetrics = {
   closingConferredPoolCapital: bigint
   headMember: string | null
   rolloverCursor: string | null
+  rolloverPrevMember: string | null
   isLocked: boolean
   minQuorumMembers: number
   minQuorumBps: number
@@ -146,7 +147,7 @@ function decodeMetrics(bytes: Uint8Array): PoolMetrics | null {
     totalSettledCapital: u64(), fundedMemberCount: u32(), cumulativeBenefitPerMember: u128(),
     totalConferredCapital: u64(), hasSnapshottedClosure: bool(), closingVaultBasis: u64(),
     closingNonConferredBasis: u64(), closingConferredPoolCapital: u64(),
-    headMember: option(pubkey), rolloverCursor: option(pubkey), isLocked: bool(),
+    headMember: option(pubkey), rolloverCursor: option(pubkey), rolloverPrevMember: option(pubkey), isLocked: bool(),
     minQuorumMembers: u32(), minQuorumBps: u32(), lockedConsecutiveCycles: u64(), autoCloseCyclesThreshold: u64(),
     pendingMinQuorumMembers: u32(), pendingMinQuorumBps: u32(), pendingAutoCloseCyclesThreshold: u64(),
     totalEscrowedSurplus: u64(), evictionDeadlineCycles: u64(), evictionExecutionMode: mode(),

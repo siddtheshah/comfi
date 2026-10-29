@@ -5,7 +5,7 @@ export const poolAddress = 'H3hTVqczBEqDXw4CPNVXnEdeFSNz1jgY7W2oqMVspm9M'
 export const creator = 'GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB'
 
 // Independent Borsh writer in Rust Pool declaration order, including Option payloads.
-export function poolBytes({ head = true, cursor = false, pending = false, closing = false, locked = true, open = false } = {}) {
+export function poolBytes({ head = true, cursor = false, prev = false, pending = false, closing = false, locked = true, open = false } = {}) {
   const parts: Buffer[] = []
   const byte = (v: number) => parts.push(Buffer.from([v]))
   const u32 = (v: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(v); parts.push(b) }
@@ -24,7 +24,7 @@ export function poolBytes({ head = true, cursor = false, pending = false, closin
   byte(+closing); u64(30_000_000n); u64(3n); byte(1)
   u64(4_000_000n); u32(1); u64(123n); u64(1n); // u128 benefit, low then high
   u64(9_007_199_254_740_993n); byte(+closing); u64(100_000_000n); u64(30_000_000n); u64(70_000_000n)
-  optionKey(head); optionKey(cursor); byte(+locked); u32(2); u32(5001)
+  optionKey(head); optionKey(cursor); optionKey(prev); byte(+locked); u32(2); u32(5001)
   u64(2n); u64(3n); u32(3); u32(6000); u64(4n)
   u64(2_000_000n); u64(3n); byte(1); u64(4n); byte(0); byte(+open)
   u64(2n); u64(1n); u32(1)

@@ -16,6 +16,7 @@ for (const head of [false, true]) for (const cursor of [false, true]) for (const
     const m = pool.metrics!
     assert.equal(m.headMember, head ? creator : null)
     assert.equal(m.rolloverCursor, cursor ? creator : null)
+    assert.equal(m.rolloverPrevMember, null)
     assert.equal(m.totalConferredCapital, 9_007_199_254_740_993n)
     assert.equal(m.cumulativeBenefitPerMember, (1n << 64n) + 123n)
     assert.equal(m.totalNonConferredCapital, 30_000_000n)
@@ -54,8 +55,10 @@ test('legacy layouts keep governance/accounting unavailable; malformed layouts r
   assert.equal(old.memberObligationAmountAtomic, 10_000_000n)
   assert.equal(old.currentCycle, 9n)
   assert.equal(old.metrics, null)
-  const padded = Buffer.alloc(542); poolBytes({ head: false, cursor: false }).copy(padded)
+  const padded = Buffer.alloc(575); poolBytes({ head: false, cursor: false }).copy(padded)
   assert.equal(decodePoolAccountData(poolAddress, padded).metrics!.admissionMode, 'InviteVouched')
+  const withPrev = decodePoolAccountData(poolAddress, poolBytes({ prev: true }))
+  assert.equal(withPrev.metrics!.rolloverPrevMember, creator)
   assert.throws(() => toBase58(new Uint8Array()), /expected non-empty/)
 })
 
