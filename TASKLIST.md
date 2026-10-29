@@ -94,3 +94,8 @@
 - [x] [Completed: Subagent-AUD-03] COMFI-AUD-03: Attribute authorized withdrawals to group benefit and reserve senior liabilities in closure
 - [x] [Completed: Subagent-AUD-02] COMFI-AUD-02: Settle benefit index during rollover and baseline funded status transitions
 - [x] [Completed: Subagent-AUD-01] COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles over proposal lifetime
+- [ ] COMFI-SEC-10: Member departures corrupt or block linked-list rollover
+- [ ] COMFI-AUD-06: Evicting a nonvoter incorrectly reduces the eligible electorate
+- [ ] COMFI-AUD-07: Singleton global initialization trusts the first arbitrary signer
+- [ ] COMFI-AUD-08: Shipped rollover clients are incompatible with current account fields and chunking
+- [ ] COMFI-AUD-14: Pre-funding a candidate member PDA blocks admission
