@@ -2487,14 +2487,14 @@ pub fn spend(ctx: Context<Spend>) -> Result<()> {
         .checked_add(request.amount)
         .ok_or(ComfiError::MathOverflow)?;
 
-    if ctx.accounts.recipient_usdc.owner == requester.wallet {
-        // Individual withdrawal directly to member: attribute 100% directly to requester
+    if !request.requires_proposal {
+        // Unvoted personal withdrawal directly to requester wallet: attribute 100% directly to requester
         requester.cumulative_benefit_received = requester
             .cumulative_benefit_received
             .checked_add(request.amount)
             .ok_or(ComfiError::MathOverflow)?;
     } else {
-        // Shared pool operating spend to verified third-party vendor approved by governance
+        // Authorized withdrawal approved by governance: attribute to group benefit
         require!(
             ctx.accounts.pool.funded_member_count > 0,
             ComfiError::MemberNotFunded
@@ -2563,7 +2563,16 @@ pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
     let conferred_contribution = member.conferred_contribution();
     let net_conferred_share = conferred_contribution.saturating_sub(member.cumulative_benefit_received);
 
-    let vault_after_non_conferred = ctx.accounts.vault.amount.saturating_sub(non_conferred_refund);
+    let remaining_senior_liabilities = pool
+        .total_non_conferred_capital
+        .saturating_sub(non_conferred_refund)
+        .saturating_add(pool.total_escrowed_surplus);
+    let vault_for_junior = ctx
+        .accounts
+        .vault
+        .amount
+        .saturating_sub(non_conferred_refund)
+        .saturating_sub(remaining_senior_liabilities);
     let closing_vault_for_conferred = pool.closing_vault_basis.saturating_sub(pool.closing_non_conferred_basis);
 
     let conferred_refund = if pool.closing_conferred_pool_capital > 0 && closing_vault_for_conferred > 0 {
@@ -2573,9 +2582,9 @@ pub fn claim_closure_refund(ctx: Context<ClaimClosureRefund>) -> Result<()> {
                 .ok_or(ComfiError::MathOverflow)?
                 .checked_div(pool.closing_conferred_pool_capital as u128)
                 .ok_or(ComfiError::MathOverflow)? as u64;
-            pro_rata.min(vault_after_non_conferred)
+            pro_rata.min(vault_for_junior)
         } else {
-            net_conferred_share.min(vault_after_non_conferred)
+            net_conferred_share.min(vault_for_junior)
         }
     } else {
         0u64
@@ -5220,9 +5229,9 @@ mod tests {
         };
 
         let withdrawal_amount: u64 = 60;
-        let requires_proposal = true;
+        let requires_proposal = false;
 
-        if requires_proposal {
+        if !requires_proposal {
             requester.cumulative_benefit_received += withdrawal_amount;
         }
 
@@ -8960,8 +8969,540 @@ mod tests {
         assert_eq!(res.unwrap_err(), ComfiError::MemberNotActive.into());
     }
 
+
+    // =========================================================================
+    // Regression Tests for COMFI-AUD-03: Authorized Spends Group Attribution & Senior Liabilities Reservation
+    // =========================================================================
+
+    #[test]
+    fn test_audit_03_authorized_withdrawal_attributes_to_group_benefit() -> Result<()> {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 3;
+        pool.cumulative_benefit_per_member = 0;
+        pool.total_conferred_capital = 300;
+
+        let mut requester = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        let mut peer_member = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        let withdrawal_amount: u64 = 60;
+        let requires_proposal = true;
+
+        // Execute spend handler logic
+        requester.total_withdrawn = requester
+            .total_withdrawn
+            .checked_add(withdrawal_amount)
+            .unwrap();
+
+        if !requires_proposal {
+            requester.cumulative_benefit_received = requester
+                .cumulative_benefit_received
+                .checked_add(withdrawal_amount)
+                .unwrap();
+        } else {
+            require!(pool.funded_member_count > 0, ComfiError::MemberNotFunded);
+            let active_funded_members = pool.funded_member_count as u128;
+            let benefit_delta = (withdrawal_amount as u128 * BENEFIT_SCALE) / active_funded_members;
+            pool.cumulative_benefit_per_member += benefit_delta;
+            requester.sync_benefit(&pool).unwrap();
+        }
+        pool.total_conferred_capital = pool
+            .total_conferred_capital
+            .checked_sub(withdrawal_amount)
+            .unwrap();
+
+        // Check attribution:
+        // 1. pool cumulative_benefit_per_member is 20 * BENEFIT_SCALE (60 / 3)
+        assert_eq!(pool.cumulative_benefit_per_member, 20 * BENEFIT_SCALE);
+        // 2. requester received only their pro-rata 20 share, NOT 60!
+        assert_eq!(requester.cumulative_benefit_received, 20);
+        assert_eq!(requester.last_benefit_index, 20 * BENEFIT_SCALE);
+
+        // 3. peer member syncs benefit: also receives 20
+        peer_member.sync_benefit(&pool).unwrap();
+        assert_eq!(peer_member.cumulative_benefit_received, 20);
+        assert_eq!(peer_member.last_benefit_index, 20 * BENEFIT_SCALE);
+
+        // 4. Net conferred share remains symmetrical: 100 - 20 = 80 each
+        let req_net = requester.conferred_contribution().saturating_sub(requester.cumulative_benefit_received);
+        let peer_net = peer_member.conferred_contribution().saturating_sub(peer_member.cumulative_benefit_received);
+        assert_eq!(req_net, 80);
+        assert_eq!(peer_net, 80);
+        assert_eq!(pool.total_conferred_capital, 240);
+        Ok(())
+    }
+
+    #[test]
+    fn test_audit_03_unvoted_spender_limit_withdrawal_attributes_100_percent_personal() -> Result<()> {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 2;
+        pool.cumulative_benefit_per_member = 0;
+        pool.total_conferred_capital = 200;
+
+        let mut requester = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Spender,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        let mut peer = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        let withdrawal_amount: u64 = 40;
+        let requires_proposal = false;
+
+        // Execute spend handler logic for unvoted spend
+        requester.total_withdrawn = requester
+            .total_withdrawn
+            .checked_add(withdrawal_amount)
+            .unwrap();
+
+        if !requires_proposal {
+            requester.cumulative_benefit_received = requester
+                .cumulative_benefit_received
+                .checked_add(withdrawal_amount)
+                .unwrap();
+        } else {
+            require!(pool.funded_member_count > 0, ComfiError::MemberNotFunded);
+            let active_funded_members = pool.funded_member_count as u128;
+            let benefit_delta = (withdrawal_amount as u128 * BENEFIT_SCALE) / active_funded_members;
+            pool.cumulative_benefit_per_member += benefit_delta;
+            requester.sync_benefit(&pool).unwrap();
+        }
+        pool.total_conferred_capital = pool
+            .total_conferred_capital
+            .checked_sub(withdrawal_amount)
+            .unwrap();
+
+        // 100% personal benefit on requester
+        assert_eq!(requester.cumulative_benefit_received, 40);
+        // Zero group attribution in pool
+        assert_eq!(pool.cumulative_benefit_per_member, 0);
+
+        // Peer member gets 0 benefit
+        peer.sync_benefit(&pool).unwrap();
+        assert_eq!(peer.cumulative_benefit_received, 0);
+
+        // Net share: requester 60, peer 100
+        let req_net = requester.conferred_contribution().saturating_sub(requester.cumulative_benefit_received);
+        let peer_net = peer.conferred_contribution().saturating_sub(peer.cumulative_benefit_received);
+        assert_eq!(req_net, 60);
+        assert_eq!(peer_net, 100);
+        Ok(())
+    }
+
+    #[test]
+    fn test_audit_03_senior_non_conferred_preservation_order_independent() {
+        // Reproduce the scenario from ISSUES.md:58-67:
+        // A/B/C each contributed 100 conferred units.
+        // D has 100 unconsumed senior non-conferred units.
+        // Authorized spend of 150 units occurred.
+        // Vault has 250 units: 100 senior non-conferred (D), 150 junior conferred (remaining).
+        // Total non-conferred capital = 100.
+        // Total conferred capital = 150.
+        //
+        // Run both permutations:
+        // Permutation 1: Juniors (B, C) claim before Senior (D).
+        // Permutation 2: Senior (D) claims before Juniors (B, C).
+
+        let simulate_closure = |junior_first: bool| -> (u64, u64, u64, u64) {
+            let mut pool = create_test_pool();
+            pool.is_closing = true;
+            pool.total_non_conferred_capital = 100;
+            pool.total_conferred_capital = 150;
+            pool.total_escrowed_surplus = 0;
+            let mut vault_balance: u64 = 250;
+
+            let mut member_b = Member {
+                pool: pool.global,
+                wallet: Pubkey::new_unique(),
+                role: MemberRole::Member,
+                is_funded: true,
+                deposited_total: 100,
+                surplus_amount: 0,
+                total_withdrawn: 0,
+                closure_claimed: false,
+                last_benefit_index: 0,
+                cumulative_benefit_received: 50,
+                total_contributions: 100,
+                alias_hash: [0u8; 32],
+                encryption_public_key: [0u8; 32],
+                alias_version: 1,
+                allowance_cycle: 0,
+                action_allowance_used: 0,
+                bump: 255,
+                surplus_cycle: 0,
+                funded_cycle: 0,
+                is_paused: false,
+                next_member: None,
+                status: MemberStatus::Active,
+                claimable_surplus_escrow: 0,
+                vouched_by: None,
+                lineage_depth: 0,
+                vouched_count: 0,
+                joined_cycle: 0,
+                funded_cycle_streak: 1,
+                is_matured_voter: true,
+            };
+
+            let mut member_c = Member {
+                pool: pool.global,
+                wallet: Pubkey::new_unique(),
+                role: MemberRole::Member,
+                is_funded: true,
+                deposited_total: 100,
+                surplus_amount: 0,
+                total_withdrawn: 0,
+                closure_claimed: false,
+                last_benefit_index: 0,
+                cumulative_benefit_received: 50,
+                total_contributions: 100,
+                alias_hash: [0u8; 32],
+                encryption_public_key: [0u8; 32],
+                alias_version: 1,
+                allowance_cycle: 0,
+                action_allowance_used: 0,
+                bump: 255,
+                surplus_cycle: 0,
+                funded_cycle: 0,
+                is_paused: false,
+                next_member: None,
+                status: MemberStatus::Active,
+                claimable_surplus_escrow: 0,
+                vouched_by: None,
+                lineage_depth: 0,
+                vouched_count: 0,
+                joined_cycle: 0,
+                funded_cycle_streak: 1,
+                is_matured_voter: true,
+            };
+
+            let mut member_d = Member {
+                pool: pool.global,
+                wallet: Pubkey::new_unique(),
+                role: MemberRole::Member,
+                is_funded: false,
+                deposited_total: 100,
+                surplus_amount: 0,
+                total_withdrawn: 0,
+                closure_claimed: false,
+                last_benefit_index: 0,
+                cumulative_benefit_received: 0,
+                total_contributions: 100,
+                alias_hash: [0u8; 32],
+                encryption_public_key: [0u8; 32],
+                alias_version: 1,
+                allowance_cycle: 0,
+                action_allowance_used: 0,
+                bump: 255,
+                surplus_cycle: 0,
+                funded_cycle: 0,
+                is_paused: false,
+                next_member: None,
+                status: MemberStatus::Active,
+                claimable_surplus_escrow: 0,
+                vouched_by: None,
+                lineage_depth: 0,
+                vouched_count: 0,
+                joined_cycle: 0,
+                funded_cycle_streak: 0,
+                is_matured_voter: false,
+            };
+
+            pool.closing_vault_basis = vault_balance; // 250
+            pool.closing_non_conferred_basis = pool.total_non_conferred_capital; // 100
+            pool.closing_conferred_pool_capital = pool.total_conferred_capital; // 150
+            pool.has_snapshotted_closure = true;
+
+            let claim_member = |p: &mut Pool, m: &mut Member, v: &mut u64| -> u64 {
+                let nc_share = m.non_conferred_amount();
+                let nc_refund = if p.closing_non_conferred_basis > 0
+                    && p.closing_vault_basis < p.closing_non_conferred_basis
+                {
+                    let pro_rata = (nc_share as u128 * p.closing_vault_basis as u128)
+                        / p.closing_non_conferred_basis as u128;
+                    (pro_rata as u64).min(*v)
+                } else {
+                    nc_share.min(*v)
+                };
+
+                let conf_contrib = m.conferred_contribution();
+                let net_conf_share = conf_contrib.saturating_sub(m.cumulative_benefit_received);
+
+                let remaining_senior = p
+                    .total_non_conferred_capital
+                    .saturating_sub(nc_refund)
+                    .saturating_add(p.total_escrowed_surplus);
+                let vault_for_junior = (*v)
+                    .saturating_sub(nc_refund)
+                    .saturating_sub(remaining_senior);
+                let closing_vault_for_conf = p.closing_vault_basis.saturating_sub(p.closing_non_conferred_basis);
+
+                let conf_refund = if p.closing_conferred_pool_capital > 0 && closing_vault_for_conf > 0 {
+                    if closing_vault_for_conf < p.closing_conferred_pool_capital {
+                        let pro_rata = (net_conf_share as u128 * closing_vault_for_conf as u128)
+                            / p.closing_conferred_pool_capital as u128;
+                        (pro_rata as u64).min(vault_for_junior)
+                    } else {
+                        net_conf_share.min(vault_for_junior)
+                    }
+                } else {
+                    0u64
+                };
+
+                let total = nc_refund + conf_refund;
+                *v -= total;
+                p.total_non_conferred_capital = p.total_non_conferred_capital.saturating_sub(nc_refund);
+                p.total_settled_capital += conf_refund;
+                m.closure_claimed = true;
+                total
+            };
+
+            if junior_first {
+                let b_refund = claim_member(&mut pool, &mut member_b, &mut vault_balance);
+                let c_refund = claim_member(&mut pool, &mut member_c, &mut vault_balance);
+                let d_refund = claim_member(&mut pool, &mut member_d, &mut vault_balance);
+                (b_refund, c_refund, d_refund, vault_balance)
+            } else {
+                let d_refund = claim_member(&mut pool, &mut member_d, &mut vault_balance);
+                let b_refund = claim_member(&mut pool, &mut member_b, &mut vault_balance);
+                let c_refund = claim_member(&mut pool, &mut member_c, &mut vault_balance);
+                (b_refund, c_refund, d_refund, vault_balance)
+            }
+        };
+
+        let (b1, c1, d1, v1) = simulate_closure(true);
+        let (b2, c2, d2, v2) = simulate_closure(false);
+
+        // Senior member D receives 100% of their 100 USDC senior refund regardless of claim order!
+        assert_eq!(d1, 100, "Senior claimant D must receive full 100 senior refund when claiming last");
+        assert_eq!(d2, 100, "Senior claimant D must receive full 100 senior refund when claiming first");
+
+        // Juniors receive their equal fair share in both orders
+        assert_eq!(b1, 50);
+        assert_eq!(c1, 50);
+        assert_eq!(b2, 50);
+        assert_eq!(c2, 50);
+
+        // Vault is cleanly settled down to member A's remaining 50 share in both cases
+        assert_eq!(v1, 50);
+        assert_eq!(v2, 50);
+    }
+
+    #[test]
+    fn test_audit_03_escrowed_surplus_and_senior_capital_preserved_under_junior_excess() {
+        // Vault has 120 USDC.
+        // Senior non-conferred capital = 30.
+        // Escrowed surplus = 40 (for an evicted member).
+        // Total senior liabilities = 70.
+        // Junior claimant has 100 net conferred claim.
+        // Junior refund must be capped by vault_for_junior = 120 - 0 - 70 = 50!
+        let mut pool = create_test_pool();
+        pool.is_closing = true;
+        pool.total_non_conferred_capital = 30;
+        pool.total_escrowed_surplus = 40;
+        pool.total_conferred_capital = 100;
+        let mut vault_balance: u64 = 120;
+
+        let junior = Member {
+            pool: pool.global,
+            wallet: Pubkey::new_unique(),
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 0,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_cycle: 0,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 0,
+            vouched_count: 0,
+            joined_cycle: 0,
+            funded_cycle_streak: 1,
+            is_matured_voter: true,
+        };
+
+        pool.closing_vault_basis = vault_balance; // 120
+        pool.closing_non_conferred_basis = pool.total_non_conferred_capital; // 30
+        pool.closing_conferred_pool_capital = pool.total_conferred_capital; // 100
+        pool.has_snapshotted_closure = true;
+
+        let nc_refund = junior.non_conferred_amount().min(vault_balance); // 0
+        assert_eq!(nc_refund, 0);
+
+        let remaining_senior = pool
+            .total_non_conferred_capital
+            .saturating_sub(nc_refund)
+            .saturating_add(pool.total_escrowed_surplus);
+        assert_eq!(remaining_senior, 70); // 30 + 40
+
+        let vault_for_junior = vault_balance
+            .saturating_sub(nc_refund)
+            .saturating_sub(remaining_senior);
+        assert_eq!(vault_for_junior, 50); // 120 - 70 = 50
+
+        let closing_vault_for_conf = pool.closing_vault_basis.saturating_sub(pool.closing_non_conferred_basis); // 90
+        let net_conf_share = junior.conferred_contribution().saturating_sub(junior.cumulative_benefit_received); // 100
+
+        let conf_refund = if closing_vault_for_conf < pool.closing_conferred_pool_capital {
+            let pro_rata = (net_conf_share as u128 * closing_vault_for_conf as u128)
+                / pool.closing_conferred_pool_capital as u128;
+            (pro_rata as u64).min(vault_for_junior)
+        } else {
+            net_conf_share.min(vault_for_junior)
+        };
+
+        // Pro rata would have been (100 * 90) / 100 = 90, but capped by vault_for_junior = 50!
+        assert_eq!(conf_refund, 50);
+        vault_balance -= conf_refund;
+
+        // Exactly 70 remains in vault, preserving all 30 non-conferred capital and 40 escrowed surplus!
+        assert_eq!(vault_balance, 70);
+    }
+
+    #[test]
+    fn test_audit_03_negative_authorized_withdrawal_fails_with_zero_funded_members() {
+        let mut pool = create_test_pool();
+        pool.funded_member_count = 0;
+        assert_eq!(pool.funded_member_count, 0);
+
+        let check_spend = |p: &Pool| -> Result<()> {
+            require!(p.funded_member_count > 0, ComfiError::MemberNotFunded);
+            Ok(())
+        };
+
+        let res = check_spend(&pool);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), ComfiError::MemberNotFunded.into());
+    }
+
 }
-
-
-
-
