@@ -85,3 +85,6 @@
 - [x] [Completed: Codex-Pool-Account-Rescue] Integrate the selected wallet/UserAccount with pool deployment and derive membership from on-chain wallet links and Member accounts; account bootstrap alone does not establish pool authorization.
 - [ ] Correct the browser USDC faucet recipient and error reporting, filter balances by the deployment mint, and preserve stored wallet identity on corruption.
 - [ ] Require live account-to-pool deployment coverage in addition to mocked browser endpoint tests.
+
+## 8. Backend Audit
+- [ ] [Claimed: Codex-Backend-Audit | Deadline: 2026-10-29T20:04:10Z] Audit current ComFi and UserAccount setup on next-release; leave verified findings in ISSUES.md and clear resolved issues.
