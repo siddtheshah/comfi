@@ -3040,10 +3040,17 @@ pub fn execute_admit_member(ctx: Context<ExecuteAdmitMember>) -> Result<()> {
         ctx.accounts.candidate_member.data_is_empty(),
         ComfiError::MemberAlreadyExists
     );
+    require_keys_eq!(
+        *ctx.accounts.candidate_member.owner,
+        anchor_lang::solana_program::system_program::ID,
+        ComfiError::Unauthorized
+    );
 
     let rent = Rent::get()?;
     let member_space = Member::SPACE;
-    let member_lamports = rent.minimum_balance(member_space);
+    let required_lamports = rent.minimum_balance(member_space);
+    let current_lamports = ctx.accounts.candidate_member.lamports();
+    let top_up = required_lamports.saturating_sub(current_lamports);
 
     let pool_key = pool.key();
     let member_seeds: &[&[u8]] = &[
@@ -3053,16 +3060,39 @@ pub fn execute_admit_member(ctx: Context<ExecuteAdmitMember>) -> Result<()> {
         &[member_bump],
     ];
 
+    if top_up > 0 {
+        anchor_lang::solana_program::program::invoke(
+            &anchor_lang::solana_program::system_instruction::transfer(
+                ctx.accounts.payer.key,
+                ctx.accounts.candidate_member.key,
+                top_up,
+            ),
+            &[
+                ctx.accounts.payer.to_account_info(),
+                ctx.accounts.candidate_member.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+    }
+
     anchor_lang::solana_program::program::invoke_signed(
-        &anchor_lang::solana_program::system_instruction::create_account(
-            ctx.accounts.payer.key,
+        &anchor_lang::solana_program::system_instruction::allocate(
             ctx.accounts.candidate_member.key,
-            member_lamports,
             member_space as u64,
+        ),
+        &[
+            ctx.accounts.candidate_member.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+        &[member_seeds],
+    )?;
+
+    anchor_lang::solana_program::program::invoke_signed(
+        &anchor_lang::solana_program::system_instruction::assign(
+            ctx.accounts.candidate_member.key,
             &crate::ID,
         ),
         &[
-            ctx.accounts.payer.to_account_info(),
             ctx.accounts.candidate_member.to_account_info(),
             ctx.accounts.system_program.to_account_info(),
         ],
@@ -3123,6 +3153,195 @@ pub fn execute_admit_member(ctx: Context<ExecuteAdmitMember>) -> Result<()> {
 
     Ok(())
 }
+
+    /// Helper to validate candidate account constraints and compute/execute the rent top-up.
+    /// This matches the logic executed in `execute_admit_member`.
+    pub fn process_candidate_admission_state(
+        candidate_key: &Pubkey,
+        expected_candidate_pda: &Pubkey,
+        candidate_data: &[u8],
+        candidate_owner: &Pubkey,
+        payer_lamports: &mut u64,
+        candidate_lamports: &mut u64,
+        required_lamports: u64,
+    ) -> Result<u64> {
+        require_keys_eq!(
+            *candidate_key,
+            *expected_candidate_pda,
+            ComfiError::Unauthorized
+        );
+        require!(
+            candidate_data.is_empty(),
+            ComfiError::MemberAlreadyExists
+        );
+        require_keys_eq!(
+            *candidate_owner,
+            anchor_lang::solana_program::system_program::ID,
+            ComfiError::Unauthorized
+        );
+
+        let current_lamports = *candidate_lamports;
+        let top_up = required_lamports.saturating_sub(current_lamports);
+
+        if top_up > 0 {
+            *payer_lamports = payer_lamports
+                .checked_sub(top_up)
+                .ok_or(ComfiError::MathOverflow)?;
+            *candidate_lamports = candidate_lamports
+                .checked_add(top_up)
+                .ok_or(ComfiError::MathOverflow)?;
+        }
+
+        Ok(top_up)
+    }
+
+    /// Helper that builds and serializes the new Member record for an admitted candidate.
+    pub fn initialize_candidate_member_record(
+        pool_key: Pubkey,
+        current_cycle: u64,
+        head_member: Option<Pubkey>,
+        cumulative_benefit_per_member: u128,
+        candidate_wallet: Pubkey,
+        vouched_by: Pubkey,
+        inviter_lineage_depth: u32,
+        member_bump: u8,
+        candidate_data: &mut [u8],
+    ) -> Result<Member> {
+        let candidate_member = Member {
+            pool: pool_key,
+            wallet: candidate_wallet,
+            role: MemberRole::Member,
+            is_funded: false,
+            deposited_total: 0,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: cumulative_benefit_per_member,
+            cumulative_benefit_received: 0,
+            total_contributions: 0,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: current_cycle,
+            action_allowance_used: 0,
+            bump: member_bump,
+            surplus_cycle: current_cycle,
+            funded_cycle: 0,
+            is_paused: false,
+            next_member: head_member,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: Some(vouched_by),
+            lineage_depth: inviter_lineage_depth.saturating_add(1),
+            vouched_count: 0,
+            joined_cycle: current_cycle,
+            funded_cycle_streak: 0,
+            is_matured_voter: false,
+        };
+
+        let mut cursor = candidate_data;
+        candidate_member.try_serialize(&mut cursor)?;
+
+        Ok(candidate_member)
+    }
+
+    /// Simulated admission executor for unit testing the candidate admission state machine.
+    pub fn simulate_candidate_admission(
+        pool_key: Pubkey,
+        pool: &mut Pool,
+        inviter: &mut Member,
+        proposal: &mut Proposal,
+        candidate_key: &Pubkey,
+        candidate_wallet: &Pubkey,
+        candidate_owner: &mut Pubkey,
+        candidate_data: &mut Vec<u8>,
+        payer_lamports: &mut u64,
+        candidate_lamports: &mut u64,
+        required_lamports: u64,
+    ) -> Result<(u64, Member)> {
+        require!(!pool.is_closing, ComfiError::PoolIsClosing);
+        pool.ensure_not_locked()?;
+        pool.ensure_cycle_current()?;
+        require!(
+            proposal.state == ProposalState::Executable,
+            ComfiError::ProposalNotExecutable
+        );
+        require!(
+            pool.current_cycle >= proposal.executable_cycle,
+            ComfiError::ExecutionCycleNotReached
+        );
+
+        let (prop_candidate, vouched_by) = match proposal.action {
+            ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by,
+            } => (candidate_wallet, vouched_by),
+            _ => return err!(ComfiError::WrongProposalAction),
+        };
+        require_keys_eq!(*candidate_wallet, prop_candidate, ComfiError::Unauthorized);
+
+        require!(
+            pool.member_count < pool.member_cap,
+            ComfiError::MemberCapReached
+        );
+        require_keys_eq!(
+            inviter.wallet,
+            vouched_by,
+            ComfiError::Unauthorized
+        );
+        require_keys_eq!(
+            inviter.pool,
+            pool_key,
+            ComfiError::Unauthorized
+        );
+        require!(
+            inviter.status == MemberStatus::Active,
+            ComfiError::MemberNotActive
+        );
+
+        let (expected_candidate_pda, member_bump) = Pubkey::find_program_address(
+            &[b"member", pool_key.as_ref(), candidate_wallet.as_ref()],
+            &crate::ID,
+        );
+
+        let top_up = process_candidate_admission_state(
+            candidate_key,
+            &expected_candidate_pda,
+            candidate_data.as_slice(),
+            candidate_owner,
+            payer_lamports,
+            candidate_lamports,
+            required_lamports,
+        )?;
+
+        // Simulate allocate space to Member::SPACE and assign owner to crate::ID
+        candidate_data.resize(Member::SPACE, 0);
+        *candidate_owner = crate::ID;
+
+        let candidate_member = initialize_candidate_member_record(
+            pool_key,
+            pool.current_cycle,
+            pool.head_member,
+            pool.cumulative_benefit_per_member,
+            *candidate_wallet,
+            vouched_by,
+            inviter.lineage_depth,
+            member_bump,
+            candidate_data.as_mut_slice(),
+        )?;
+
+        pool.head_member = Some(*candidate_key);
+        pool.member_count = pool.member_count.checked_add(1).ok_or(ComfiError::MathOverflow)?;
+
+        inviter.vouched_count = inviter
+            .vouched_count
+            .checked_add(1)
+            .ok_or(ComfiError::MathOverflow)?;
+
+        proposal.state = ProposalState::Executed;
+
+        Ok((top_up, candidate_member))
+    }
 }
 
 #[cfg(test)]
@@ -11232,5 +11451,605 @@ mod tests {
             &[ai_immature],
         ).unwrap();
         assert!(is_voter_no_mature);
+    }
+
+    #[test]
+    fn test_audit_14_zero_lamport_candidate_pda_initializes_successfully() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        pool.member_count = 1;
+        let pool_key = Pubkey::new_unique();
+        let inviter_wallet = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut inviter = Member {
+            pool: pool_key,
+            wallet: inviter_wallet,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 2,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 2,
+            funded_cycle: 2,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: inviter_wallet,
+            action: ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by: inviter_wallet,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+            target_is_voter: false,
+        };
+
+        let (candidate_pda, _bump) = Pubkey::find_program_address(
+            &[b"member", pool_key.as_ref(), candidate_wallet.as_ref()],
+            &crate::ID,
+        );
+
+        let required_lamports: u64 = 890_880;
+        let mut payer_lamports: u64 = 10_000_000;
+        let mut candidate_lamports: u64 = 0;
+        let mut candidate_data = Vec::new();
+        let mut candidate_owner = anchor_lang::solana_program::system_program::ID;
+
+        let (top_up, member) = pool_handlers::simulate_candidate_admission(
+            pool_key,
+            &mut pool,
+            &mut inviter,
+            &mut proposal,
+            &candidate_pda,
+            &candidate_wallet,
+            &mut candidate_owner,
+            &mut candidate_data,
+            &mut payer_lamports,
+            &mut candidate_lamports,
+            required_lamports,
+        )
+        .unwrap();
+
+        assert_eq!(top_up, required_lamports);
+        assert_eq!(candidate_lamports, required_lamports);
+        assert_eq!(payer_lamports, 10_000_000 - required_lamports);
+        assert_eq!(candidate_owner, crate::ID);
+        assert_eq!(candidate_data.len(), Member::SPACE);
+        assert_eq!(member.pool, pool_key);
+        assert_eq!(member.wallet, candidate_wallet);
+        assert_eq!(member.status, MemberStatus::Active);
+        assert_eq!(member.vouched_by, Some(inviter_wallet));
+        assert_eq!(member.lineage_depth, 2);
+        assert_eq!(member.vouched_count, 0);
+        assert_eq!(member.joined_cycle, 2);
+        assert_eq!(pool.member_count, 2);
+        assert_eq!(pool.head_member, Some(candidate_pda));
+        assert_eq!(inviter.vouched_count, 1);
+        assert_eq!(proposal.state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn test_audit_14_prefunded_candidate_pda_partial_balance_tops_up_and_initializes() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        pool.member_count = 1;
+        let pool_key = Pubkey::new_unique();
+        let inviter_wallet = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut inviter = Member {
+            pool: pool_key,
+            wallet: inviter_wallet,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 2,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 2,
+            funded_cycle: 2,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: inviter_wallet,
+            action: ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by: inviter_wallet,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+            target_is_voter: false,
+        };
+
+        let (candidate_pda, _bump) = Pubkey::find_program_address(
+            &[b"member", pool_key.as_ref(), candidate_wallet.as_ref()],
+            &crate::ID,
+        );
+
+        let required_lamports: u64 = 890_880;
+        let mut payer_lamports: u64 = 10_000_000;
+        let mut candidate_lamports: u64 = 300_000; // Pre-funded with partial rent
+        let mut candidate_data = Vec::new();
+        let mut candidate_owner = anchor_lang::solana_program::system_program::ID;
+
+        let (top_up, member) = pool_handlers::simulate_candidate_admission(
+            pool_key,
+            &mut pool,
+            &mut inviter,
+            &mut proposal,
+            &candidate_pda,
+            &candidate_wallet,
+            &mut candidate_owner,
+            &mut candidate_data,
+            &mut payer_lamports,
+            &mut candidate_lamports,
+            required_lamports,
+        )
+        .unwrap();
+
+        assert_eq!(top_up, 590_880); // 890_880 - 300_000
+        assert_eq!(candidate_lamports, 890_880);
+        assert_eq!(payer_lamports, 10_000_000 - 590_880);
+        assert_eq!(candidate_owner, crate::ID);
+        assert_eq!(candidate_data.len(), Member::SPACE);
+        assert_eq!(member.status, MemberStatus::Active);
+        assert_eq!(proposal.state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn test_audit_14_prefunded_rent_exempt_candidate_pda_zero_topup() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        pool.member_count = 1;
+        let pool_key = Pubkey::new_unique();
+        let inviter_wallet = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut inviter = Member {
+            pool: pool_key,
+            wallet: inviter_wallet,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 2,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 2,
+            funded_cycle: 2,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: inviter_wallet,
+            action: ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by: inviter_wallet,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+            target_is_voter: false,
+        };
+
+        let (candidate_pda, _bump) = Pubkey::find_program_address(
+            &[b"member", pool_key.as_ref(), candidate_wallet.as_ref()],
+            &crate::ID,
+        );
+
+        let required_lamports: u64 = 890_880;
+        let mut payer_lamports: u64 = 10_000_000;
+        let mut candidate_lamports: u64 = 1_000_000; // Pre-funded with full rent exemption (>= required)
+        let mut candidate_data = Vec::new();
+        let mut candidate_owner = anchor_lang::solana_program::system_program::ID;
+
+        let (top_up, member) = pool_handlers::simulate_candidate_admission(
+            pool_key,
+            &mut pool,
+            &mut inviter,
+            &mut proposal,
+            &candidate_pda,
+            &candidate_wallet,
+            &mut candidate_owner,
+            &mut candidate_data,
+            &mut payer_lamports,
+            &mut candidate_lamports,
+            required_lamports,
+        )
+        .unwrap();
+
+        assert_eq!(top_up, 0); // 0 lamports transferred
+        assert_eq!(candidate_lamports, 1_000_000); // Unchanged
+        assert_eq!(payer_lamports, 10_000_000); // Unchanged
+        assert_eq!(candidate_owner, crate::ID);
+        assert_eq!(candidate_data.len(), Member::SPACE);
+        assert_eq!(member.status, MemberStatus::Active);
+        assert_eq!(proposal.state, ProposalState::Executed);
+    }
+
+    #[test]
+    fn test_audit_14_rejection_candidate_account_has_allocated_data() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        let pool_key = Pubkey::new_unique();
+        let inviter_wallet = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut inviter = Member {
+            pool: pool_key,
+            wallet: inviter_wallet,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 2,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 2,
+            funded_cycle: 2,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: inviter_wallet,
+            action: ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by: inviter_wallet,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+            target_is_voter: false,
+        };
+
+        let (candidate_pda, _bump) = Pubkey::find_program_address(
+            &[b"member", pool_key.as_ref(), candidate_wallet.as_ref()],
+            &crate::ID,
+        );
+
+        let required_lamports: u64 = 890_880;
+        let mut payer_lamports: u64 = 10_000_000;
+        let mut candidate_lamports: u64 = 0;
+        let mut candidate_data = vec![1u8, 2, 3]; // Already has allocated data!
+        let mut candidate_owner = anchor_lang::solana_program::system_program::ID;
+
+        let res = pool_handlers::simulate_candidate_admission(
+            pool_key,
+            &mut pool,
+            &mut inviter,
+            &mut proposal,
+            &candidate_pda,
+            &candidate_wallet,
+            &mut candidate_owner,
+            &mut candidate_data,
+            &mut payer_lamports,
+            &mut candidate_lamports,
+            required_lamports,
+        );
+
+        let err = match res {
+            Err(e) => e,
+            Ok(_) => panic!("Expected MemberAlreadyExists error"),
+        };
+
+        assert_eq!(err, ComfiError::MemberAlreadyExists.into());
+        assert_eq!(candidate_lamports, 0);
+        assert_eq!(payer_lamports, 10_000_000);
+        assert_eq!(pool.member_count, 1);
+        assert_eq!(inviter.vouched_count, 0);
+        assert_eq!(proposal.state, ProposalState::Executable);
+    }
+
+    #[test]
+    fn test_audit_14_rejection_candidate_account_owner_not_system_program() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        let pool_key = Pubkey::new_unique();
+        let inviter_wallet = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut inviter = Member {
+            pool: pool_key,
+            wallet: inviter_wallet,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 2,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 2,
+            funded_cycle: 2,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: inviter_wallet,
+            action: ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by: inviter_wallet,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+            target_is_voter: false,
+        };
+
+        let (candidate_pda, _bump) = Pubkey::find_program_address(
+            &[b"member", pool_key.as_ref(), candidate_wallet.as_ref()],
+            &crate::ID,
+        );
+
+        let required_lamports: u64 = 890_880;
+        let mut payer_lamports: u64 = 10_000_000;
+        let mut candidate_lamports: u64 = 0;
+        let mut candidate_data = Vec::new();
+        let mut candidate_owner = Pubkey::new_unique(); // Invalid owner (not System Program)
+
+        let res = pool_handlers::simulate_candidate_admission(
+            pool_key,
+            &mut pool,
+            &mut inviter,
+            &mut proposal,
+            &candidate_pda,
+            &candidate_wallet,
+            &mut candidate_owner,
+            &mut candidate_data,
+            &mut payer_lamports,
+            &mut candidate_lamports,
+            required_lamports,
+        );
+
+        let err = match res {
+            Err(e) => e,
+            Ok(_) => panic!("Expected Unauthorized error"),
+        };
+
+        assert_eq!(err, ComfiError::Unauthorized.into());
+        assert_eq!(candidate_lamports, 0);
+        assert_eq!(payer_lamports, 10_000_000);
+        assert_eq!(pool.member_count, 1);
+        assert_eq!(inviter.vouched_count, 0);
+        assert_eq!(proposal.state, ProposalState::Executable);
+    }
+
+    #[test]
+    fn test_audit_14_rejection_candidate_account_key_mismatch() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 2;
+        let pool_key = Pubkey::new_unique();
+        let inviter_wallet = Pubkey::new_unique();
+        let candidate_wallet = Pubkey::new_unique();
+
+        let mut inviter = Member {
+            pool: pool_key,
+            wallet: inviter_wallet,
+            role: MemberRole::Member,
+            is_funded: true,
+            deposited_total: 100,
+            alias_hash: [0u8; 32],
+            encryption_public_key: [0u8; 32],
+            alias_version: 1,
+            allowance_cycle: 2,
+            action_allowance_used: 0,
+            bump: 255,
+            surplus_amount: 0,
+            total_withdrawn: 0,
+            closure_claimed: false,
+            last_benefit_index: 0,
+            cumulative_benefit_received: 0,
+            total_contributions: 100,
+            surplus_cycle: 2,
+            funded_cycle: 2,
+            is_paused: false,
+            next_member: None,
+            status: MemberStatus::Active,
+            claimable_surplus_escrow: 0,
+            vouched_by: None,
+            lineage_depth: 1,
+            vouched_count: 0,
+            joined_cycle: 1,
+            funded_cycle_streak: 2,
+            is_matured_voter: true,
+        };
+
+        let mut proposal = Proposal {
+            pool: pool_key,
+            id: 1,
+            proposer: inviter_wallet,
+            action: ProposalAction::AdmitMember {
+                candidate_wallet,
+                vouched_by: inviter_wallet,
+            },
+            yes_votes: 2,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 2,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Executable,
+            bump: 255,
+            execution_mode: ExecutionMode::OnDeadline,
+            vote_threshold: 2,
+            target_is_voter: false,
+        };
+
+        let wrong_candidate_key = Pubkey::new_unique(); // Does not match expected PDA!
+
+        let required_lamports: u64 = 890_880;
+        let mut payer_lamports: u64 = 10_000_000;
+        let mut candidate_lamports: u64 = 0;
+        let mut candidate_data = Vec::new();
+        let mut candidate_owner = anchor_lang::solana_program::system_program::ID;
+
+        let res = pool_handlers::simulate_candidate_admission(
+            pool_key,
+            &mut pool,
+            &mut inviter,
+            &mut proposal,
+            &wrong_candidate_key,
+            &candidate_wallet,
+            &mut candidate_owner,
+            &mut candidate_data,
+            &mut payer_lamports,
+            &mut candidate_lamports,
+            required_lamports,
+        );
+
+        let err = match res {
+            Err(e) => e,
+            Ok(_) => panic!("Expected Unauthorized error"),
+        };
+
+        assert_eq!(err, ComfiError::Unauthorized.into());
+        assert_eq!(candidate_lamports, 0);
+        assert_eq!(payer_lamports, 10_000_000);
+        assert_eq!(pool.member_count, 1);
+        assert_eq!(inviter.vouched_count, 0);
+        assert_eq!(proposal.state, ProposalState::Executable);
     }
 }
