@@ -14,7 +14,7 @@ Audited on `next-release` at `d7968cc` (2026-10-29). Removed historical COMFI-WE
 | **COMFI-WEB-04** | **High** | Feature Completeness | Copilot Supervised (Tier 2) and Autonomous (Tier 3) modes are hardcoded disabled in the UI despite being marked completed | **Open** |
 | **COMFI-WEB-05** | **High** | Architecture / Automation | Copilot autonomous actions (cycle roll, proposal execute, auto-vote) are simulated in-memory audit logs without submitting Solana transactions | **Open** |
 | **COMFI-WEB-06** | **Medium** | React Integration | Disconnected props: `CopilotPanel` is rendered in `App.tsx` without passing `onExecuteProposal` or `onRollCycle` handlers | **Open** |
-| **COMFI-WEB-07** | **High** | Feature Gap | Missing Membership Directory, Vouch Lineage Visualizer, and Member Lifecycle Actions (`leave`, `claim_refund`, `set_paused`) in `apps/web` | **Open** |
+| **COMFI-WEB-07** | **High** | Feature Gap | Missing Membership Directory, Vouch Lineage Visualizer, and Member Lifecycle Actions (`leave`, `claim_refund`, `set_paused`) in `apps/web` | **Resolved** |
 | **COMFI-WEB-08** | **Medium** | Feature Gap | Spends & Treasury View (Cycle Limits, Authorizations, Pending Withdrawals) is completely missing from `apps/web` | **Open** |
 | **COMFI-WEB-09** | **Medium** | Rule Violation / Zero-Evasion | `WalletModal.tsx` copyToClipboard silently catches errors and flags success on clipboard failure | **Open** |
 | **COMFI-WEB-10** | **Low** | Error Handling / UX | Submitting invitation acceptance where candidate equals inviter throws uncaught React runtime exception | **Open** |
@@ -155,8 +155,9 @@ Pass concrete `onExecuteProposal` and `onRollCycle` handlers that construct and 
 
 - **Severity:** High
 - **Category:** Feature Gap
+- **Status:** Resolved
 - **Affected Files:** [`apps/web/src/App.tsx:592, 605`](../../apps/web/src/App.tsx#L592-L605)
-- **Tasklist Reference:** Section 3, lines 41–45: `- [ ] Implement Membership & History View`
+- **Tasklist Reference:** Section 3, lines 41–45: `- [x] Implement Membership & History View`
 
 #### Description
 While `@comfi/testing` implements comprehensive member management and tests, `apps/web` retains placeholder text:
@@ -174,8 +175,15 @@ While `@comfi/testing` implements comprehensive member management and tests, `ap
 #### Impact
 Members cannot inspect the roster of participants, view vouch chains, deposit additional funds, pause their cycle participation, leave the pool, or claim owed liquidation refunds from the web application.
 
-#### Recommended Remediation
-Build dedicated `MembershipDirectory` and `MemberActions` cards in `apps/web` referencing the existing decoding logic in `solana.ts` and `governance.ts`.
+#### Resolution
+Implemented `PeopleView.tsx` component providing:
+- **Member Directory**: Full roster with search filtering, status filtering (`Active`, `Leaving`, `Exited`, `Evicted`), voting maturation indicators, streak, and surplus/obligation accounting.
+- **Vouch Lineage Visualizer**: Hierarchy tree mapping vouch lineage chains from founding roots to invitee leaves.
+- **My Membership Controls**: Interactive lifecycle action execution for `set_paused` (pause/resume cycle rollover), `leave_pool` (voluntary exit), `claim_closure_refund` (post-closure liquidation payout), and `claim_eviction_refund`.
+- **Member Audit History**: Transaction and voting log.
+- Extended `governance.ts` with on-chain `Member` layout decoders and instruction builders for all lifecycle actions adhering strictly to zero-evasion rules.
+- Connected dedicated, accessible `Proposals` and `People` tabs in `App.tsx` alongside right-rail navigation shortcuts.
+- Fully verified via unit tests (`test/governance.test.ts`) and Playwright E2E suite (`e2e/pool-tabs.spec.ts`).
 
 ---
 

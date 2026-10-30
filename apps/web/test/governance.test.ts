@@ -143,3 +143,59 @@ test('admission uses proposer wallet for vouch and resolves inviter member at ex
 test('self eviction proposals reject before signing',()=>{
  const s=snapshot();assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'create',action:{kind:'EvictMember',member:memberAddress}}),/own eviction/)
 })
+
+test('decodeVotingMember decodes extended fields and enforces invariant validation',()=>{
+ const m=decodeVotingMember(memberAddress,memberBytes({next:true,vouch:true}))
+ assert.equal(m.surplusAmount,2_000_000n)
+ assert.equal(m.closureClaimed,false)
+ assert.equal(m.claimableSurplusEscrow,0n)
+ assert.equal(m.vouchedBy,memberAddress)
+ assert.equal(m.lineageDepth,1)
+ assert.equal(m.vouchedCount,0)
+ assert.equal(m.joinedCycle,2n)
+ assert.equal(m.status,'Active')
+
+ const corrupted=Buffer.from(memberBytes())
+ corrupted[72]=99 // invalid role enum tag
+ assert.throws(()=>decodeVotingMember(memberAddress,corrupted),/Invalid governance enum/)
+})
+
+test('member lifecycle actions build valid instructions and escalate invalid parameters',()=>{
+ const s=snapshot()
+ s.usdcMint=creator
+
+ // 1. set_paused
+ const pauseTx=buildGovernanceTransaction(programId,creator,s,{kind:'set_paused',paused:true})
+ assert.equal(pauseTx.instructions[0].data[8],1)
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'set_paused',paused:'true' as any}),/must be a boolean/)
+ assert.throws(()=>buildGovernanceTransaction(programId,poolAddress,s,{kind:'set_paused',paused:true}),/not a member/)
+ s.members[0].status='Exited'
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'set_paused',paused:true}),/Only active members/)
+ s.members[0].status='Active'
+
+ // 2. leave_pool
+ const leaveTx=buildGovernanceTransaction(programId,creator,s,{kind:'leave_pool'})
+ assert.deepEqual(leaveTx.instructions[0].data.subarray(0,8),createHash('sha256').update('global:leave_pool').digest().subarray(0,8))
+ assert.throws(()=>buildGovernanceTransaction(programId,poolAddress,s,{kind:'leave_pool'}),/not a member/)
+ s.pool.metrics!.isClosing=true
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'leave_pool'}),/Cannot leave a pool that is already closing/)
+ s.pool.metrics!.isClosing=false
+
+ // 3. claim_closure_refund
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'claim_closure_refund'}),/Pool is not closing/)
+ s.pool.metrics!.isClosing=true
+ const closureTx=buildGovernanceTransaction(programId,creator,s,{kind:'claim_closure_refund'})
+ assert.deepEqual(closureTx.instructions[0].data.subarray(0,8),createHash('sha256').update('global:claim_closure_refund').digest().subarray(0,8))
+ s.members[0].closureClaimed=true
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'claim_closure_refund'}),/already been claimed/)
+ s.members[0].closureClaimed=false
+ s.pool.metrics!.isClosing=false
+
+ // 4. claim_eviction_refund
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'claim_eviction_refund'}),/Only evicted members/)
+ s.members[0].status='Evicted'
+ assert.throws(()=>buildGovernanceTransaction(programId,creator,s,{kind:'claim_eviction_refund'}),/No escrowed surplus/)
+ s.members[0].claimableSurplusEscrow=5_000_000n
+ const evictionTx=buildGovernanceTransaction(programId,creator,s,{kind:'claim_eviction_refund'})
+ assert.deepEqual(evictionTx.instructions[0].data.subarray(0,8),createHash('sha256').update('global:claim_eviction_refund').digest().subarray(0,8))
+})

@@ -54,8 +54,8 @@ export function GovernanceView({ address }: { address: string }) {
       // Re-read chain state before requesting the wallet signature.
       const fresh = await fetchGovernance(new Connection(wallet.endpoint, 'confirmed'), wallet.programId, address)
       if (sourceRef.current !== source) throw new Error('Wallet or network changed; retry.')
-      const op = operation.kind === 'create' ? operation : { ...operation, proposal: fresh.proposals.find(p => p.address === operation.proposal.address)! }
-      if (op.kind !== 'create' && !op.proposal) throw new Error('Proposal no longer exists; refresh.')
+      const op = 'proposal' in operation ? { ...operation, proposal: fresh.proposals.find(p => p.address === operation.proposal.address)! } : operation
+      if ('proposal' in op && !op.proposal) throw new Error('Proposal no longer exists; refresh.')
       const tx = buildGovernanceTransaction(wallet.programId, wallet.publicKey, fresh, op)
       const signature = await wallet.sendTransaction(tx)
       if (sourceRef.current === source) { setMessage(`Confirmed transaction: ${signature}`); setVote(null); setCreating(false); setRefresh(n => n + 1) }

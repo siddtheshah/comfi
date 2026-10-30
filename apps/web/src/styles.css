@@ -1042,3 +1042,592 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 @media(max-width:800px){.user-account-grid{grid-template-columns:1fr}}
 
 .account-pool-setup fieldset{border:0;padding:0;margin:0;min-width:0}.account-pool-setup select,.account-pool-setup input{width:100%;min-width:0;border:1px solid #dce0d9;border-radius:7px;background:#fff;padding:10px;font:inherit}.pool-setup-address{display:block;overflow-wrap:anywhere;font-size:12px;margin:10px 0}.account-pool-setup .form-note{line-height:1.5}.account-pool-setup fieldset:disabled{opacity:.7}
+
+.pool-content > div {
+  min-width: 0;
+}
+
+/* People & Member Directory View Styling */
+.people-view {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.people-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.people-stat-card {
+  background: #fffefa;
+  border: 1px solid #e2e6df;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.people-stat-card small {
+  font: 11px 'DM Mono', monospace;
+  color: #6a7b70;
+  text-transform: uppercase;
+}
+
+.people-stat-card strong {
+  font: 600 24px 'Playfair Display', serif;
+  color: #1e2923;
+}
+
+.people-stat-card em {
+  font-size: 11px;
+  font-style: normal;
+  color: #829286;
+}
+
+.people-subnav {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid #e1e7e0;
+  padding-bottom: 8px;
+  overflow-x: auto;
+}
+
+.people-subnav button {
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  color: #55665b;
+  font-weight: 500;
+  white-space: nowrap;
+  background: transparent;
+}
+
+.people-subnav .subnav-active {
+  background: #25382c;
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.people-filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.people-search-input {
+  flex: 1;
+  min-width: 220px;
+  max-width: 400px;
+  padding: 10px 14px;
+  border: 1px solid #cbd6cc;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #ffffff;
+  color: #1d2922;
+}
+
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-pill {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 20px;
+  border: 1px solid #d4ded5;
+  background: #fff;
+  color: #4b5d51;
+  font-weight: 500;
+}
+
+.filter-pill.active {
+  background: #e2ede3;
+  border-color: #9ab49d;
+  color: #1a3821;
+  font-weight: 600;
+}
+
+.member-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+}
+
+.member-card {
+  background: #ffffff;
+  border: 1px solid #dbe2db;
+  border-radius: 14px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 2px 6px rgba(25, 45, 30, 0.04);
+}
+
+.member-card-you {
+  border-color: #b7ceba;
+  background: #fafdfa;
+  box-shadow: 0 0 0 1px #b7ceba, 0 4px 12px rgba(25, 55, 30, 0.08);
+}
+
+.member-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.member-identity {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.you-pill {
+  font-size: 10px;
+  font-weight: 700;
+  background: #dff0e1;
+  color: #24552e;
+  padding: 2px 6px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+
+.pda-subtext {
+  font-size: 11px;
+  color: #7b8b80;
+  display: block;
+}
+
+.copy-tiny-btn {
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #f0f4f1;
+  color: #55665b;
+}
+
+.member-badges {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.role-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #eaf0ec;
+  color: #2a4030;
+}
+
+.role-admin { background: #dff0e1; color: #1e5229; }
+.role-spender { background: #e0f2fe; color: #0369a1; }
+.role-member { background: #f1f5f2; color: #405546; }
+
+.status-tag {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+}
+
+.status-active { background: #dcfce7; color: #15803d; }
+.status-leaving { background: #fef3c7; color: #b45309; }
+.status-exited { background: #f3f4f6; color: #4b5563; }
+.status-evicted { background: #fee2e2; color: #b91c1c; }
+
+.member-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  background: #f7faf7;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.member-metrics-grid small {
+  display: block;
+  font-size: 11px;
+  color: #66796c;
+  margin-bottom: 2px;
+}
+
+.funded-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.funded-yes { background: #dcfce7; color: #15803d; }
+.funded-no { background: #fee2e2; color: #991b1b; }
+
+.matured-tag {
+  color: #15803d;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.paused-tag {
+  background: #fef08a;
+  color: #854d0e;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.member-finances {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  font-size: 12px;
+  border-top: 1px solid #edf1ee;
+  padding-top: 10px;
+}
+
+.member-finances small {
+  display: block;
+  color: #7a8b80;
+  font-size: 10px;
+}
+
+.escrow-highlight {
+  color: #b91c1c;
+}
+
+.member-card-foot {
+  font-size: 11px;
+  color: #77887d;
+  display: flex;
+  justify-content: space-between;
+  border-top: 1px dashed #e1e7e0;
+  padding-top: 10px;
+}
+
+/* Lineage Tree */
+.lineage-tree-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.lineage-intro h3 {
+  margin: 0 0 6px;
+  font: 600 20px 'Playfair Display', serif;
+}
+
+.lineage-intro p {
+  color: #55665b;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.lineage-tree-container {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.lineage-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lineage-tier-label {
+  font: 600 12px 'DM Mono', monospace;
+  text-transform: uppercase;
+  color: #4b6052;
+  letter-spacing: 0.04em;
+}
+
+.lineage-nodes-row {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.lineage-card {
+  background: #ffffff;
+  border: 1px solid #d4ded5;
+  border-radius: 12px;
+  padding: 14px 16px;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lineage-card.root-node {
+  border-left: 4px solid #3c6e48;
+}
+
+.lineage-card.child-node {
+  border-left: 4px solid #85a98e;
+}
+
+.lineage-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voucher-link {
+  font-size: 11px;
+  color: #566c5d;
+}
+
+.voucher-link code {
+  background: #edf3ee;
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+/* My Membership Section */
+.my-membership-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.empty-notice-card {
+  background: #fff;
+  border: 1px solid #d8e2d9;
+  border-radius: 14px;
+  padding: 28px;
+  text-align: center;
+  max-width: 600px;
+  margin: 20px auto;
+}
+
+.empty-notice-card h3 {
+  margin: 0 0 10px;
+  font: 600 22px 'Playfair Display', serif;
+}
+
+.empty-notice-card p {
+  color: #5a6e60;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 18px;
+}
+
+.membership-control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.membership-overview-card {
+  background: #fff;
+  border: 1px solid #d8e2d9;
+  border-radius: 14px;
+  padding: 22px;
+}
+
+.membership-overview-card h3 {
+  margin: 0 0 16px;
+  font: 600 20px 'Playfair Display', serif;
+}
+
+.member-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.member-overview-grid small {
+  display: block;
+  font-size: 11px;
+  color: #6a7b70;
+  margin-bottom: 2px;
+}
+
+.member-overview-grid strong {
+  font-size: 14px;
+  color: #1e2923;
+}
+
+.lifecycle-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.lifecycle-card {
+  background: #fffefa;
+  border: 1px solid #dbe2db;
+  border-radius: 12px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lifecycle-card.highlight-card {
+  background: #f0f7f1;
+  border-color: #a4c9aa;
+}
+
+.lifecycle-card h4 {
+  margin: 0;
+  font: 600 16px 'Playfair Display', serif;
+  color: #1a2c20;
+}
+
+.lifecycle-card p {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #55665b;
+  margin: 0;
+  flex: 1;
+}
+
+.confirm-box {
+  background: #fff5f5;
+  border: 1px solid #fed7d7;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.confirm-warning {
+  color: #c53030;
+  font-size: 11px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+
+/* Audit Section */
+.people-audit-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.people-audit-section h3 {
+  margin: 0;
+  font: 600 20px 'Playfair Display', serif;
+}
+
+.people-audit-section>p {
+  color: #5a6e60;
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.audit-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.audit-event-card {
+  background: #ffffff;
+  border: 1px solid #dce4dd;
+  border-radius: 10px;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.audit-event-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.audit-event-card p {
+  margin: 0;
+  font-size: 12px;
+  color: #55665b;
+}
+
+.audit-votes-list {
+  margin-top: 4px;
+}
+
+.audit-votes-list small {
+  font-size: 11px;
+  color: #76877b;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.voter-pills-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.voter-pill {
+  font-size: 11px;
+  background: #eef5ef;
+  color: #275231;
+  padding: 2px 7px;
+  border-radius: 12px;
+}
+
+.toast-inline {
+  background: #25382c;
+  color: white;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+@media (max-width: 768px) {
+  .people-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .member-cards-grid {
+    grid-template-columns: 1fr;
+  }
+  .lifecycle-actions-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .people-stats-grid {
+    grid-template-columns: 1fr;
+  }
+  .member-metrics-grid,
+  .member-finances {
+    grid-template-columns: 1fr;
+  }
+  .lineage-nodes-row {
+    flex-direction: column;
+  }
+  .lineage-card {
+    min-width: 0;
+    width: 100%;
+  }
+  .people-search-input {
+    min-width: 0;
+    width: 100%;
+  }
+  .member-card {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+

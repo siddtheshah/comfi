@@ -11,6 +11,7 @@ import { NetworkSwitcher } from './NetworkSwitcher'
 import { NETWORK_LABELS } from './network'
 import { CopilotPanel } from './CopilotPanel'
 import { GovernanceView } from './GovernanceView'
+import { PeopleView } from './PeopleView'
 import { CreatePoolModal } from './CreatePoolModal'
 import { InviteMembersModal } from './InviteMembersModal'
 import { InviteAcceptanceView } from './InviteAcceptanceView'
@@ -526,7 +527,7 @@ function Pool({
   onOpenAccept?: (token: string) => void
   onRefreshPools?: () => void
 }) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'invites' | 'activity' | 'people' | 'rules'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'proposals' | 'people' | 'invites' | 'activity' | 'rules'>('overview')
 
   return <section className="page pool-page">
     <div className="pool-title">
@@ -554,56 +555,91 @@ function Pool({
     </div>
 
     <div className="tabs">
-      <button className={activeTab === 'overview' ? 'tab-active' : ''} onClick={() => setActiveTab('overview')}>Overview</button>
+      <button className={activeTab === 'overview' ? 'tab-active' : ''} data-testid="tab-overview" onClick={() => setActiveTab('overview')}>Overview</button>
+      <button className={activeTab === 'proposals' ? 'tab-active' : ''} data-testid="tab-proposals" onClick={() => setActiveTab('proposals')}>Proposals <i>{pool.proposals}</i></button>
+      <button className={activeTab === 'people' ? 'tab-active' : ''} data-testid="tab-people" onClick={() => setActiveTab('people')}>People <i>{pool.funds.split(' ')[0]}</i></button>
       <button className={activeTab === 'invites' ? 'tab-active' : ''} data-testid="tab-invites" onClick={() => setActiveTab('invites')}>Invitations & Onboarding</button>
-      <button className={activeTab === 'activity' ? 'tab-active' : ''} onClick={() => setActiveTab('activity')}>Activity</button>
-      <button className={activeTab === 'people' ? 'tab-active' : ''} onClick={() => setActiveTab('people')}>People <i>{pool.funds.split(' ')[0]}</i></button>
-      <button className={activeTab === 'rules' ? 'tab-active' : ''} onClick={() => setActiveTab('rules')}>Rules</button>
+      <button className={activeTab === 'activity' ? 'tab-active' : ''} data-testid="tab-activity" onClick={() => setActiveTab('activity')}>Activity</button>
+      <button className={activeTab === 'rules' ? 'tab-active' : ''} data-testid="tab-rules" onClick={() => setActiveTab('rules')}>Rules</button>
     </div>
 
     <div className="pool-content">
       <div>
-        {pool.onChain && (
-          <div style={{ marginBottom: '24px' }}>
-            <div className="section-head compact">
-              <div>
-                <h2>On-chain parameters</h2>
-                <p>Enforced autonomously by Anchor smart contract</p>
+        {activeTab === 'overview' && (
+          <>
+            {pool.onChain && (
+              <div style={{ marginBottom: '24px' }}>
+                <div className="section-head compact">
+                  <div>
+                    <h2>On-chain parameters</h2>
+                    <p>Enforced autonomously by Anchor smart contract</p>
+                  </div>
+                </div>
+                <div className="pool-chain-grid">
+                  <div className="chain-spec">
+                    <small>Minimum Deposit</small>
+                    <strong>{pool.minimumDeposit ?? 'Unavailable'}</strong>
+                  </div>
+                  <div className="chain-spec">
+                    <small>Voting Threshold</small>
+                    <strong>{pool.voteThreshold} affirmative votes</strong>
+                  </div>
+                  <div className="chain-spec">
+                    <small>Admission Mode</small>
+                    <strong>{pool.admissionMode === 'InviteVouched' ? 'Invite & Vouched' : 'Open'}</strong>
+                  </div>
+                  <div className="chain-spec">
+                    <small>Cycle Duration</small>
+                    <strong>{pool.cycleDurationSeconds ? `${Math.round(pool.cycleDurationSeconds / 86400)} days` : '30 days'}</strong>
+                  </div>
+                  <div className="chain-spec">
+                    <small>Creator & Admin</small>
+                    <strong title={pool.creator}>{pool.creator ? `${pool.creator.slice(0, 6)}…${pool.creator.slice(-6)}` : 'Deployer'}</strong>
+                  </div>
+                  <div className="chain-spec">
+                    <small>Capacity Limit</small>
+                    <strong>{pool.cap} members ({pool.slots} slots open)</strong>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="pool-chain-grid">
-              <div className="chain-spec">
-                <small>Minimum Deposit</small>
-                <strong>{pool.minimumDeposit ?? 'Unavailable'}</strong>
-              </div>
-              <div className="chain-spec">
-                <small>Voting Threshold</small>
-                <strong>{pool.voteThreshold} affirmative votes</strong>
-              </div>
-              <div className="chain-spec">
-                <small>Admission Mode</small>
-                <strong>{pool.admissionMode === 'InviteVouched' ? 'Invite & Vouched' : 'Open'}</strong>
-              </div>
-              <div className="chain-spec">
-                <small>Cycle Duration</small>
-                <strong>{pool.cycleDurationSeconds ? `${Math.round(pool.cycleDurationSeconds / 86400)} days` : '30 days'}</strong>
-              </div>
-              <div className="chain-spec">
-                <small>Creator & Admin</small>
-                <strong title={pool.creator}>{pool.creator ? `${pool.creator.slice(0, 6)}…${pool.creator.slice(-6)}` : 'Deployer'}</strong>
-              </div>
-              <div className="chain-spec">
-                <small>Capacity Limit</small>
-                <strong>{pool.cap} members ({pool.slots} slots open)</strong>
-              </div>
-            </div>
-          </div>
+            )}
+
+            <PoolMetricsView pool={pool} />
+            {pool.chain?.address && <GovernanceView key={pool.address} address={pool.chain.address} />}
+
+            <InviteTrackingCard
+              poolAddress={pool.address ?? ''}
+              poolName={pool.name}
+              inviterAddress={walletAddress}
+              onOpenInviteModal={onInvite ?? (() => {})}
+              onOpenAcceptModal={onOpenAccept}
+              onAdmissionExecuted={onRefreshPools}
+            />
+
+            <div className="section-head compact"><h2>Activity</h2></div>
+            <p>Activity history is not connected yet.</p>
+          </>
         )}
 
-        <PoolMetricsView pool={pool} />
-        {pool.chain?.address && <GovernanceView key={pool.address} address={pool.chain.address} />}
+        {activeTab === 'proposals' && (
+          pool.chain?.address ? (
+            <GovernanceView key={pool.address} address={pool.chain.address} />
+          ) : (
+            <p>Governance is unavailable for this pool layout.</p>
+          )
+        )}
 
-        {(activeTab === 'overview' || activeTab === 'invites') && (
+        {activeTab === 'people' && (
+          <PeopleView
+            poolAddress={pool.address ?? ''}
+            pool={pool}
+            walletAddress={walletAddress}
+            onInvite={onInvite}
+            onRefreshPools={onRefreshPools}
+          />
+        )}
+
+        {activeTab === 'invites' && (
           <InviteTrackingCard
             poolAddress={pool.address ?? ''}
             poolName={pool.name}
@@ -614,8 +650,29 @@ function Pool({
           />
         )}
 
-        <div className="section-head compact"><h2>Activity</h2></div>
-        <p>Activity history is not connected yet.</p>
+        {activeTab === 'activity' && (
+          <div>
+            <div className="section-head compact">
+              <div>
+                <h2>Activity</h2>
+                <p>On-chain event logs and pool timeline</p>
+              </div>
+            </div>
+            <p>Activity history is not connected yet.</p>
+          </div>
+        )}
+
+        {activeTab === 'rules' && (
+          <div>
+            <div className="section-head compact">
+              <div>
+                <h2>Rules & Contract Architecture</h2>
+                <p>Anchor parameters and mathematical enforcement guarantees</p>
+              </div>
+            </div>
+            <PoolMetricsView pool={pool} />
+          </div>
+        )}
       </div>
 
       <div className="right-rail">
@@ -623,13 +680,18 @@ function Pool({
           <span className="eyebrow">COMMUNITY DECISIONS</span>
           <h3>Have a say in<br />what’s next.</h3>
           <p>{pool.proposals} proposals have been created. Review lifecycle status, vote, and execute proposals in the governance view.</p>
+          <button className="dark-button" data-testid="explore-proposals-rail-btn" onClick={() => setActiveTab('proposals')}>
+            Explore proposals →
+          </button>
         </div>
         <div className="members-card">
           <div className="section-head compact">
             <h3>People</h3>
           </div>
-          <p>Member directory is not connected yet.</p>
           <p>{pool.cap - pool.slots} of {pool.cap} places filled · <b>{pool.slots} open places left</b></p>
+          <button className="dark-button" data-testid="open-people-rail-btn" style={{ marginTop: '12px' }} onClick={() => setActiveTab('people')}>
+            Open member directory →
+          </button>
         </div>
       </div>
     </div>

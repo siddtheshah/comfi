@@ -18,9 +18,31 @@ export type ProposalAction =
   | { kind: 'AdmitMember'; candidateWallet: string; vouchedBy: string }
 export type ProposalState = 'Queued' | 'Open' | 'Executable' | 'Executed' | 'Rejected'
 export type Proposal = { address: string; pool: string; id: bigint; proposer: string; action: ProposalAction; yesVotes: number; noVotes: number; votingCycle: bigint; deadlineCycle: bigint; executableCycle: bigint; deadline: bigint; executableAfter: bigint; state: ProposalState; executionMode: ExecutionMode; voteThreshold: number; targetIsVoter?: boolean }
-export type VotingMember = { address: string; pool: string; wallet: string; role: string; isFunded: boolean; depositedTotal: bigint; totalContributions: bigint; fundedCycle: bigint; isPaused: boolean; nextMember: string | null; status: string; fundedCycleStreak: bigint; isMaturedVoter: boolean }
+export type VotingMember = {
+  address: string
+  pool: string
+  wallet: string
+  role: string
+  isFunded: boolean
+  depositedTotal: bigint
+  totalContributions: bigint
+  fundedCycle: bigint
+  isPaused: boolean
+  nextMember: string | null
+  status: string
+  fundedCycleStreak: bigint
+  isMaturedVoter: boolean
+  surplusAmount: bigint
+  totalWithdrawn: bigint
+  closureClaimed: boolean
+  claimableSurplusEscrow: bigint
+  vouchedBy: string | null
+  lineageDepth: number
+  vouchedCount: number
+  joinedCycle: bigint
+}
 export type Withdrawal = { address: string; pool: string; requester: string; recipient: string; amount: bigint; requiresProposal: boolean; status: string }
-export type GovernanceSnapshot = { pool: OnChainPool; proposals: Proposal[]; members: VotingMember[]; withdrawals: Withdrawal[]; receipts: { proposal: string; voter: string }[]; now: bigint }
+export type GovernanceSnapshot = { pool: OnChainPool; proposals: Proposal[]; members: VotingMember[]; withdrawals: Withdrawal[]; receipts: { proposal: string; voter: string }[]; now: bigint; usdcMint?: string }
 const discriminators = {
   Proposal: [26,94,189,187,116,136,53,33], Member: [54,19,162,21,29,166,17,198],
   WithdrawalRequest: [242,88,147,173,182,62,229,193], VoteReceipt: [104,20,204,252,45,84,37,195],
@@ -71,12 +93,23 @@ export function decodeVotingMember(address: string, bytes: Uint8Array): VotingMe
   new PublicKey(address)
   const r = new Reader(bytes, 'Member')
   const pool = r.key(), wallet = r.key(), role = r.enum(['Member', 'Spender', 'Admin']), isFunded = r.bool(), depositedTotal = r.u64()
-  r.take(32 + 32 + 4 + 8 + 8 + 1 + 8 + 8 + 1 + 16 + 8)
+  r.take(32 + 32 + 4 + 8 + 8 + 1)
+  const surplusAmount = r.u64()
+  const totalWithdrawn = r.u64()
+  const closureClaimed = r.bool()
+  r.take(16 + 8)
   const totalContributions = r.u64(); r.u64()
   const fundedCycle = r.u64(), isPaused = r.bool(), nextMember = r.optionKey(), status = r.enum(['Active', 'Leaving', 'Exited', 'Evicted'])
-  r.u64(); r.optionKey(); r.u32(); r.u32(); r.u64()
+  const claimableSurplusEscrow = r.u64()
+  const vouchedBy = r.optionKey()
+  const lineageDepth = r.u32()
+  const vouchedCount = r.u32()
+  const joinedCycle = r.u64()
   const fundedCycleStreak = r.u64(), isMaturedVoter = r.bool()
-  return { address, pool, wallet, role, isFunded, depositedTotal, totalContributions, fundedCycle, isPaused, nextMember, status, fundedCycleStreak, isMaturedVoter }
+  return {
+    address, pool, wallet, role, isFunded, depositedTotal, totalContributions, fundedCycle, isPaused, nextMember, status, fundedCycleStreak, isMaturedVoter,
+    surplusAmount, totalWithdrawn, closureClaimed, claimableSurplusEscrow, vouchedBy, lineageDepth, vouchedCount, joinedCycle,
+  }
 }
 export function decodeWithdrawal(address: string, bytes: Uint8Array): Withdrawal {
   new PublicKey(address)
@@ -97,9 +130,15 @@ export async function fetchGovernance(connection: Connection, programId: string,
   const withdrawals = lists[2].map(a => decodeWithdrawal(a.pubkey.toBase58(), a.account.data))
   const receiptLists = await Promise.all(proposals.map(p => connection.getProgramAccounts(program, { commitment: 'confirmed', filters: [{ memcmp: { offset: 0, bytes: toBase58(Uint8Array.from(discriminators.VoteReceipt)) } }, { memcmp: { offset: 8, bytes: p.address } }] })))
   const receipts = receiptLists.flat().map(a => { const r = new Reader(a.account.data, 'VoteReceipt'); const proposal = r.key(), voter = r.key(); r.bool(); r.u8(); return { proposal, voter } })
-  const slot = await connection.getSlot('confirmed'), time = await connection.getBlockTime(slot)
+  const [globalPda] = PublicKey.findProgramAddressSync([Buffer.from('global')], program)
+  const [slot, globalInfo] = await Promise.all([
+    connection.getSlot('confirmed'),
+    connection.getAccountInfo(globalPda, 'confirmed'),
+  ])
+  const time = await connection.getBlockTime(slot)
   if (time === null) throw new Error('RPC did not provide chain time')
-  return { pool: { ...decoded, vaultBalanceAtomic: balance, balanceUsdc: formatUsdc(balance) }, proposals, members, withdrawals, receipts, now: BigInt(time) }
+  const usdcMint = globalInfo && globalInfo.data.length >= 72 ? toBase58(globalInfo.data.subarray(40, 72)) : undefined
+  return { pool: { ...decoded, vaultBalanceAtomic: balance, balanceUsdc: formatUsdc(balance) }, proposals, members, withdrawals, receipts, now: BigInt(time), usdcMint }
 }
 function metrics(pool: OnChainPool) { if (!pool.metrics) throw new Error('Governance requires the current pool account layout'); return pool.metrics }
 export function requiredVotes(pool: OnChainPool, p: Proposal): number {
@@ -168,9 +207,24 @@ const instructions = {
   create_proposal: [132,116,68,174,216,160,198,22], vote: [227,110,155,23,136,126,172,25], finalize_proposal: [23,68,51,167,109,173,187,164],
   execute_spender_limit: [22,152,142,129,180,124,223,70], execute_configuration_modification: [66,178,39,67,26,209,95,182],
   execute_close_pool: [132,137,18,177,43,117,143,230], execute_evict_member: [144,68,112,101,164,17,169,56], execute_admit_member: [35,69,67,41,234,236,122,179], spend: [242,205,255,87,101,217,245,57],
+  set_paused: [91,60,125,192,176,225,166,218], leave_pool: [249,99,213,170,247,191,36,115],
+  claim_closure_refund: [120,125,179,67,97,10,114,162], claim_eviction_refund: [180,129,161,32,31,26,53,74],
 }
 const tokenProgram = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
-export function buildGovernanceTransaction(programId: string, wallet: string, snapshot: GovernanceSnapshot, operation: { kind: 'create'; action: ProposalAction } | { kind: 'vote'; proposal: Proposal; approve: boolean } | { kind: 'finalize' | 'execute'; proposal: Proposal }): Transaction {
+export const ASSOCIATED_TOKEN_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')
+export function deriveAta(owner: PublicKey, mint: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([owner.toBuffer(), new PublicKey(tokenProgram).toBuffer(), mint.toBuffer()], ASSOCIATED_TOKEN_PROGRAM)[0]
+}
+export type GovernanceOperation =
+  | { kind: 'create'; action: ProposalAction }
+  | { kind: 'vote'; proposal: Proposal; approve: boolean }
+  | { kind: 'finalize'; proposal: Proposal }
+  | { kind: 'execute'; proposal: Proposal }
+  | { kind: 'set_paused'; paused: boolean }
+  | { kind: 'leave_pool' }
+  | { kind: 'claim_closure_refund' }
+  | { kind: 'claim_eviction_refund' }
+export function buildGovernanceTransaction(programId: string, wallet: string, snapshot: GovernanceSnapshot, operation: GovernanceOperation): Transaction {
   const program = new PublicKey(programId), pool = snapshot.pool, signer = new PublicKey(wallet)
   const pda = (seed: string, ...parts: Buffer[]) => PublicKey.findProgramAddressSync([Buffer.from(seed), ...parts], program)[0].toBase58()
   const member = pda('member', keyBytes(pool.address), signer.toBuffer()), global = pda('global'), sys = SystemProgram.programId.toBase58()
@@ -194,6 +248,38 @@ export function buildGovernanceTransaction(programId: string, wallet: string, sn
     name = 'create_proposal'; data = encodeAction(operation.action)
     keys = [account(wallet,true,true), account(pool.address,true), account(member), account(pda('proposal',keyBytes(pool.address),u64(pool.nextProposalId)),true), account(sys)]
     if (action.kind === 'EvictMember') keys.push(account(action.member))
+  } else if (operation.kind === 'set_paused') {
+    if (typeof operation.paused !== 'boolean') throw new Error('Paused flag must be a boolean')
+    if (!own) throw new Error('You are not a member of this pool')
+    if (own.status !== 'Active') throw new Error('Only active members can update rollover pause status')
+    name = 'set_paused'
+    data = Buffer.from([operation.paused ? 1 : 0])
+    keys = [account(wallet, false, true), account(own.address, true), account(pool.address)]
+  } else if (operation.kind === 'leave_pool') {
+    if (!own) throw new Error('You are not a member of this pool')
+    if (own.status !== 'Active') throw new Error('Only active members can leave the pool')
+    if (metrics(pool).isClosing) throw new Error('Cannot leave a pool that is already closing')
+    name = 'leave_pool'
+    const prev = snapshot.members.find(m => m.nextMember === own.address)
+    const mintPubkey = new PublicKey(snapshot.usdcMint ?? pool.vault)
+    const userUsdc = deriveAta(signer, mintPubkey)
+    keys = [account(wallet, true, true), account(global), account(pool.address, true), account(own.address, true), optional(prev?.address ?? null), account(userUsdc.toBase58(), true), account(pool.vault, true), account(tokenProgram)]
+  } else if (operation.kind === 'claim_closure_refund') {
+    if (!own) throw new Error('You are not a member of this pool')
+    if (!metrics(pool).isClosing) throw new Error('Pool is not closing')
+    if (own.closureClaimed) throw new Error('Closure refund has already been claimed')
+    name = 'claim_closure_refund'
+    const mintPubkey = new PublicKey(snapshot.usdcMint ?? pool.vault)
+    const userUsdc = deriveAta(signer, mintPubkey)
+    keys = [account(wallet, true, true), account(global), account(pool.address, true), account(own.address, true), account(pool.vault, true), account(userUsdc.toBase58(), true), account(tokenProgram)]
+  } else if (operation.kind === 'claim_eviction_refund') {
+    if (!own) throw new Error('You are not a member of this pool')
+    if (own.status !== 'Evicted') throw new Error('Only evicted members can claim eviction refunds')
+    if (own.claimableSurplusEscrow <= 0n) throw new Error('No escrowed surplus available to claim')
+    name = 'claim_eviction_refund'
+    const mintPubkey = new PublicKey(snapshot.usdcMint ?? pool.vault)
+    const userUsdc = deriveAta(signer, mintPubkey)
+    keys = [account(wallet, true, true), account(global), account(pool.address, true), account(own.address, true), account(pool.vault, true), account(userUsdc.toBase58(), true), account(tokenProgram)]
   } else {
     const p = operation.proposal, eligibility = proposalEligibility(pool, p, snapshot.now)
     if (operation.kind === 'vote') {

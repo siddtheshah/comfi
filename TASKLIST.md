@@ -38,11 +38,11 @@
   - [x] Interactive Voting modal with voting power breakdown (funded status, streak, voter maturation).
   - [x] 1-Click Proposal Execution for eligible proposals meeting threshold or deadline requirements.
   - [x] "Create Proposal" dialog supporting all proposal types.
-- [ ] Implement Membership & History View:
-  - [ ] Member directory showing roles, status (`Active`, `Leaving`, `Exited`, `Evicted`), streak, funded status, and pause status.
-  - [ ] Vouch lineage visualizer showing invitation depth and vouched-by chain.
-  - [ ] Member actions: Leave Pool, Claim Closure Refund, Claim Eviction Refund, Pause/Unpause Rollover.
-  - [ ] Member audit history log tracking deposits, votes, and submitted proposals.
+- [x] [Completed: Subagent-Web-Membership] Implement Membership & History View:
+  - [x] Member directory showing roles, status (`Active`, `Leaving`, `Exited`, `Evicted`), streak, funded status, and pause status.
+  - [x] Vouch lineage visualizer showing invitation depth and vouched-by chain.
+  - [x] Member actions: Leave Pool, Claim Closure Refund, Claim Eviction Refund, Pause/Unpause Rollover.
+  - [x] Member audit history log tracking deposits, votes, and submitted proposals.
 - [ ] Implement Spends & Treasury View:
   - [ ] Active cycle limits and spender authorizations.
   - [ ] Pending withdrawal requests with justification and recipient details.
