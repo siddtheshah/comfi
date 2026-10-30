@@ -17,7 +17,7 @@ export type ProposalAction =
   | { kind: 'EvictMember'; member: string }
   | { kind: 'AdmitMember'; candidateWallet: string; vouchedBy: string }
 export type ProposalState = 'Queued' | 'Open' | 'Executable' | 'Executed' | 'Rejected'
-export type Proposal = { address: string; pool: string; id: bigint; proposer: string; action: ProposalAction; yesVotes: number; noVotes: number; votingCycle: bigint; deadlineCycle: bigint; executableCycle: bigint; deadline: bigint; executableAfter: bigint; state: ProposalState; executionMode: ExecutionMode; voteThreshold: number }
+export type Proposal = { address: string; pool: string; id: bigint; proposer: string; action: ProposalAction; yesVotes: number; noVotes: number; votingCycle: bigint; deadlineCycle: bigint; executableCycle: bigint; deadline: bigint; executableAfter: bigint; state: ProposalState; executionMode: ExecutionMode; voteThreshold: number; targetIsVoter?: boolean }
 export type VotingMember = { address: string; pool: string; wallet: string; role: string; isFunded: boolean; depositedTotal: bigint; totalContributions: bigint; fundedCycle: bigint; isPaused: boolean; nextMember: string | null; status: string; fundedCycleStreak: bigint; isMaturedVoter: boolean }
 export type Withdrawal = { address: string; pool: string; requester: string; recipient: string; amount: bigint; requiresProposal: boolean; status: string }
 export type GovernanceSnapshot = { pool: OnChainPool; proposals: Proposal[]; members: VotingMember[]; withdrawals: Withdrawal[]; receipts: { proposal: string; voter: string }[]; now: bigint }
@@ -34,6 +34,7 @@ class Reader {
     if (!discriminators[name].every((v, i) => bytes[i] === v)) throw new Error(`Invalid ${name} discriminator`)
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   }
+  remaining() { return this.bytes.length - this.offset }
   take(n: number) { const start = this.offset; if (start + n > this.bytes.length) throw new Error('Truncated governance account'); this.offset += n; return start }
   u8() { return this.view.getUint8(this.take(1)) }
   u32() { return this.view.getUint32(this.take(4), true) }
@@ -63,7 +64,8 @@ export function decodeProposal(address: string, bytes: Uint8Array): Proposal {
   r.u8() // bump
   const executionMode = r.mode(), voteThreshold = r.u32()
   if (voteThreshold < 100 || voteThreshold > 10_000) throw new Error('Invalid proposal vote threshold')
-  return { address, pool, id, proposer, action, yesVotes, noVotes, votingCycle, deadlineCycle, executableCycle, deadline, executableAfter, state, executionMode, voteThreshold }
+  const targetIsVoter = r.remaining() > 0 ? r.bool() : false
+  return { address, pool, id, proposer, action, yesVotes, noVotes, votingCycle, deadlineCycle, executableCycle, deadline, executableAfter, state, executionMode, voteThreshold, targetIsVoter }
 }
 export function decodeVotingMember(address: string, bytes: Uint8Array): VotingMember {
   new PublicKey(address)
@@ -106,7 +108,7 @@ export function requiredVotes(pool: OnChainPool, p: Proposal): number {
   const critical = ['SetSpenderLimit', 'ConfigurationModification', 'EvictMember'].includes(p.action.kind)
   const bps = Math.max(p.voteThreshold, critical ? 6667 : 5001)
   const base = m.votingMemberCount || m.fundedMemberCount
-  const count = p.action.kind === 'ClosePool' ? (m.fundedMemberCount || pool.memberCount) : p.action.kind === 'EvictMember' ? base - 1 : base
+  const count = p.action.kind === 'ClosePool' ? (m.fundedMemberCount || pool.memberCount) : (p.action.kind === 'EvictMember' && p.targetIsVoter) ? base - 1 : base
   return Math.max(1, Math.ceil(Math.max(1, count) * bps / 10_000))
 }
 export function proposalEligibility(pool: OnChainPool, p: Proposal, now: bigint) {
@@ -191,6 +193,7 @@ export function buildGovernanceTransaction(programId: string, wallet: string, sn
     if (!proposalEligibility(pool, { pool: pool.address, voteThreshold: pool.voteThreshold, action: operation.action, state: 'Queued', yesVotes: 0, noVotes: 0 } as Proposal, snapshot.now).cycleCurrent) throw new Error('Roll the overdue cycle before creating proposals')
     name = 'create_proposal'; data = encodeAction(operation.action)
     keys = [account(wallet,true,true), account(pool.address,true), account(member), account(pda('proposal',keyBytes(pool.address),u64(pool.nextProposalId)),true), account(sys)]
+    if (action.kind === 'EvictMember') keys.push(account(action.member))
   } else {
     const p = operation.proposal, eligibility = proposalEligibility(pool, p, snapshot.now)
     if (operation.kind === 'vote') {

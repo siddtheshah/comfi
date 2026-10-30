@@ -114,6 +114,7 @@ export interface ProposalInfo {
   state: 'Queued' | 'Open' | 'Executable' | 'Executed' | 'Rejected'
   executionMode: ExecutionMode
   voteThreshold: number
+  targetIsVoter?: boolean
 }
 
 export interface WithdrawalRequestInfo {

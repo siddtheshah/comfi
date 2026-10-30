@@ -1186,10 +1186,11 @@ pub struct Proposal {
     pub bump: u8,
     pub execution_mode: ExecutionMode,
     pub vote_threshold: u32,
+    pub target_is_voter: bool,
 }
 
 impl Proposal {
-    pub const SPACE: usize = 8 + 32 + 8 + 32 + 65 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4;
+    pub const SPACE: usize = 8 + 32 + 8 + 32 + 65 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4 + 1;
 
     pub fn required_votes_for_pool(&self, pool: &Pool) -> Result<u32> {
         require!(
@@ -1224,7 +1225,11 @@ impl Proposal {
         } else if matches!(self.action, ProposalAction::ClosePool) {
             (pool.funded_member_count as u64).max(1)
         } else if matches!(self.action, ProposalAction::EvictMember { .. }) {
-            base_voting_members.saturating_sub(1).max(1)
+            if self.target_is_voter {
+                base_voting_members.saturating_sub(1).max(1)
+            } else {
+                base_voting_members.max(1)
+            }
         } else {
             base_voting_members.max(1)
         };
@@ -2146,6 +2151,47 @@ pub fn request_withdrawal(ctx: Context<RequestWithdrawal>, args: WithdrawalArgs)
     Ok(())
 }
 
+pub fn validate_eviction_target(
+    pool_key: Pubkey,
+    pool: &Pool,
+    proposer_key: Pubkey,
+    proposer_wallet: Pubkey,
+    target: Pubkey,
+    remaining_accounts: &[AccountInfo],
+) -> Result<bool> {
+    require!(
+        proposer_key != target && proposer_wallet != target,
+        ComfiError::TargetCannotVoteOnEviction
+    );
+    require!(
+        !remaining_accounts.is_empty(),
+        ComfiError::IncompleteMemberList
+    );
+    let target_ai = &remaining_accounts[0];
+    require_keys_eq!(target_ai.key(), target, ComfiError::ProposalTargetMismatch);
+    require_keys_eq!(*target_ai.owner, crate::ID, ComfiError::Unauthorized);
+
+    let target_data = target_ai.try_borrow_data()?;
+    require!(target_data.len() >= 8, ComfiError::Unauthorized);
+    let mut disc = [0u8; 8];
+    disc.copy_from_slice(&target_data[..8]);
+    require!(disc == Member::DISCRIMINATOR, ComfiError::Unauthorized);
+
+    let mut slice: &[u8] = &target_data;
+    let target_member = Member::try_deserialize(&mut slice)
+        .map_err(|_| ComfiError::Unauthorized)?;
+
+    require_keys_eq!(target_member.pool, pool_key, ComfiError::Unauthorized);
+    require!(target_member.status == MemberStatus::Active, ComfiError::MemberNotActive);
+
+    let is_voter = if pool.voting_member_count > 0 {
+        target_member.is_funded_for_pool(pool) && target_member.is_matured_voter
+    } else {
+        target_member.is_funded_for_pool(pool)
+    };
+    Ok(is_voter)
+}
+
 pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> Result<()> {
     require!(!ctx.accounts.pool.is_closing, ComfiError::PoolIsClosing);
     ctx.accounts.pool.ensure_cycle_current()?;
@@ -2156,12 +2202,18 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
             ComfiError::PoolLocked
         );
     }
-    if let ProposalAction::EvictMember { member: target } = action {
-        require!(
-            ctx.accounts.proposer.key() != target && ctx.accounts.proposer.wallet != target,
-            ComfiError::TargetCannotVoteOnEviction
-        );
-    }
+    let target_is_voter = if let ProposalAction::EvictMember { member: target } = action {
+        validate_eviction_target(
+            ctx.accounts.pool.key(),
+            &ctx.accounts.pool,
+            ctx.accounts.proposer.key(),
+            ctx.accounts.proposer.wallet,
+            target,
+            ctx.remaining_accounts,
+        )?
+    } else {
+        false
+    };
     if let ProposalAction::AdmitMember {
         candidate_wallet,
         vouched_by,
@@ -2255,6 +2307,7 @@ pub fn create_proposal(ctx: Context<CreateProposal>, action: ProposalAction) -> 
     proposal.bump = ctx.bumps.proposal;
     proposal.execution_mode = pool.get_proposal_execution_mode(&action);
     proposal.vote_threshold = pool.vote_threshold;
+    proposal.target_is_voter = target_is_voter;
     pool.next_proposal_id = pool
         .next_proposal_id
         .checked_add(1)
@@ -3323,7 +3376,7 @@ mod tests {
         );
         assert_eq!(
             Proposal::SPACE,
-            8 + 32 + 8 + 32 + 65 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4
+            8 + 32 + 8 + 32 + 65 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 4 + 1
         );
         assert_eq!(VoteReceipt::SPACE, 8 + 32 + 32 + 1 + 1);
         assert_eq!(SponsorQuoteReceipt::SPACE, 8 + 32 + 32 + 32 + 1);
@@ -3350,6 +3403,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // 1 yes vote is below threshold of 2: should be rejected
@@ -3396,6 +3450,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: pool_cycle_0.vote_threshold,
+            target_is_voter: false,
         };
 
         // Initial state is Queued
@@ -3458,6 +3513,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // Cycle 1 ends, rolling into Cycle 2
@@ -3534,6 +3590,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         let passed = proposal.yes_votes >= proposal.vote_threshold && proposal.yes_votes > proposal.no_votes;
@@ -3612,6 +3669,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // When rolling cycle 1 (next available cycle after voting opened):
@@ -3651,6 +3709,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // Cycle 1 rolls: threshold is met, but execution_mode is OnDeadline and not at deadline yet
@@ -3743,6 +3802,7 @@ mod tests {
             bump: 255,
             execution_mode,
             vote_threshold: pool.vote_threshold,
+            target_is_voter: false,
         };
 
         pool.vote_threshold = 5; // Increased to 5
@@ -3824,6 +3884,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // Member A with standard funded deposit (50, 0 surplus)
@@ -3945,6 +4006,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // Proposal passes
@@ -5242,6 +5304,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         let assert_exec = |p: &Proposal, now: i64| -> Result<()> {
@@ -5291,6 +5354,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         let mut sc = SpenderCycle {
@@ -5506,6 +5570,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 5000, // 50.00% (5000 bps)
+            target_is_voter: false,
         };
 
         // For ClosePool / SetSpenderLimit, a strict majority floor (5001 bps) is enforced
@@ -5703,6 +5768,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         // When ClosePool proposal is executed in that transaction:
@@ -5847,6 +5913,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5000, // 50.00%
+            target_is_voter: false,
         };
 
         // For ClosePool, strict majority floor (5001 bps) is enforced.
@@ -5899,6 +5966,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         // In cycle rollover (process_cycle_proposals), passed proposals must NOT
@@ -6485,6 +6553,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5000, // 50.00%
+            target_is_voter: false,
         };
 
         // For ApproveWithdrawal, strict majority floor (5001 bps) is enforced.
@@ -6538,6 +6607,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5000, // 50.00%
+            target_is_voter: false,
         };
 
         // For ConfigurationModification, strict majority floor (5001 bps) is enforced.
@@ -7291,6 +7361,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 6000,
+            target_is_voter: false,
         };
         let prop_close = Proposal {
             pool: pool.global,
@@ -7308,6 +7379,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 6000,
+            target_is_voter: false,
         };
 
         let check_vote = |pool: &Pool, prop: &Proposal| -> Result<()> {
@@ -7356,6 +7428,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
         let p_close = Proposal {
             pool: pool_key,
@@ -7373,6 +7446,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         let mut data_spend = vec![0u8; Proposal::SPACE];
@@ -7424,6 +7498,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         // Fallback required votes scales with enrolled member_count (5) rather than funded (0):
@@ -7452,6 +7527,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
         // Uses funded_member_count.max(1) = 1
         assert_eq!(prop_other.required_votes_for_pool(&pool).unwrap(), 1);
@@ -8240,6 +8316,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: pool.vote_threshold,
+            target_is_voter: true,
         };
 
         // For EvictMember, active electorate excludes target: (4 - 1) = 3 members.
@@ -8428,6 +8505,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 1000,
+            target_is_voter: false,
         };
 
         // 4 voting members -> 4 * 5001 / 10000 = 2, + 1 = 3 votes required (simple majority floor)
@@ -8627,6 +8705,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         let check_cycle_executable = |p: &Proposal, pool: &Pool| -> Result<()> {
@@ -8680,6 +8759,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         // Honest member detects malicious proposal during delay window and ragequits (leave_pool)
@@ -8788,6 +8868,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         let validate_evict = |p: &Pool, t: &Member, prop: &Proposal, now: i64| -> Result<()> {
@@ -8881,6 +8962,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         let validate_evict = |p: &Pool, t: &Member, prop: &Proposal, now: i64| -> Result<()> {
@@ -9020,6 +9102,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::OnDeadline,
             vote_threshold: 2,
+            target_is_voter: false,
         };
 
         pool.head_member = Some(target_pda);
@@ -10117,6 +10200,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         // Proposal cycles = 2 - 1 + 1 = 2.
@@ -10242,6 +10326,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         // For 1-cycle proposal: proposal_cycles = 1.
@@ -10324,6 +10409,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         let required = proposal.required_votes_for_pool(&pool).unwrap();
@@ -10355,6 +10441,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001, // Strict majority
+            target_is_voter: false,
         };
 
         // 1 cycle: 10 * 1 = 10; ceil(10 * 0.5001) = 6
@@ -10409,6 +10496,7 @@ mod tests {
             bump: 255,
             execution_mode: ExecutionMode::ThresholdMet,
             vote_threshold: 5001,
+            target_is_voter: false,
         };
 
         // When deadline_cycle is near u64::MAX, active_members * proposal_cycles overflows u64
@@ -10858,4 +10946,291 @@ mod tests {
         assert!(pool.rollover_prev_member.is_none());
     }
 
+
+    #[test]
+    fn test_audit_06_evict_member_required_votes_target_is_voter_vs_nonvoter() {
+        let mut pool = create_test_pool();
+        pool.member_count = 3;
+        pool.funded_member_count = 2;
+        pool.voting_member_count = 2;
+        pool.vote_threshold = 5001; // floor is 6667 bps for EvictMember
+
+        let target_key = Pubkey::new_unique();
+
+        // 1. Eviction of mature funded voter correctly subtracts 1 from electorate
+        let voter_proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::EvictMember { member: target_key },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: pool.vote_threshold,
+            target_is_voter: true,
+        };
+        // active_members = 2 - 1 = 1. ceil(1 * 6667 / 10000) = 1.
+        assert_eq!(voter_proposal.required_votes_for_pool(&pool).unwrap(), 1);
+
+        // 2. Eviction of nonvoter / unfunded member does NOT subtract 1, requiring 2 of 2 votes for a 6667 bps threshold
+        let nonvoter_proposal = Proposal {
+            pool: pool.global,
+            id: 2,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::EvictMember { member: target_key },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: pool.vote_threshold,
+            target_is_voter: false,
+        };
+        // active_members = 2. ceil(2 * 6667 / 10000) = 2. Requires both mature voters to agree!
+        assert_eq!(nonvoter_proposal.required_votes_for_pool(&pool).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_audit_06_evict_immature_funded_member_does_not_subtract_when_voting_members_exist() {
+        let mut pool = create_test_pool();
+        pool.member_count = 3;
+        pool.funded_member_count = 3;
+        pool.voting_member_count = 2; // 2 mature voters, 1 immature funded member
+        pool.vote_threshold = 5001;
+
+        let target_key = Pubkey::new_unique();
+        // Immature member is not a mature voter, so target_is_voter = false
+        let proposal = Proposal {
+            pool: pool.global,
+            id: 1,
+            proposer: Pubkey::new_unique(),
+            action: ProposalAction::EvictMember { member: target_key },
+            yes_votes: 0,
+            no_votes: 0,
+            voting_cycle: 1,
+            deadline_cycle: 1,
+            executable_cycle: 0,
+            deadline: 1000,
+            executable_after: 0,
+            state: ProposalState::Open,
+            bump: 255,
+            execution_mode: ExecutionMode::ThresholdMet,
+            vote_threshold: pool.vote_threshold,
+            target_is_voter: false,
+        };
+        // base_voting_members = 2. Not subtracted -> active_members = 2.
+        // ceil(2 * 6667 / 10000) = 2.
+        assert_eq!(proposal.required_votes_for_pool(&pool).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_audit_06_validate_eviction_target_escalations_and_electorate_snapshot() {
+        let mut pool = create_test_pool();
+        pool.current_cycle = 1;
+        pool.member_obligation_amount = 50;
+        pool.voting_maturation_cycles = 2;
+        pool.voting_member_count = 2;
+        pool.funded_member_count = 2;
+
+        let pool_key = pool.global;
+        let proposer_key = Pubkey::new_unique();
+        let proposer_wallet = Pubkey::new_unique();
+        let target_key = Pubkey::new_unique();
+        let target_wallet = Pubkey::new_unique();
+        let foreign_pool = Pubkey::new_unique();
+        let owner = crate::ID;
+
+        // 1. Missing remaining account
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::IncompleteMemberList.into());
+
+        // 2. Proposer cannot evict self
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            target_key,
+            proposer_wallet,
+            target_key,
+            &[],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::TargetCannotVoteOnEviction.into());
+
+        // 3. Target key mismatch with remaining account
+        let wrong_key = Pubkey::new_unique();
+        let mut m_data = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Active, 100, true);
+        let mut lamports = 1_000_000;
+        let ai_wrong_key = AccountInfo::new(&wrong_key, false, false, &mut lamports, &mut m_data, &owner, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_wrong_key],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::ProposalTargetMismatch.into());
+
+        // 4. Owner is not crate::ID
+        let foreign_program = Pubkey::new_unique();
+        let ai_foreign_owner = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_data, &foreign_program, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_foreign_owner],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // 5. Account data invalid / not a Member
+        let mut bad_data = vec![0u8; 32];
+        let ai_bad_data = AccountInfo::new(&target_key, false, false, &mut lamports, &mut bad_data, &owner, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_bad_data],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // 6. Member from foreign pool
+        let mut m_foreign = create_test_member_data(foreign_pool, target_wallet, None, MemberStatus::Active, 100, true);
+        let ai_foreign_pool = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_foreign, &owner, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_foreign_pool],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // 7. Member is Leaving
+        let mut m_leaving = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Leaving, 100, true);
+        let ai_leaving = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_leaving, &owner, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_leaving],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::MemberNotActive.into());
+
+        // 8. Member is Exited
+        let mut m_exited = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Exited, 0, false);
+        let ai_exited = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_exited, &owner, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_exited],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::MemberNotActive.into());
+
+        // 9. Member is Evicted
+        let mut m_evicted = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Evicted, 0, false);
+        let ai_evicted = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_evicted, &owner, false);
+        let err = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_evicted],
+        ).unwrap_err();
+        assert_eq!(err, ComfiError::MemberNotActive.into());
+
+        // 10. Valid target: mature funded voter -> target_is_voter = true
+        let mut m_mature_voter = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Active, 100, true);
+        // Ensure cycle 1 matches pool.current_cycle
+        {
+            let mut deser = Member::try_deserialize(&mut &m_mature_voter[..]).unwrap();
+            deser.funded_cycle = 1;
+            deser.is_matured_voter = true;
+            let mut cursor: &mut [u8] = &mut m_mature_voter[..];
+            deser.try_serialize(&mut cursor).unwrap();
+        }
+        let ai_mature = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_mature_voter, &owner, false);
+        let is_voter = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_mature],
+        ).unwrap();
+        assert!(is_voter);
+
+        // 11. Valid target: unfunded member -> target_is_voter = false
+        let mut m_unfunded = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Active, 0, false);
+        let ai_unfunded = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_unfunded, &owner, false);
+        let is_voter = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_unfunded],
+        ).unwrap();
+        assert!(!is_voter);
+
+        // 12. Valid target: funded immature member (voting_member_count > 0) -> target_is_voter = false
+        let mut m_immature = create_test_member_data(pool_key, target_wallet, None, MemberStatus::Active, 100, true);
+        {
+            let mut deser = Member::try_deserialize(&mut &m_immature[..]).unwrap();
+            deser.funded_cycle = 1;
+            deser.is_matured_voter = false;
+            let mut cursor: &mut [u8] = &mut m_immature[..];
+            deser.try_serialize(&mut cursor).unwrap();
+        }
+        let ai_immature = AccountInfo::new(&target_key, false, false, &mut lamports, &mut m_immature, &owner, false);
+        let is_voter = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_immature.clone()],
+        ).unwrap();
+        assert!(!is_voter);
+
+        // 13. When voting_member_count == 0, funded member counts as target_is_voter = true
+        pool.voting_member_count = 0;
+        let is_voter_no_mature = pool_handlers::validate_eviction_target(
+            pool_key,
+            &pool,
+            proposer_key,
+            proposer_wallet,
+            target_key,
+            &[ai_immature],
+        ).unwrap();
+        assert!(is_voter_no_mature);
+    }
 }

@@ -9,7 +9,7 @@ export function writer(name: string) {
   const parts: Buffer[] = [createHash('sha256').update(`account:${name}`).digest().subarray(0,8)]
   return { byte(v: number) { parts.push(Buffer.from([v])) }, u32(v: number) { const b=Buffer.alloc(4);b.writeUInt32LE(v);parts.push(b) }, u64(v: bigint) { const b=Buffer.alloc(8);b.writeBigUInt64LE(v);parts.push(b) }, key(v: string) { parts.push(new PublicKey(v).toBuffer()) }, zeros(n:number) { parts.push(Buffer.alloc(n)) }, result() { return Buffer.concat(parts) } }
 }
-export function proposalBytes(kind = 3, state = 0, mode = 0) {
+export function proposalBytes(kind = 3, state = 0, mode = 0, targetIsVoter?: boolean) {
   const w=writer('Proposal');w.key(poolAddress);w.u64(0n);w.key(memberAddress);w.byte(kind)
   switch(kind) {
     case 0: w.key(memberAddress);w.u64(9_007_199_254_740_993n);break
@@ -20,6 +20,7 @@ export function proposalBytes(kind = 3, state = 0, mode = 0) {
   }
   w.u32(2);w.u32(0);for(const v of [9n,10n,11n,2_000_000_000n,1_790_000_000n])w.u64(v)
   w.byte(state);w.byte(255);w.byte(mode);w.u32(5001)
+  if (targetIsVoter !== undefined) w.byte(targetIsVoter ? 1 : 0)
   return w.result()
 }
 export function memberBytes({ next = false, vouch = false } = {}) {

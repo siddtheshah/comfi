@@ -17,6 +17,8 @@ for (const [tag, kind] of proposalKinds.entries()) test(`decodes ${kind} in inde
   assert.equal(p.action.kind,kind);assert.equal(p.yesVotes,2);assert.equal(p.votingCycle,9n);assert.equal(p.deadlineCycle,10n);assert.equal(p.executableCycle,11n);assert.equal(p.executionMode,'on_deadline');assert.equal(p.voteThreshold,5001)
   if(p.action.kind==='SetSpenderLimit')assert.equal(p.action.cap,9_007_199_254_740_993n)
   if(p.action.kind==='ConfigurationModification')assert.equal(p.action.withdrawalExecutionMode,'threshold_met')
+  assert.equal(decodeProposal(proposalAddress,proposalBytes(tag,0,0,true)).targetIsVoter,true)
+  assert.equal(decodeProposal(proposalAddress,proposalBytes(tag,0,0,false)).targetIsVoter,false)
   const bytes=proposalBytes(tag);assert.throws(()=>decodeProposal(proposalAddress,bytes.subarray(0,bytes.length-1)),/Truncated/)
   const corrupted=Buffer.from(bytes);corrupted[80]=255;assert.throws(()=>decodeProposal(proposalAddress,corrupted),/Invalid governance enum/)
 })
@@ -39,7 +41,8 @@ test('required votes match critical supermajority and closure/eviction electorat
  const s=snapshot(), p=s.proposals[0]
  assert.equal(requiredVotes(s.pool,p),2)
  p.action={kind:'SetSpenderLimit',member:memberAddress,cap:1n};assert.equal(requiredVotes(s.pool,p),3)
- p.action={kind:'EvictMember',member:memberAddress};assert.equal(requiredVotes(s.pool,p),2)
+ p.action={kind:'EvictMember',member:memberAddress};p.targetIsVoter=true;assert.equal(requiredVotes(s.pool,p),2)
+ p.targetIsVoter=false;assert.equal(requiredVotes(s.pool,p),3)
  p.action={kind:'ClosePool'};s.pool.metrics!.fundedMemberCount=0;assert.equal(requiredVotes(s.pool,p),3)
  p.voteThreshold=0;assert.throws(()=>requiredVotes(s.pool,p),/Invalid proposal/)
  s.pool.metrics=null;assert.throws(()=>requiredVotes(s.pool,p),/current pool account/)
@@ -89,6 +92,8 @@ test('transaction create and vote use correct PDAs, instructions and privileges'
  const tx=buildGovernanceTransaction(programId,creator,s,{kind:'create',action:{kind:'ClosePool'}})
  assert.equal(tx.instructions[0].data.toString('hex'),createHash('sha256').update('global:create_proposal').digest().subarray(0,8).toString('hex')+'03')
  assert.equal(tx.instructions[0].keys[2].pubkey.toBase58(),memberAddress);assert.equal(tx.instructions[0].keys[0].isSigner,true)
+ const evictTx=buildGovernanceTransaction(programId,creator,s,{kind:'create',action:{kind:'EvictMember',member:proposalAddress}})
+ assert.equal(evictTx.instructions[0].keys.length,6);assert.equal(evictTx.instructions[0].keys[5].pubkey.toBase58(),proposalAddress)
  const vote=buildGovernanceTransaction(programId,creator,s,{kind:'vote',proposal:p,approve:true}).instructions[0]
  const receipt=PublicKey.findProgramAddressSync([Buffer.from('vote'),new PublicKey(p.address).toBuffer(),new PublicKey(memberAddress).toBuffer()],new PublicKey(programId))[0]
  assert.equal(vote.keys[4].pubkey.toBase58(),receipt.toBase58());assert.equal(vote.data[8],1)

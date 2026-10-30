@@ -203,6 +203,13 @@ test('executeAction escalates on missing required poolAddress parameter for pool
 
   await assert.rejects(
     async () => {
+      await executeAction('create_proposal', { poolAddress: '11111111111111111111111111111111', actionKind: 'EvictMember', targetWalletName: 'invalid_wallet' })
+    },
+    { message: /Invalid targetWalletName/ }
+  )
+
+  await assert.rejects(
+    async () => {
       await executeAction('create_proposal', { poolAddress: '11111111111111111111111111111111', actionKind: 'AdmitMember' })
     },
     { message: /Missing candidateWallet/ }

@@ -351,6 +351,7 @@ export async function getPoolDetails(poolAddress: string): Promise<{
       state,
       executionMode: parseExecutionMode(p.executionMode),
       voteThreshold: Number(p.voteThreshold ?? poolAccount.voteThreshold ?? 1),
+      targetIsVoter: Boolean(p.targetIsVoter),
     }
   })
 
@@ -930,6 +931,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
 
       const poolPubkey = new PublicKey(poolAddress)
 
+      let targetMemberPubkey: PublicKey | null = null
       let actionPayload: any
       if (actionKind === 'SetSpenderLimit') {
         const targetWallet = wallets[targetWalletName as keyof typeof wallets]
@@ -975,7 +977,6 @@ export async function executeAction(action: string, payload: any): Promise<any> 
           closePool: {},
         }
       } else if (actionKind === 'EvictMember' || actionKind === 'evict_member') {
-        let targetMemberPubkey: PublicKey
         if (payload.targetMemberAddress) {
           targetMemberPubkey = new PublicKey(payload.targetMemberAddress)
         } else if (payload.targetWalletName) {
@@ -1039,6 +1040,15 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const [proposerMemberPda] = PublicKey.findProgramAddressSync([Buffer.from('member'), poolPubkey.toBuffer(), proposer.publicKey.toBuffer()], programId)
       const [proposalPda] = PublicKey.findProgramAddressSync([Buffer.from('proposal'), poolPubkey.toBuffer(), nextProposalId.toArrayLike(Buffer, 'le', 8)], programId)
 
+      const remainingAccounts = []
+      if ((actionKind === 'EvictMember' || actionKind === 'evict_member') && targetMemberPubkey) {
+        remainingAccounts.push({
+          pubkey: targetMemberPubkey,
+          isWritable: false,
+          isSigner: false,
+        })
+      }
+
       const tx = await program.methods
         .createProposal(actionPayload)
         .accounts({
@@ -1047,6 +1057,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
           proposer: proposerMemberPda,
           proposal: proposalPda,
         })
+        .remainingAccounts(remainingAccounts)
         .signers([proposer])
         .rpc()
 
