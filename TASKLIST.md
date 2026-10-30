@@ -97,5 +97,5 @@
 - [x] [Completed: Subagent-SEC-10] COMFI-SEC-10: Member departures corrupt or block linked-list rollover
 - [x] [Completed: Subagent-AUD-06] COMFI-AUD-06: Evicting a nonvoter incorrectly reduces the eligible electorate
 - [x] [Completed: Subagent-AUD-07] COMFI-AUD-07: Singleton global initialization trusts the first arbitrary signer
-- [ ] COMFI-AUD-08: Shipped rollover clients are incompatible with current account fields and chunking
+- [ ] [Claimed: Subagent-AUD-08 | Deadline: 2026-10-30T02:37:00Z] COMFI-AUD-08: Shipped rollover clients are incompatible with current account fields and chunking
 - [x] [Completed: Subagent-AUD-14] COMFI-AUD-14: Pre-funding a candidate member PDA blocks admission
