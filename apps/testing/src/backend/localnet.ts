@@ -24,6 +24,334 @@ export function toExecutionModeArg(mode?: string): { onDeadline: {} } | { thresh
   return { onDeadline: {} }
 }
 
+export const DEFAULT_CHUNK_SIZE = 20
+
+export interface PoolTiming {
+  currentCycle: BN
+  cycleDurationSeconds: BN
+  cycleStartedAt: BN
+  nextStart: BN
+  isResuming: boolean
+}
+
+export function getPoolTiming(pool: any): PoolTiming {
+  if (!pool) {
+    throw new Error('Pool object is required to evaluate cycle timing')
+  }
+
+  const rawCycle = pool.currentCycle ?? pool.current_cycle
+  if (rawCycle === undefined || rawCycle === null) {
+    throw new Error('Pool missing currentCycle')
+  }
+  const currentCycle = new BN(rawCycle.toString())
+
+  const rawDuration = pool.cycleDurationSeconds ?? pool.cycle_duration_seconds ?? pool.cycleDuration ?? pool.cycle_duration
+  if (rawDuration === undefined || rawDuration === null) {
+    throw new Error('Pool missing cycleDurationSeconds / cycleDuration')
+  }
+  const cycleDurationSeconds = new BN(rawDuration.toString())
+
+  const rawStart = pool.cycleStartedAt ?? pool.cycle_started_at ?? pool.startTime ?? pool.start_time
+  if (rawStart === undefined || rawStart === null) {
+    throw new Error('Pool missing cycleStartedAt / startTime')
+  }
+  const cycleStartedAt = new BN(rawStart.toString())
+
+  const cursor = pool.rolloverCursor ?? pool.rollover_cursor
+  const isResuming = cursor !== null && cursor !== undefined
+
+  // Next cycle boundary formula: cycleStartedAt + cycleDurationSeconds
+  const nextStart = cycleStartedAt.add(cycleDurationSeconds)
+
+  return {
+    currentCycle,
+    cycleDurationSeconds,
+    cycleStartedAt,
+    nextStart,
+    isResuming,
+  }
+}
+
+export function isSupermajorityAction(action: any): boolean {
+  if (!action) return false
+  if (typeof action === 'string') {
+    return action === 'SetSpenderLimit' || action === 'set_spender_limit' ||
+           action === 'ConfigurationModification' || action === 'configuration_modification' ||
+           action === 'EvictMember' || action === 'evict_member'
+  }
+  return Boolean(action.setSpenderLimit || action.configurationModification || action.evictMember)
+}
+
+export function isMajorityAction(action: any): boolean {
+  if (!action) return false
+  if (typeof action === 'string') {
+    return action === 'ClosePool' || action === 'close_pool' ||
+           action === 'ApproveWithdrawal' || action === 'approve_withdrawal' ||
+           action === 'AdmitMember' || action === 'admit_member'
+  }
+  return Boolean(action.closePool || action.approveWithdrawal || action.admitMember)
+}
+
+export function isClosePoolAction(action: any): boolean {
+  if (!action) return false
+  if (typeof action === 'string') {
+    return action === 'ClosePool' || action === 'close_pool'
+  }
+  return Boolean(action.closePool)
+}
+
+export function isEvictAction(action: any): boolean {
+  if (!action) return false
+  if (typeof action === 'string') {
+    return action === 'EvictMember' || action === 'evict_member'
+  }
+  return Boolean(action.evictMember)
+}
+
+export function isProposalStateActive(state: any): boolean {
+  if (!state) return false
+  if (typeof state === 'string') {
+    const s = state.toLowerCase()
+    return s === 'queued' || s === 'open'
+  }
+  return Boolean(state.queued || state.open)
+}
+
+export function calculateRequiredVotes(pool: any, proposal: any): number {
+  if (!pool) throw new Error('Pool object required to calculate required votes')
+  if (!proposal) throw new Error('Proposal object required to calculate required votes')
+
+  const rawThreshold = proposal.voteThreshold ?? proposal.vote_threshold ?? pool.voteThreshold ?? pool.vote_threshold
+  if (rawThreshold === undefined || rawThreshold === null) {
+    throw new Error('Missing voteThreshold on proposal and pool')
+  }
+  let thresholdBps = Number(rawThreshold)
+  if (isNaN(thresholdBps) || thresholdBps < 100 || thresholdBps > 10000) {
+    throw new Error(`Invalid voteThreshold: ${rawThreshold}. Must be between 100 and 10000 bps`)
+  }
+
+  const action = proposal.action
+  if (!action) throw new Error('Proposal missing action')
+
+  if (isSupermajorityAction(action)) {
+    thresholdBps = Math.max(thresholdBps, 6667)
+  } else if (isMajorityAction(action)) {
+    thresholdBps = Math.max(thresholdBps, 5001)
+  }
+
+  const votingMemberCount = Number(pool.votingMemberCount ?? pool.voting_member_count ?? 0)
+  const fundedMemberCount = Number(pool.fundedMemberCount ?? pool.funded_member_count ?? 0)
+  const memberCount = Number(pool.memberCount ?? pool.member_count ?? 0)
+
+  const baseVotingMembers = votingMemberCount > 0 ? votingMemberCount : fundedMemberCount
+
+  let activeMembers: number
+  if (fundedMemberCount === 0 && isClosePoolAction(action)) {
+    activeMembers = Math.max(memberCount, 1)
+  } else if (isClosePoolAction(action)) {
+    activeMembers = Math.max(fundedMemberCount, 1)
+  } else if (isEvictAction(action)) {
+    const targetIsVoter = Boolean(proposal.targetIsVoter ?? proposal.target_is_voter)
+    if (targetIsVoter) {
+      activeMembers = Math.max(Math.max(baseVotingMembers - 1, 0), 1)
+    } else {
+      activeMembers = Math.max(baseVotingMembers, 1)
+    }
+  } else {
+    activeMembers = Math.max(baseVotingMembers, 1)
+  }
+
+  const deadlineCycle = Number(proposal.deadlineCycle ?? proposal.deadline_cycle ?? 0)
+  const votingCycle = Number(proposal.votingCycle ?? proposal.voting_cycle ?? 0)
+  const proposalCycles = Math.max(Math.max(deadlineCycle - votingCycle, 0) + 1, 1)
+
+  const scaledActiveMembers = BigInt(activeMembers) * BigInt(proposalCycles)
+  const requiredBig = (scaledActiveMembers * BigInt(thresholdBps) + 9999n) / 10000n
+  return Math.max(Number(requiredBig), 1)
+}
+
+export function isProposalPassed(pool: any, proposal: any): boolean {
+  const required = calculateRequiredVotes(pool, proposal)
+  const yesVotes = Number(proposal.yesVotes ?? proposal.yes_votes ?? 0)
+  const noVotes = Number(proposal.noVotes ?? proposal.no_votes ?? 0)
+  return yesVotes >= required && yesVotes > noVotes
+}
+
+export function shouldResolveProposal(pool: any, proposal: any, currentCycle: BN): boolean {
+  if (!isProposalStateActive(proposal.state)) return false
+
+  const isLocked = Boolean(pool.isLocked ?? pool.is_locked)
+  if (isLocked && !isClosePoolAction(proposal.action)) {
+    return false
+  }
+
+  const votingCycle = Number(proposal.votingCycle ?? proposal.voting_cycle ?? 0)
+  const deadlineCycle = Number(proposal.deadlineCycle ?? proposal.deadline_cycle ?? 0)
+
+  const isVotingActive = currentCycle.gte(new BN(votingCycle.toString()))
+  if (!isVotingActive) return false
+
+  const isDeadline = currentCycle.gte(new BN(deadlineCycle.toString()))
+  const mode = parseExecutionMode(proposal.executionMode ?? proposal.execution_mode)
+  const passed = isProposalPassed(pool, proposal)
+
+  if (mode === 'threshold_met') {
+    return passed || isDeadline
+  }
+  return isDeadline
+}
+
+export function traverseMemberChain(headOrCursor: any, poolMembers: any[]): any[] {
+  if (!headOrCursor) return []
+  if (!Array.isArray(poolMembers)) {
+    throw new Error('poolMembers must be an array')
+  }
+
+  const memberMap = new Map<string, any>()
+  for (const item of poolMembers) {
+    if (!item?.publicKey) {
+      throw new Error('poolMembers element missing publicKey')
+    }
+    const k = item.publicKey.toBase58 ? item.publicKey.toBase58() : new PublicKey(item.publicKey).toBase58()
+    memberMap.set(k, item)
+  }
+
+  const chainMembers: any[] = []
+  const visited = new Set<string>()
+  let currentKey: any = headOrCursor
+
+  while (currentKey) {
+    const keyStr = typeof currentKey === 'string'
+      ? currentKey
+      : (currentKey.toBase58 ? currentKey.toBase58() : new PublicKey(currentKey).toBase58())
+
+    if (visited.has(keyStr)) {
+      throw new Error(`Cycle detected in member linked list at ${keyStr}`)
+    }
+    visited.add(keyStr)
+
+    const memberItem = memberMap.get(keyStr)
+    if (!memberItem) {
+      throw new Error(`Member ${keyStr} in pointer chain was not found in pool members list`)
+    }
+
+    chainMembers.push(memberItem)
+    const nextPtr = memberItem.account?.nextMember ?? memberItem.account?.next_member ?? null
+    currentKey = nextPtr
+  }
+
+  return chainMembers
+}
+
+export interface RolloverRemainingAccount {
+  pubkey: PublicKey
+  isWritable: boolean
+  isSigner: boolean
+}
+
+export interface RolloverPlan {
+  remainingAccounts: RolloverRemainingAccount[]
+  timing: PoolTiming
+  chainMembers: any[]
+  chunkMembers: any[]
+  remainingMembersCount: number
+  isComplete: boolean
+  hasPredecessor: boolean
+}
+
+export interface RolloverPlanOptions {
+  chunkSize?: number
+  programId?: PublicKey
+}
+
+export function buildRolloverRemainingAccounts(
+  poolPubkey: PublicKey | string,
+  poolAccount: any,
+  poolMembers: any[],
+  poolProposals: any[],
+  options?: RolloverPlanOptions
+): RolloverPlan {
+  if (!poolPubkey) throw new Error('poolPubkey is required')
+  if (!poolAccount) throw new Error('poolAccount is required')
+
+  const timing = getPoolTiming(poolAccount)
+  const poolKey = typeof poolPubkey === 'string' ? new PublicKey(poolPubkey) : poolPubkey
+  const progId = options?.programId ?? programId
+
+  const cursor = poolAccount.rolloverCursor ?? poolAccount.rollover_cursor
+  const head = poolAccount.headMember ?? poolAccount.head_member
+  const startKey = cursor ?? head
+
+  const chainMembers = traverseMemberChain(startKey, poolMembers)
+
+  const rawChunkSize = options?.chunkSize ?? DEFAULT_CHUNK_SIZE
+  const chunkSize = Number(rawChunkSize)
+  if (isNaN(chunkSize) || chunkSize <= 0) {
+    throw new Error(`Invalid chunkSize: ${rawChunkSize}. Must be a positive number`)
+  }
+
+  const chunkMembers = chainMembers.slice(0, chunkSize)
+  const remainingMembersCount = chainMembers.length - chunkMembers.length
+  const isComplete = remainingMembersCount === 0
+
+  const remainingAccounts: RolloverRemainingAccount[] = []
+
+  // Predecessor at head of chunk if resuming and rolloverPrevMember is set (SEC-10)
+  let hasPredecessor = false
+  if (timing.isResuming) {
+    const prevMember = poolAccount.rolloverPrevMember ?? poolAccount.rollover_prev_member
+    if (prevMember) {
+      const prevPubkey = typeof prevMember === 'string' ? new PublicKey(prevMember) : prevMember
+      remainingAccounts.push({ pubkey: prevPubkey, isWritable: true, isSigner: false })
+      hasPredecessor = true
+    }
+  }
+
+  // Chunk members
+  for (const memberItem of chunkMembers) {
+    const pubkey = typeof memberItem.publicKey === 'string' ? new PublicKey(memberItem.publicKey) : memberItem.publicKey
+    remainingAccounts.push({ pubkey, isWritable: true, isSigner: false })
+  }
+
+  // Proposals only attached on the chunk completing member traversal
+  if (isComplete && Array.isArray(poolProposals)) {
+    for (const pItem of poolProposals) {
+      const p = pItem.account
+      if (!p) continue
+      if (shouldResolveProposal(poolAccount, p, timing.currentCycle)) {
+        const propPubkey = typeof pItem.publicKey === 'string' ? new PublicKey(pItem.publicKey) : pItem.publicKey
+        remainingAccounts.push({ pubkey: propPubkey, isWritable: true, isSigner: false })
+
+        if (p.action?.setSpenderLimit || p.action?.set_spender_limit) {
+          const targetMember = p.action.setSpenderLimit?.member ?? p.action.set_spender_limit?.member
+          if (!targetMember) {
+            throw new Error('Missing target member for setSpenderLimit proposal')
+          }
+          const targetPubkey = typeof targetMember === 'string' ? new PublicKey(targetMember) : targetMember
+          remainingAccounts.push({ pubkey: targetPubkey, isWritable: true, isSigner: false })
+
+          const nextCycle = timing.currentCycle.addn(1)
+          const [spenderCyclePda] = PublicKey.findProgramAddressSync(
+            [Buffer.from('cycle'), poolKey.toBuffer(), targetPubkey.toBuffer(), nextCycle.toArrayLike(Buffer, 'le', 8)],
+            progId
+          )
+          remainingAccounts.push({ pubkey: spenderCyclePda, isWritable: true, isSigner: false })
+        }
+      }
+    }
+  }
+
+  return {
+    remainingAccounts,
+    timing,
+    chainMembers,
+    chunkMembers,
+    remainingMembersCount,
+    isComplete,
+    hasPredecessor,
+  }
+}
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..')
 const rpcUrl = process.env.VITE_SOLANA_RPC ?? process.env.COMFI_LOCALNET_RPC ?? 'http://127.0.0.1:8899'
 const programId = new PublicKey('3vzvgpB5MWB2cHGPRzWtRmKeQtZVfkffu6uygjoNDDYP')
@@ -691,131 +1019,127 @@ export async function executeAction(action: string, payload: any): Promise<any> 
     }
 
     case 'roll_cycle': {
-      const { poolAddress, crankerWallet } = payload
+      const { poolAddress, crankerWallet, chunkSize, allChunks } = payload
       if (!poolAddress) throw new Error('Missing poolAddress for roll_cycle')
+      if (chunkSize !== undefined && (typeof chunkSize !== 'number' || chunkSize <= 0)) {
+        throw new Error('Invalid chunkSize: must be a positive number')
+      }
       const poolPubkey = new PublicKey(poolAddress)
       const program = await getProgram()
-      const poolAccount = await program.account.pool.fetch(poolPubkey)
-      const currentCycle = new BN(poolAccount.currentCycle.toString())
-      const nextCycle = currentCycle.addn(1)
-
-      const poolMembers = await program.account.member.all([
-        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
-      ])
-      const poolProposals = await program.account.proposal.all([
-        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
-      ])
-      const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
-
-      // Members must be passed as writable so roll_cycle updates funded statuses and moves surplus
-      for (const item of poolMembers) {
-        remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
-      }
-
-      for (const item of poolProposals) {
-        const p = item.account
-        const stateIsActive = p.state.open || p.state.queued
-        const isVotingActive = currentCycle.gte(p.votingCycle)
-        const isDeadline = currentCycle.gte(p.deadlineCycle)
-        const isThresholdMetMode = parseExecutionMode(p.executionMode) === 'threshold_met'
-        const propThreshold = p.voteThreshold ?? poolAccount.voteThreshold
-        const passed = p.yesVotes >= propThreshold && p.yesVotes > p.noVotes
-        const shouldResolve = isThresholdMetMode ? (passed || isDeadline) : isDeadline
-
-        if (stateIsActive && isVotingActive && shouldResolve) {
-          remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
-          if (p.action.setSpenderLimit) {
-            const targetMember = p.action.setSpenderLimit.member
-            remainingAccounts.push({ pubkey: targetMember, isWritable: true, isSigner: false })
-            const [spenderCyclePda] = PublicKey.findProgramAddressSync(
-              [Buffer.from('cycle'), poolPubkey.toBuffer(), targetMember.toBuffer(), nextCycle.toArrayLike(Buffer, 'le', 8)],
-              programId
-            )
-            remainingAccounts.push({ pubkey: spenderCyclePda, isWritable: true, isSigner: false })
-          }
-        }
-      }
+      const effectiveChunkSize = chunkSize ?? DEFAULT_CHUNK_SIZE
+      const shouldRollAll = allChunks ?? true
+      const txs: string[] = []
 
       const crankerKp = crankerWallet && (wallets as Record<string, Keypair>)[crankerWallet]
         ? (wallets as Record<string, Keypair>)[crankerWallet]
         : wallets.administrator
 
-      const tx = await program.methods
-        .rollCycle()
-        .accounts({
-          pool: poolPubkey,
-          cranker: crankerKp.publicKey,
-        })
-        .remainingAccounts(remainingAccounts)
-        .signers([crankerKp])
-        .rpc()
+      let currentPool = await program.account.pool.fetch(poolPubkey)
+      let done = false
 
-      return { tx, pool: poolAddress }
-    }
+      while (!done) {
+        const poolMembers = await program.account.member.all([
+          { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+        ])
+        const poolProposals = await program.account.proposal.all([
+          { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+        ])
 
-    case 'test_roll_cycle': {
-      const { poolAddress } = payload
-      if (!poolAddress) throw new Error('Missing poolAddress for test_roll_cycle')
-      const poolPubkey = new PublicKey(poolAddress)
-      const program = await getProgram()
-      const poolAccount = await program.account.pool.fetch(poolPubkey)
-      const currentCycle = new BN(poolAccount.currentCycle.toString())
-      const nextCycle = currentCycle.addn(1)
+        const rolloverPlan = buildRolloverRemainingAccounts(
+          poolPubkey,
+          currentPool,
+          poolMembers,
+          poolProposals,
+          { chunkSize: effectiveChunkSize, programId }
+        )
 
-      const poolMembers = await program.account.member.all([
-        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
-      ])
-      const poolProposals = await program.account.proposal.all([
-        { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
-      ])
-      const remainingAccounts: { pubkey: PublicKey; isWritable: boolean; isSigner: boolean }[] = []
+        const tx = await program.methods
+          .rollCycle()
+          .accounts({
+            pool: poolPubkey,
+            cranker: crankerKp.publicKey,
+          })
+          .remainingAccounts(rolloverPlan.remainingAccounts)
+          .signers([crankerKp])
+          .rpc()
 
-      // Members must be passed in pointer-chain order as writable so test_roll_cycle updates funded statuses and moves surplus
-      const memberMap = new Map<string, any>()
-      for (const item of poolMembers) {
-        memberMap.set(item.publicKey.toBase58(), item)
-      }
-      let currentMemberKey = poolAccount.rolloverCursor ?? poolAccount.headMember
-      while (currentMemberKey) {
-        const keyStr = (currentMemberKey as any).toBase58 ? (currentMemberKey as any).toBase58() : new PublicKey(currentMemberKey).toBase58()
-        remainingAccounts.push({ pubkey: new PublicKey(keyStr), isWritable: true, isSigner: false })
-        const memberItem = memberMap.get(keyStr)
-        currentMemberKey = memberItem?.account?.nextMember ?? null
-      }
+        txs.push(tx)
 
-      for (const item of poolProposals) {
-        const p = item.account
-        const stateIsActive = p.state.open || p.state.queued
-        const isVotingActive = currentCycle.gte(p.votingCycle)
-        const isDeadline = currentCycle.gte(p.deadlineCycle)
-        const isThresholdMetMode = parseExecutionMode(p.executionMode) === 'threshold_met'
-        const propThreshold = p.voteThreshold ?? poolAccount.voteThreshold
-        const passed = p.yesVotes >= propThreshold && p.yesVotes > p.noVotes
-        const shouldResolve = isThresholdMetMode ? (passed || isDeadline) : isDeadline
-
-        if (stateIsActive && isVotingActive && shouldResolve) {
-          remainingAccounts.push({ pubkey: item.publicKey, isWritable: true, isSigner: false })
-          if (p.action.setSpenderLimit) {
-            const targetMember = p.action.setSpenderLimit.member
-            remainingAccounts.push({ pubkey: targetMember, isWritable: true, isSigner: false })
-            const [spenderCyclePda] = PublicKey.findProgramAddressSync(
-              [Buffer.from('cycle'), poolPubkey.toBuffer(), targetMember.toBuffer(), nextCycle.toArrayLike(Buffer, 'le', 8)],
-              programId
-            )
-            remainingAccounts.push({ pubkey: spenderCyclePda, isWritable: true, isSigner: false })
+        if (!shouldRollAll || rolloverPlan.isComplete) {
+          done = true
+        } else {
+          currentPool = await program.account.pool.fetch(poolPubkey)
+          if (!currentPool.rolloverCursor) {
+            done = true
           }
         }
       }
 
-      const tx = await program.methods
-        .testRollCycle()
-        .accounts({
-          pool: poolPubkey,
-        })
-        .remainingAccounts(remainingAccounts)
-        .rpc()
+      return {
+        tx: txs[txs.length - 1],
+        txs,
+        pool: poolAddress,
+        chunksRolled: txs.length,
+      }
+    }
 
-      return { tx, pool: poolAddress }
+    case 'test_roll_cycle': {
+      const { poolAddress, chunkSize, allChunks } = payload
+      if (!poolAddress) throw new Error('Missing poolAddress for test_roll_cycle')
+      if (chunkSize !== undefined && (typeof chunkSize !== 'number' || chunkSize <= 0)) {
+        throw new Error('Invalid chunkSize: must be a positive number')
+      }
+      const poolPubkey = new PublicKey(poolAddress)
+      const program = await getProgram()
+      const effectiveChunkSize = chunkSize ?? DEFAULT_CHUNK_SIZE
+      const shouldRollAll = allChunks ?? true
+      const txs: string[] = []
+
+      let currentPool = await program.account.pool.fetch(poolPubkey)
+      let done = false
+
+      while (!done) {
+        const poolMembers = await program.account.member.all([
+          { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+        ])
+        const poolProposals = await program.account.proposal.all([
+          { memcmp: { offset: 8, bytes: poolPubkey.toBase58() } },
+        ])
+
+        const rolloverPlan = buildRolloverRemainingAccounts(
+          poolPubkey,
+          currentPool,
+          poolMembers,
+          poolProposals,
+          { chunkSize: effectiveChunkSize, programId }
+        )
+
+        const tx = await program.methods
+          .testRollCycle()
+          .accounts({
+            pool: poolPubkey,
+          })
+          .remainingAccounts(rolloverPlan.remainingAccounts)
+          .rpc()
+
+        txs.push(tx)
+
+        if (!shouldRollAll || rolloverPlan.isComplete) {
+          done = true
+        } else {
+          currentPool = await program.account.pool.fetch(poolPubkey)
+          if (!currentPool.rolloverCursor) {
+            done = true
+          }
+        }
+      }
+
+      return {
+        tx: txs[txs.length - 1],
+        txs,
+        pool: poolAddress,
+        chunksRolled: txs.length,
+      }
     }
 
     case 'test_advance_cycles': {
