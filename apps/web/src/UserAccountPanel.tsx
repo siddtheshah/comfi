@@ -33,12 +33,23 @@ export function UserAccountPanel() {
       const key = await accountChainContext(new Connection(wallet.endpoint, 'confirmed'), base)
       const raw = localStorage.getItem(key)
       if (raw) parseCredentialRecord(raw)
-      if (alive.current) { setStorageKey(key); setSaved(Boolean(raw)) }
+      if (alive.current) { setAccount(null); setStorageKey(key); setSaved(Boolean(raw)) }
     }
     void check().catch(value => { if (alive.current) setError(value instanceof Error ? value.message : String(value)) })
       .finally(() => { if (alive.current) setChecking(false) })
     return () => { alive.current = false; document.removeEventListener('visibilitychange', clearPasscode) }
   }, [wallet.network, wallet.endpoint, wallet.walletMode, wallet.publicKey])
+
+  const logout = () => {
+    if (operation.current || busy) return
+    setAccount(null)
+    setPasscode('')
+    setConfirmation('')
+    setProfile('')
+    setSignature('')
+    setError('')
+    setNotice('Logged out of UserAccount.')
+  }
 
   const run = async (action: 'load' | 'create' | 'update') => {
     if (operation.current) return
@@ -155,7 +166,8 @@ export function UserAccountPanel() {
             <button className="primary" type="submit" disabled={busy || checking || !storageKey}>
               {busy ? 'Working…' : account ? 'Send test update' : saved ? 'Create or recover account' : 'Create UserAccount'}
             </button>
-            {saved && <button className="ghost" type="button" onClick={() => void run('load')} disabled={busy || !storageKey || !passcode}>Load account</button>}
+            {saved && !account && <button className="ghost" type="button" onClick={() => void run('load')} disabled={busy || !storageKey || !passcode}>Load account</button>}
+            {account && <button className="ghost" type="button" onClick={logout} disabled={busy}>Log out</button>}
           </div>
         </form>
         {checking && <p role="status">Checking the localnet account program…</p>}

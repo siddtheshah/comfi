@@ -35,16 +35,32 @@ test('create, reload, and update a passcode-authenticated UserAccount on the rea
   expect(saved![1]).not.toContain(passcode)
   expect(saved![1]).not.toContain('privateKey')
 
-  await page.reload()
-  await page.getByRole('button', { name: 'User account', exact: true }).click()
-  await page.getByRole('button', { name: 'Use ComFi base wallet' }).click()
+  // Log out of the loaded UserAccount and verify state resets
+  await expect(page.getByRole('button', { name: 'Log out', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Log out', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText('Logged out of UserAccount')
+  await expect(page.getByTestId('user-account-address')).toBeHidden()
+  await expect(page.getByRole('button', { name: 'Load account', exact: true })).toBeVisible()
+
+  // Attempt loading with a wrong passcode while logged out
   await page.getByLabel('Browser passcode', { exact: true }).fill('wrong account passcode')
   await page.getByRole('button', { name: 'Load account', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('Incorrect passcode')
   expect(await page.evaluate(key => localStorage.getItem(key), saved![0])).toBe(saved![1])
+
+  // Log back in with the correct passcode
   await page.getByLabel('Browser passcode', { exact: true }).fill(passcode)
   await page.getByRole('button', { name: 'Load account', exact: true }).click()
   await expect(page.getByTestId('user-account-address')).toHaveText(user)
+  await expect(page.getByRole('button', { name: 'Log out', exact: true })).toBeVisible()
+
+  await page.reload()
+  await page.getByRole('button', { name: 'User account', exact: true }).click()
+  await page.getByRole('button', { name: 'Use ComFi base wallet' }).click()
+  await page.getByLabel('Browser passcode', { exact: true }).fill(passcode)
+  await page.getByRole('button', { name: 'Load account', exact: true }).click()
+  await expect(page.getByTestId('user-account-address')).toHaveText(user)
+
   const label = 'My first ComFi profile'
   await page.getByLabel('Profile label', { exact: true }).fill(label)
   await page.getByLabel('Browser passcode', { exact: true }).fill(passcode)
