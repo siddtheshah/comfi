@@ -86,6 +86,64 @@ pub fn validate_create_pool(paused_new_pools: bool, args: &CreatePoolArgs) -> Re
     Ok(())
 }
 
+pub fn authenticate_program_upgrade_authority(
+    administrator: &Pubkey,
+    program_data: Option<&AccountInfo>,
+) -> Result<()> {
+    #[cfg(not(any(test, feature = "testing")))]
+    let is_test_mode = false;
+    #[cfg(any(test, feature = "testing"))]
+    let is_test_mode = true;
+
+    authenticate_program_upgrade_authority_internal(administrator, program_data, is_test_mode)
+}
+
+pub fn authenticate_program_upgrade_authority_internal(
+    administrator: &Pubkey,
+    program_data: Option<&AccountInfo>,
+    is_test_mode: bool,
+) -> Result<()> {
+    let (expected_program_data, _) = Pubkey::find_program_address(
+        &[crate::ID.as_ref()],
+        &anchor_lang::solana_program::bpf_loader_upgradeable::id(),
+    );
+
+    if let Some(program_data_acc) = program_data {
+        if program_data_acc.key != &expected_program_data {
+            return err!(ComfiError::Unauthorized);
+        }
+        if program_data_acc.owner != &anchor_lang::solana_program::bpf_loader_upgradeable::id() {
+            return err!(ComfiError::Unauthorized);
+        }
+        let data = program_data_acc
+            .try_borrow_data()
+            .map_err(|_| ComfiError::Unauthorized)?;
+        if data.len() < 45 {
+            return err!(ComfiError::Unauthorized);
+        }
+        let tag = u32::from_le_bytes(
+            data[0..4]
+                .try_into()
+                .map_err(|_| ComfiError::Unauthorized)?,
+        );
+        if tag != 3 {
+            return err!(ComfiError::Unauthorized);
+        }
+        if data[12] != 1 {
+            return err!(ComfiError::Unauthorized);
+        }
+        if &data[13..45] != administrator.as_ref() {
+            return err!(ComfiError::Unauthorized);
+        }
+        Ok(())
+    } else {
+        if !is_test_mode {
+            return err!(ComfiError::Unauthorized);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Accounts)]
 pub struct InitializeGlobalConfig<'info> {
     #[account(mut)]
@@ -96,6 +154,8 @@ pub struct InitializeGlobalConfig<'info> {
     #[account(init, payer = administrator, space = GlobalConfig::SPACE, seeds = [b"global"], bump)]
     pub global: Account<'info, GlobalConfig>,
     pub system_program: Program<'info, System>,
+    /// CHECK: Optional program data account used to authenticate the program upgrade authority during initialization.
+    pub program_data: Option<UncheckedAccount<'info>>,
 }
 
 #[derive(Accounts)]
@@ -162,6 +222,11 @@ pub mod deployer_handlers {
         ctx: Context<InitializeGlobalConfig>,
         quote_authority: Pubkey,
     ) -> Result<()> {
+        authenticate_program_upgrade_authority(
+            &ctx.accounts.administrator.key(),
+            ctx.accounts.program_data.as_deref(),
+        )?;
+
         let global = &mut ctx.accounts.global;
         global.administrator = ctx.accounts.administrator.key();
         global.usdc_mint = ctx.accounts.usdc_mint.key();
@@ -501,5 +566,178 @@ mod tests {
         // Next pool id increment
         config.next_pool_id = config.next_pool_id.checked_add(1).unwrap();
         assert_eq!(config.next_pool_id, 1);
+    }
+
+    fn mock_program_data_buffer(authority: &Pubkey) -> Vec<u8> {
+        let mut data = vec![0u8; 45];
+        data[0..4].copy_from_slice(&3u32.to_le_bytes());
+        data[4..12].copy_from_slice(&100u64.to_le_bytes());
+        data[12] = 1;
+        data[13..45].copy_from_slice(authority.as_ref());
+        data
+    }
+
+    #[test]
+    fn test_authenticate_program_upgrade_authority_valid_succeeds() {
+        let admin = Pubkey::new_unique();
+        let (expected_program_data, _) = Pubkey::find_program_address(
+            &[crate::ID.as_ref()],
+            &anchor_lang::solana_program::bpf_loader_upgradeable::id(),
+        );
+        let mut lamports = 100_000_000;
+        let mut data = mock_program_data_buffer(&admin);
+        let owner = anchor_lang::solana_program::bpf_loader_upgradeable::id();
+        let account_info = AccountInfo::new(
+            &expected_program_data,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+        );
+
+        // Succeeds in both test mode and production mode
+        assert!(authenticate_program_upgrade_authority_internal(&admin, Some(&account_info), false).is_ok());
+        assert!(authenticate_program_upgrade_authority(&admin, Some(&account_info)).is_ok());
+    }
+
+    #[test]
+    fn test_authenticate_program_upgrade_authority_unauthorized_attacker_fails() {
+        let admin = Pubkey::new_unique();
+        let attacker = Pubkey::new_unique();
+        let (expected_program_data, _) = Pubkey::find_program_address(
+            &[crate::ID.as_ref()],
+            &anchor_lang::solana_program::bpf_loader_upgradeable::id(),
+        );
+        let mut lamports = 100_000_000;
+        let mut data = mock_program_data_buffer(&admin);
+        let owner = anchor_lang::solana_program::bpf_loader_upgradeable::id();
+        let account_info = AccountInfo::new(
+            &expected_program_data,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+        );
+
+        let err = authenticate_program_upgrade_authority_internal(&attacker, Some(&account_info), false).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        let err2 = authenticate_program_upgrade_authority(&attacker, Some(&account_info)).unwrap_err();
+        assert_eq!(err2, ComfiError::Unauthorized.into());
+    }
+
+    #[test]
+    fn test_authenticate_program_upgrade_authority_forged_account_or_owner_fails() {
+        let admin = Pubkey::new_unique();
+        let (expected_program_data, _) = Pubkey::find_program_address(
+            &[crate::ID.as_ref()],
+            &anchor_lang::solana_program::bpf_loader_upgradeable::id(),
+        );
+        let mut lamports = 100_000_000;
+        let mut data = mock_program_data_buffer(&admin);
+        let owner = anchor_lang::solana_program::bpf_loader_upgradeable::id();
+
+        // Forged account address
+        let fake_key = Pubkey::new_unique();
+        let fake_acc = AccountInfo::new(
+            &fake_key,
+            false,
+            false,
+            &mut lamports,
+            &mut data,
+            &owner,
+            false,
+        );
+        let err = authenticate_program_upgrade_authority(&admin, Some(&fake_acc)).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // Forged owner
+        let fake_owner = Pubkey::new_unique();
+        let mut data2 = mock_program_data_buffer(&admin);
+        let fake_owner_acc = AccountInfo::new(
+            &expected_program_data,
+            false,
+            false,
+            &mut lamports,
+            &mut data2,
+            &fake_owner,
+            false,
+        );
+        let err2 = authenticate_program_upgrade_authority(&admin, Some(&fake_owner_acc)).unwrap_err();
+        assert_eq!(err2, ComfiError::Unauthorized.into());
+    }
+
+    #[test]
+    fn test_authenticate_program_upgrade_authority_malformed_buffer_fails() {
+        let admin = Pubkey::new_unique();
+        let (expected_program_data, _) = Pubkey::find_program_address(
+            &[crate::ID.as_ref()],
+            &anchor_lang::solana_program::bpf_loader_upgradeable::id(),
+        );
+        let mut lamports = 100_000_000;
+        let owner = anchor_lang::solana_program::bpf_loader_upgradeable::id();
+
+        // Too short (< 45 bytes)
+        let mut short_data = vec![0u8; 44];
+        let short_acc = AccountInfo::new(
+            &expected_program_data,
+            false,
+            false,
+            &mut lamports,
+            &mut short_data,
+            &owner,
+            false,
+        );
+        let err = authenticate_program_upgrade_authority(&admin, Some(&short_acc)).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // Wrong tag (not 3, e.g. 2 for Program)
+        let mut bad_tag_data = mock_program_data_buffer(&admin);
+        bad_tag_data[0..4].copy_from_slice(&2u32.to_le_bytes());
+        let bad_tag_acc = AccountInfo::new(
+            &expected_program_data,
+            false,
+            false,
+            &mut lamports,
+            &mut bad_tag_data,
+            &owner,
+            false,
+        );
+        let err2 = authenticate_program_upgrade_authority(&admin, Some(&bad_tag_acc)).unwrap_err();
+        assert_eq!(err2, ComfiError::Unauthorized.into());
+
+        // Option tag not Some(1)
+        let mut none_opt_data = mock_program_data_buffer(&admin);
+        none_opt_data[12] = 0;
+        let none_opt_acc = AccountInfo::new(
+            &expected_program_data,
+            false,
+            false,
+            &mut lamports,
+            &mut none_opt_data,
+            &owner,
+            false,
+        );
+        let err3 = authenticate_program_upgrade_authority(&admin, Some(&none_opt_acc)).unwrap_err();
+        assert_eq!(err3, ComfiError::Unauthorized.into());
+    }
+
+    #[test]
+    fn test_authenticate_program_upgrade_authority_missing_program_data() {
+        let admin = Pubkey::new_unique();
+
+        // Non-test mode: strictly rejects with Unauthorized
+        let err = authenticate_program_upgrade_authority_internal(&admin, None, false).unwrap_err();
+        assert_eq!(err, ComfiError::Unauthorized.into());
+
+        // Test mode: allows None
+        let ok = authenticate_program_upgrade_authority_internal(&admin, None, true);
+        assert!(ok.is_ok());
+        let ok_default = authenticate_program_upgrade_authority(&admin, None);
+        assert!(ok_default.is_ok());
     }
 }

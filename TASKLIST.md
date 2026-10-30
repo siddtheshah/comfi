@@ -96,6 +96,6 @@
 - [x] [Completed: Subagent-AUD-01] COMFI-AUD-01: Scale decision denominators and votes by voter funded cycles over proposal lifetime
 - [x] [Completed: Subagent-SEC-10] COMFI-SEC-10: Member departures corrupt or block linked-list rollover
 - [x] [Completed: Subagent-AUD-06] COMFI-AUD-06: Evicting a nonvoter incorrectly reduces the eligible electorate
-- [ ] [Claimed: Subagent-AUD-07 | Deadline: 2026-10-30T02:00:00Z] COMFI-AUD-07: Singleton global initialization trusts the first arbitrary signer
+- [x] [Completed: Subagent-AUD-07] COMFI-AUD-07: Singleton global initialization trusts the first arbitrary signer
 - [ ] COMFI-AUD-08: Shipped rollover clients are incompatible with current account fields and chunking
 - [ ] COMFI-AUD-14: Pre-funding a candidate member PDA blocks admission

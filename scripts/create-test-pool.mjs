@@ -102,7 +102,18 @@ if (!mint || !(await connection.getAccountInfo(mint))) mint = await createMint(c
 const treasury = globalAccount ? { address: globalAccount.treasuryUsdc } : await getOrCreateAssociatedTokenAccount(connection, administrator, mint, administrator.publicKey);
 
 if (!globalAccount) {
-  await program.methods.initializeGlobalConfig(quoteAuthority.publicKey).accounts({ administrator: administrator.publicKey, usdcMint: mint, treasuryUsdc: treasury.address, global }).rpc();
+  const bpfLoaderUpgradeable = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
+  const [programData] = PublicKey.findProgramAddressSync([programId.toBuffer()], bpfLoaderUpgradeable);
+  await program.methods
+    .initializeGlobalConfig(quoteAuthority.publicKey)
+    .accounts({
+      administrator: administrator.publicKey,
+      usdcMint: mint,
+      treasuryUsdc: treasury.address,
+      global,
+      programData,
+    })
+    .rpc();
   globalAccount = await program.account.globalConfig.fetch(global);
 }
 if (!globalAccount.usdcMint.equals(mint) || !globalAccount.treasuryUsdc.equals(treasury.address)) throw new Error('Existing GlobalConfig uses a different mint or treasury. Reset localnet and delete .localnet before retrying.');

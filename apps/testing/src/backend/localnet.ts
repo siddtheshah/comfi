@@ -406,6 +406,9 @@ export async function executeAction(action: string, payload: any): Promise<any> 
       const mint = await createMint(connection, wallets.administrator, wallets.administrator.publicKey, null, usdcDecimals)
       const treasury = await getOrCreateAssociatedTokenAccount(connection, wallets.administrator, mint, wallets.administrator.publicKey)
 
+      const bpfLoaderUpgradeable = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111')
+      const [programData] = PublicKey.findProgramAddressSync([programId.toBuffer()], bpfLoaderUpgradeable)
+
       const tx = await program.methods
         .initializeGlobalConfig(wallets.quoteAuthority.publicKey)
         .accounts({
@@ -413,6 +416,7 @@ export async function executeAction(action: string, payload: any): Promise<any> 
           usdcMint: mint,
           treasuryUsdc: treasury.address,
           global: globalPda,
+          programData,
         })
         .signers([wallets.administrator])
         .rpc()

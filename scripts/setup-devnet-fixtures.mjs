@@ -86,6 +86,8 @@ if (existingGlobal) {
   const treasury = await getOrCreateAssociatedTokenAccount(connection, deployer, testMint, deployer.publicKey);
   treasuryTokenAccount = treasury.address;
   createTreasuryTokenAccountSignature = await latestSignature(connection, treasuryTokenAccount);
+  const bpfLoaderUpgradeable = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
+  const [programData] = PublicKey.findProgramAddressSync([programId.toBuffer()], bpfLoaderUpgradeable);
   initializeGlobalConfig = await program.methods
     .initializeGlobalConfig(quoteAuthority.publicKey)
     .accounts({
@@ -93,6 +95,7 @@ if (existingGlobal) {
       usdcMint: testMint,
       treasuryUsdc: treasuryTokenAccount,
       global: globalConfig,
+      programData,
     })
     .rpc();
 }
